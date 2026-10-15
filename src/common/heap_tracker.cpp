@@ -36,6 +36,8 @@ HeapTracker::~HeapTracker() = default;
 
 void HeapTracker::Map(size_t virtual_offset, size_t host_offset, size_t length,
                       MemoryPermission perm, bool is_separate_heap) {
+    std::scoped_lock operation_lk{m_operation_lock};
+
     // When mapping other memory, map pages immediately.
     if (!is_separate_heap) {
         m_buffer.Map(virtual_offset, host_offset, length, perm, false);
@@ -65,6 +67,8 @@ void HeapTracker::Map(size_t virtual_offset, size_t host_offset, size_t length,
 }
 
 void HeapTracker::Unmap(size_t virtual_offset, size_t size, bool is_separate_heap) {
+    std::scoped_lock operation_lk{m_operation_lock};
+
     // If this is a separate heap...
     if (is_separate_heap) {
         std::scoped_lock lk{m_lock};
@@ -103,6 +107,8 @@ void HeapTracker::Unmap(size_t virtual_offset, size_t size, bool is_separate_hea
 }
 
 void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission perm) {
+    std::scoped_lock operation_lk{m_operation_lock};
+
     // Ensure no rebuild occurs while reprotecting.
     std::shared_lock lk{m_rebuild_lock};
 
@@ -112,6 +118,8 @@ void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission p
     // Declare tracking variables.
     const VAddr end = virtual_offset + size;
     VAddr cur = virtual_offset;
+    VAddr protect_begin = 0;
+    size_t protect_size = 0;
 
     while (cur < end) {
         VAddr next = cur;
@@ -148,13 +156,22 @@ void HeapTracker::Protect(size_t virtual_offset, size_t size, MemoryPermission p
 
         // Clamp to end.
         next = (std::min)(next, end);
-        // Reprotect, if we need to.
+        // Combine adjacent resident spans, but never protect a nonresident placeholder.
         if (should_protect) {
-            m_buffer.Protect(cur, next - cur, perm);
+            if (protect_size == 0) {
+                protect_begin = cur;
+            }
+            protect_size += next - cur;
+        } else if (protect_size != 0) {
+            m_buffer.Protect(protect_begin, protect_size, perm);
+            protect_size = 0;
         }
 
         // Advance.
         cur = next;
+    }
+    if (protect_size != 0) {
+        m_buffer.Protect(protect_begin, protect_size, perm);
     }
 }
 

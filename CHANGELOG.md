@@ -14,6 +14,7 @@
 - Cancel superseded bytes in queued asynchronous GPU readbacks so retired jobs cannot overwrite newer CPU data or consume a fresh readback's ownership.
 - Make Vulkan buffer readbacks visible to host reads before CPU publication, invalidate noncoherent mappings, and protect staging-pool metadata during asynchronous retirement.
 - Honor requested GPU-buffer preservation on NCE write faults without requiring the optional readback workaround.
+- Experimental (fork only): coalesce adjacent resident heap-protection spans while serializing mapping/protection operations. Thor memory-permission and backing checks pass; repeated Z-A station measurements do not establish an FPS improvement.
 
 ## 1.2.1
 

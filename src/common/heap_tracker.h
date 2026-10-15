@@ -88,6 +88,8 @@ private:
     Common::HostMemory& m_buffer;
     const s64 m_max_resident_map_count;
 
+    // ponytail: serialize mapping/protection; use virtual-range locks if contention dominates.
+    std::mutex m_operation_lock{};
     std::shared_mutex m_rebuild_lock{};
     std::mutex m_lock{};
     s64 m_map_count{};
