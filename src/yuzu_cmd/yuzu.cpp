@@ -1234,10 +1234,12 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         }
     }
 
+#ifndef _WIN32
     std::signal(SIGUSR1, ScreenshotSignalHandler);
     std::signal(SIGUSR2, ButtonSignalHandler);
     LOG_INFO(Frontend, "screenshots: kill -USR1 {} writes {}-screen1.png / -screen2.png", getpid(),
              g_screenshot_prefix);
+#endif
 
     // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
     state->system.GPU().Start();
