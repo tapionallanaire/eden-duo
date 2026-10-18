@@ -111,7 +111,7 @@ private:
     MemoryAllocator& memory_allocator;
     Scheduler& scheduler;
 
-    // ponytail: serialize pool metadata; stable allocation handles if contention matters.
+    // Serializes pool metadata; stable allocation handles would avoid the lock if it contends.
     std::mutex mutex;
 
     vk::Buffer stream_buffer;

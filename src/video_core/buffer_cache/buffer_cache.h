@@ -192,7 +192,7 @@ template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     async_downloads.DeleteAll(device_addr, size);
     // A cancelled job must not publish against credits added by a later snapshot.
-    // ponytail: trim queued copies in place; use validity sets if cancellation fragmentation grows.
+    // Queued copies are trimmed in place; use validity sets if cancellations fragment them.
     const DAddr cancelled_end = device_addr + size;
     for (auto& downloads : pending_downloads) {
         const size_t count = downloads.size();
@@ -743,7 +743,7 @@ void BufferCache<P>::PopAsyncBuffers() {
         async_downloads.Subtract(device_addr, copy.size, [&](DAddr start, DAddr end) {
             // Newer writes awaiting a snapshot still own their exact GPU ranges.
             DAddr cursor = start;
-            // ponytail: one query per pending set per span; merge cursors if queued sets grow.
+            // One query per pending set per span; merge the cursors if the queued sets grow.
             while (cursor < end) {
                 DAddr protected_start = end;
                 DAddr protected_end = end;
