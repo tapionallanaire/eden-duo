@@ -15,10 +15,11 @@ def isNightly = providers.gradleProperty('nightly').getOrNull() == 'true'
 
 android {
     defaultConfig {
-        applicationId = 'dev.igawa6.edenduo'
-        // Eden Duo release version (shown to users); versionCode stays upstream's time-based
+        // Duet Plus: Eden Duo with extra fixes, under its own ID so it installs beside Eden Duo.
+        applicationId = 'com.tapionallanaire.duetplus'
+        // Duet Plus release version (shown to users); versionCode stays upstream's time-based
         // value so every new build installs as an update.
-        versionName = '1.3.1'
+        versionName = '1.0.0'
 
         externalNativeBuild {
             cmake {
@@ -61,7 +62,7 @@ android {
     }
 
     productFlavors.getByName('mainline') {
-        manifestPlaceholders['appNameBase'] = 'Eden Duo'
+        manifestPlaceholders['appNameBase'] = 'Duet Plus'
     }
 
     productFlavors.all { flavor ->
