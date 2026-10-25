@@ -163,6 +163,9 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vertex_input_dynamic_state, true);
             // FXAA smears its character faces; native resolution keeps them sharp without it.
             DefaultForTitle(Settings::values.anti_aliasing, Settings::AntiAliasing::None);
+            // DIAGNOSTIC (temporary): run its macros through the microcode interpreter instead of
+            // the HLE path, to tell whether the blown-out battle characters come from macro HLE.
+            Settings::values.disable_macro_hle = true;
             LOG_INFO(Core, "Title defaults: GPU {}, DMA {}, async GPU {}, reactive flushing {}, "
                            "EDS {}, vertex input {}, docked {}",
                      Settings::CanonicalizeEnum(Settings::values.gpu_accuracy.GetValue()),

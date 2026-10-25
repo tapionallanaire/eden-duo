@@ -22,6 +22,11 @@
 
 namespace Tegra::Engines {
 
+namespace {
+// DIAGNOSTIC (temporary): how many macro calls to log; topped up after a parameter mismatch.
+int macro_diag_budget = 300;
+} // Anonymous namespace
+
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
 
@@ -393,6 +398,17 @@ void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, const std::vec
     const u32 entry =
         ((method - MacroRegistersStart) >> 1) % static_cast<u32>(macro_positions.size());
 
+    // DIAGNOSTIC (temporary): name the macros around a parameter mismatch. Remove with the
+    // FINAL FANTASY RESONANCE disable_macro_hle probe in game_settings.cpp.
+    if (macro_diag_budget-- > 0) {
+        const auto at = [&parameters](std::size_t i) {
+            return i < parameters.size() ? parameters[i] : 0U;
+        };
+        LOG_INFO(HW_GPU,
+                 "[MacroDiag] method={:#x} entry={} code={:#x} params={} first={:#x},{:#x},{:#x},{:#x}",
+                 method, entry, macro_positions[entry], parameters.size(), at(0), at(1), at(2), at(3));
+    }
+
     // Execute the current macro.
     macro_engine.Execute(system, *this, macro_positions[entry], parameters);
     draw_manager.DrawDeferred(*this);
@@ -408,6 +424,10 @@ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument
                    method, executing_macro + 1, method_argument, is_last_call,
                    current_dma_segment, macro_params.size(), macro_segments.size(),
                    current_macro_dirty);
+    }
+    if (executing_macro != 0 && method != executing_macro + 1) {
+        // DIAGNOSTIC (temporary): log the macros that follow this desync.
+        macro_diag_budget = 40;
     }
 
     // Methods after 0xE00 are special, they're actually triggers for some microcode that was
