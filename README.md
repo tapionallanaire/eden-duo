@@ -1,160 +1,67 @@
-<p align="center">
-  <img src="src/android/app/src/main/res/drawable/ic_yuzu.png" width="128" alt="Eden Duo">
-</p>
-
-<h1 align="center">Eden Duo</h1>
+<h1 align="center">Duet Plus</h1>
 
 <p align="center">
-  A Nintendo Switch emulator for Android dual-screen handhelds, with live companion screens on the second display.
+  A Nintendo Switch emulator for Android dual-screen handhelds, tuned for stability on the AYN Thor.
 </p>
 
-<div align="center">
-  <a href="https://discord.gg/r6vBWKAqCK"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>&nbsp;<a href="https://ko-fi.com/igawa6"><img src="https://img.shields.io/badge/Support_me_on_Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>&nbsp;<a href="https://ko-fi.com/polls/5th-Poll-Next-Switch-Game-on-Eden-Duo-Y2S729BJ48"><img src="https://img.shields.io/badge/%F0%9F%97%B3%EF%B8%8F_Next_Game_Poll-1ABC9C?style=for-the-badge" alt="Poll"></a>
-</div>
+<p align="center">
+  <a href="https://github.com/tapionallanaire/duet-plus/releases/latest"><img src="https://img.shields.io/github/v/release/tapionallanaire/duet-plus?style=for-the-badge&label=Download" alt="Download"></a>
+</p>
 
----
+## Why Duet Plus
 
-Eden Duo is a fork of the [Eden](https://git.eden-emu.dev/eden-emu/eden) Switch emulator for Android devices with two screens, such as the AYN Thor. The game runs on the top screen as usual. The bottom screen shows a touch **companion** for the game you are playing: maps, party and inventory menus, status, and more, all driven by the running game's live state.
+Duet Plus fixes crashes, freezes and rendering problems in games that are hard to run on Adreno handhelds:
 
-Companions are separate, installable **`.dsmod.zip` packages**, one per game, so a companion can be updated without updating the emulator. This repository holds the emulator source code and the Eden Duo APK. Companion packages, their documentation and screenshots live in **[Eden Duo Companions](https://github.com/igawa6/eden-duo-companions)**.
+| Game | What's fixed |
+|------|--------------|
+| FINAL FANTASY RESONANCE | Crashes, freezes, red-tinted characters, blinking battle HUD and dialogue, missing objects |
+| Pokémon Legends: Z-A | 30 FPS on the Thor without vanishing geometry |
+| Double Dragon Revive | Stalls and flickering scenery |
+| Dragon Quest VII Reimagined, Fire Emblem Engage | Characters and lights blown out to white |
 
-## Supported Games
-
-| No | Game | Title ID | Patch Version | Contributor/<br>Supporter |
-|---:|------|----------|---------------|:---------:|
-| 1 | [Persona 5 Royal](https://github.com/igawa6/eden-duo-companions#persona-5-royal) | `01005CA01580E000` | 1.0.2 | 🥇<br><a href="https://www.reddit.com/user/gymgooner123"><img src="https://img.shields.io/badge/gymgooner123-FF4500?style=flat-square&logo=reddit&logoColor=white" style="vertical-align: middle;" alt="gymgooner123"></a> |
-| 2 | [Metroid Dread](https://github.com/igawa6/eden-duo-companions#metroid-dread) | `010093801237C000` | 2.1.0 | |
-| 3 | [The Legend of Zelda: Link's Awakening](https://github.com/igawa6/eden-duo-companions#the-legend-of-zelda-links-awakening) | `01006BB00C6F0000` | 1.0.1 | |
-| 4 | [Mario Kart 8 Deluxe](https://github.com/igawa6/eden-duo-companions#mario-kart-8-deluxe) (also with CTGP-DX v1.1.1) | `0100152000022000` | 4.0.0, 3.0.3 | |
-| 5 | [Super Mario Bros. Wonder](https://github.com/igawa6/eden-duo-companions#super-mario-bros-wonder) | `010015100B514000` | 1.2.1 | ⭐<br><a href="https://www.patreon.com/cw/KalebPowell"><img src="https://img.shields.io/badge/KalebPowell-FF424D?style=flat-square&logo=patreon&logoColor=white" style="vertical-align: middle;" alt="KalebPowell"></a> |
-| 6 | [Animal Crossing: New Horizons](https://github.com/igawa6/eden-duo-companions#animal-crossing-new-horizons) | `01006F8002326000` | 3.0.3 | 🥇<br><a href="https://ko-fi.com/W5J3253HW9"><img src="https://img.shields.io/badge/MsMeriBerry-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="MsMeriBerry"></a> |
-| 7 | [Fire Emblem: Three Houses](https://github.com/igawa6/eden-duo-companions#fire-emblem-three-houses) | `010055D009F78000` | 1.2.0 | |
-| 8 | [The Binding of Isaac: Afterbirth+ and Repentance DLC](https://github.com/igawa6/eden-duo-companions#the-binding-of-isaac-afterbirth-and-repentance-dlc) | `010021C000B6A000` | 1.7.9b | 🥇<br><a href="https://ko-fi.com/U3I527XBIL"><img src="https://img.shields.io/badge/Armando_Chacon-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Armando Chacon"></a> |
-| 9 | [Pokémon Brilliant Diamond / Luminescent Platinum](https://github.com/igawa6/eden-duo-companions#pokemon-brilliant-diamond-luminescent-platinum) | `0100000011D90000` | 1.3.0 (vanilla or Luminescent Platinum 2.2F) | 🗳️<br><a href="https://ko-fi.com/polls/Next-Switch-Game-on-Eden-Duo-M0V127VUYA"><img src="https://img.shields.io/badge/Poll_Winner-1ABC9C?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Poll Winner"></a> |
-| 10 | [Pokémon Shining Pearl / Luminescent Platinum](https://github.com/igawa6/eden-duo-companions#pokemon-shining-pearl-luminescent-platinum) | `010018E011D92000` | 1.3.0 (vanilla or Luminescent Platinum 2.2F) | 🗳️<br><a href="https://ko-fi.com/polls/Next-Switch-Game-on-Eden-Duo-M0V127VUYA"><img src="https://img.shields.io/badge/Poll_Winner-1ABC9C?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Poll Winner"></a> |
-| 11 | [Crash Team Racing Nitro-Fueled](https://github.com/igawa6/eden-duo-companions#crash-team-racing-nitro-fueled) | `0100F9F00C696000` | 1.0.15 | |
-| 12 | [Dragon Quest III HD-2D Remake](https://github.com/igawa6/eden-duo-companions#dragon-quest-iii-hd-2d-remake) | `01003E601E324000` | 1.1.0.0 | 🥇<br><a href="https://ko-fi.com/G0I027XSOG"><img src="https://img.shields.io/badge/jzc-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="jzc"></a> |
-| 13 | [Chained Echoes](https://github.com/igawa6/eden-duo-companions#chained-echoes) | `0100C510166F0000` | 1.41 | 🥇<br><a href="https://ko-fi.com/U7U31RLL6S"><img src="https://img.shields.io/badge/Jadesigns-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Jadesigns"></a> |
-| 14 | [Yoru Tomosu](https://github.com/igawa6/eden-duo-companions#yoru-tomosu) | `0100C2901153C000` | 1.0.0 | 🥇<br><a href="https://ko-fi.com/igawa6/commissions"><img src="https://img.shields.io/badge/Anon.-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Anon."></a> |
-| 15 | [Diablo III: Eternal Collection](https://github.com/igawa6/eden-duo-companions#diablo-iii-eternal-collection) | `01001B300B9BE000` | 2.7.7, 2.7.6 | 🥇<br><a href="https://ko-fi.com/Z2B723BQK6"><img src="https://img.shields.io/badge/shy-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="shy"></a> |
-| 16 | [Farming Simulator: Nintendo Switch Edition](https://github.com/igawa6/eden-duo-companions#farming-simulator-nintendo-switch-edition) | `0100D04004176000` | 1.5.0.1 | 🥇<br><a href="https://ko-fi.com/igawa6/commissions"><img src="https://img.shields.io/badge/Anon.-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Anon."></a> |
-| 17 | [VA-11 Hall-A: Cyberpunk Bartender Action](https://github.com/igawa6/eden-duo-companions#va-11-hall-a-cyberpunk-bartender-action) | `010086500D3C8000` | 1.0.0 | ⭐<br><a href="https://ko-fi.com/matinc"><img src="https://img.shields.io/badge/Mati-F16061?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Mati"></a> |
-| 18 | [The Legend of Zelda: Breath of the Wild](https://github.com/igawa6/eden-duo-companions#the-legend-of-zelda-breath-of-the-wild) | `01007EF00011E000` | 1.6.0 | 🗳️<br><a href="https://ko-fi.com/polls/2nd-Poll-Next-Switch-Game-on-Eden-Duo-Q6B3284653"><img src="https://img.shields.io/badge/Poll_Winner-1ABC9C?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Poll Winner"></a> |
-| 19 | [Castlevania: Belmont's Curse](https://github.com/igawa6/eden-duo-companions#castlevania-belmonts-curse) | `0100BA4026E94000` | 1.1.0 | 🥇<br><a href="https://www.reddit.com/user/gymgooner123"><img src="https://img.shields.io/badge/gymgooner123-FF4500?style=flat-square&logo=reddit&logoColor=white" style="vertical-align: middle;" alt="gymgooner123"></a> |
-| 20 | [Super Mario Odyssey](https://github.com/igawa6/eden-duo-companions#super-mario-odyssey) | `0100000000010000` | 1.4.1 | 🥈<br><a href="https://ko-fi.com/s/9e92af191b"><img src="https://img.shields.io/badge/Chip_In-C0C0C0?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Chip In"></a> |
-| 21 | [The Legend of Zelda: Echoes of Wisdom](https://github.com/igawa6/eden-duo-companions#the-legend-of-zelda-echoes-of-wisdom) | `01008CF01BAAC000` | 1.1.0 | 🗳️<br><a href="https://ko-fi.com/polls/3rd-Poll-Next-Switch-Game-on-Eden-Duo-C7J128KB48"><img src="https://img.shields.io/badge/Poll_Winner-1ABC9C?style=flat-square&logo=ko-fi&logoColor=white" style="vertical-align: middle;" alt="Poll Winner"></a> |
-
-⭐ Companion contributor. Big thanks for your mods creation!
-
-🥇 Commissioned companion. Huge thanks for your support!
-
-🗳️ Poll winner. Thanks to everyone who voted!
-
-🥈 Chip-in companion. Thanks to everyone who chipped in!  
-<br>
-
-Compatibility is intentionally strict. Each companion is written for exact game builds and checks the running build before it loads. On any other version it does not load and shows a notice, instead of reading memory it does not understand.
-
-Details, screenshots and downloads for each companion: **[Eden Duo Companions](https://github.com/igawa6/eden-duo-companions)**.
+It also hardens the GPU emulation against bad command data, accepts newer audio renderer revisions and improves VP9 video. See [Releases](https://github.com/tapionallanaire/duet-plus/releases) for the full list.
 
 ## Features
 
-- **Second-screen companion.** The game on the main screen, and a touch companion page on the second display.
-- **Live game state.** Companions read the running game's memory every frame. There are no save-file snapshots and no polling delays.
-- **Installable packages.** Add a companion from the game's *Add-ons* menu with its `.dsmod.zip`. Packages are validated (title, build, file layout and module checksums) before they are installed.
-- **Native companion modules.** A package can carry a small native module for games whose data is too complex for a declarative manifest. Modules talk to the emulator through a small, versioned C interface and never ship inside the APK.
-- **Touch that feels native.** Taps, press-and-hold gestures, drag and drop, animated page and layout changes, and haptic feedback on the second screen.
+- **Second-screen companion.** The game on the main screen, and a touch companion page on the second display, reading the running game's memory every frame.
+- **Installable companions.** Add a companion from the game's *Add-ons* menu with its `.dsmod.zip`; packages are validated before they are installed.
 - **Second screen your way.** Swap the screens, stretch the companion, or open another app on the second screen for games without a companion.
-- **Built for handhelds.** Change-driven partial redraws, tile-based texture uploads and an optional GPU compositor keep the second screen at full frame rate without costing the game frames.
-
-## What's New
-
-See the [changelog](CHANGELOG.md).
+- **Per-game fixes built in.** Games that need special settings get them automatically; your own per-game settings always win.
 
 ## Requirements
 
 - Android 13 or newer, arm64 (`arm64-v8a`).
 - A device with a second display (developed and tested on the AYN Thor).
 - Your own legally obtained game dump, the matching update, and your console's keys and firmware.
-- The exact game version listed in [Supported Games](#supported-games).
 
 ## Install
 
-1. Download the latest `EdenDuo-*.apk` from [Releases](https://github.com/igawa6/eden-duo/releases) and install it.
-2. Set up the emulator as usual: keys, firmware, and your games folder.
-3. Download a companion package from [Eden Duo Companions](https://github.com/igawa6/eden-duo-companions).
-4. In Eden Duo, long-press the game, open **Add-ons** and tap **Install**. In the **Content type** dialog choose **Dual screen mods**, tap **OK**, then select the `.dsmod.zip` file. The companion appears in the Add-ons list as `<Name>-<version>`, for example `MetroidDreadDS-1.0.0`.
-5. Launch the game. The companion appears on the second screen once the game reaches gameplay.
+1. Download the latest `duet-plus-*.apk` from [Releases](https://github.com/tapionallanaire/duet-plus/releases) and install it.
+2. Set up the emulator: keys, firmware, and your games folder.
+3. Optional: install a companion. Long-press the game, open **Add-ons**, tap **Install**, choose **Dual screen mods** and select the `.dsmod.zip`.
 
-![Installing a companion: Add-ons, Install, Dual screen mods](dist/screenshots/addons_dualscreen.png)
-
-Eden Duo uses its own app ID (`dev.igawa6.edenduo`), so it installs alongside other Eden builds and keeps separate data.
-
-## Launching from a Frontend
-
-| Frontend | Setup |
-|----------|-------|
-| [CocoonFE](https://github.com/inssekt/CocoonFE) | Built in, thanks to [cream-neapolitan](https://github.com/cream-neapolitan). In Cocoon, open **Settings → Library & Data → Refetch Platforms**. Then, for each game you want on Eden Duo, open the game's settings and set **Player Override** to **Eden Duo**. |
-| [ES-DE](https://es-de.org) (Android) | Copy [`es-de/es_systems.xml`](dist/frontends/es-de/es_systems.xml) and [`es-de/es_find_rules.xml`](dist/frontends/es-de/es_find_rules.xml) into `ES-DE/custom_systems/` and restart ES-DE. **Eden Duo (Standalone)** becomes the default Switch emulator. |
-
-The ES-DE files are the upstream files from [es-de-android-custom-systems](https://github.com/GlazedBelmont/es-de-android-custom-systems), with only the Eden Duo entries added.
+Duet Plus uses its own app ID (`com.tapionallanaire.duetplus`), so it installs beside other Switch emulators and keeps separate data.
 
 ## Second Screen
 
-Second-screen options are in **Settings → Graphics → Second Screen**. Each game can also have its own values: long-press the game, open **Settings → Graphics → Second Screen**. A game's own value overrides the global one. Long-press a setting there to reset it to the global value.
+Second-screen options are in **Settings → Graphics → Second Screen**. Each game can have its own values: long-press the game, open **Settings → Graphics → Second Screen**. A game's own value overrides the global one; long-press a setting to reset it.
 
 | Setting | Options | What it does |
 |---------|---------|--------------|
-| **Swap Screens** | On / Off | Switch which display runs the game and which shows the companion. Choose the layout that suits your dual-screen handheld, including Retroid or AYANEO Android devices with an extra display. Works from the game list and from frontends. |
+| **Swap Screens** | On / Off | Switch which display runs the game and which shows the companion. |
 | **Companion Ratio** | Fit (default) / Stretch | Fit keeps the companion's shape and adds bars if needed. Stretch fills the screen. |
-| **No Companion** | Icon (default) / Black / Off / App | What the second screen does for a game without a companion. Icon shows the game icon dimmed on black. Black leaves it black. Off opens no window, so the second screen is free for other apps. App launches your chosen guide app, browser, media player or another installed app on the second/bottom screen when the game starts; pick it in the **App** row below, with search. Until you choose one, App works like Off. |
-
-- No Companion can be changed while a game runs. It applies when you return to the game (Icon and Black from the next start).
-- With Swap Screens on and a game that has no companion, Off (or App with no app chosen) keeps the game on the main screen.
-
-### Set Swap Screens for a Game
-
-Put gameplay on the display you prefer and keep the companion within easy reach on the other. This is especially useful when a Retroid or AYANEO Android handheld's extra display gives you a different layout from a built-in dual-screen device.
-
-1. In the game list, **long-press the game** and open **Settings**.
-2. Open **Graphics → Second Screen**.
-3. Set **Swap Screens** to **On** to put the game on the second display and the companion on the main display. Set it to **Off** to keep the game on the main display.
-4. Start the game from Eden Duo or your frontend. It uses that game's saved screen layout.
-
-This choice is **per game**. To use one layout as the default, change **Settings → Graphics → Second Screen → Swap Screens** from Eden Duo's main settings. Long-press the per-game setting to restore the global default.
-
-### Open Another App on the Bottom Screen for a Game
-
-A game without a companion can still make good use of both screens. Keep a walkthrough in a guide app or browser, play media, or open another installed app on the second/bottom screen alongside the game.
-
-1. In the game list, **long-press the game** and open **Settings**.
-2. Open **Graphics → Second Screen**.
-3. Set **No Companion** to **App**.
-4. Open the **App** row and search for the installed guide app, browser, media player or other app you want to launch.
-5. Start the game. Eden Duo launches the chosen app on the second/bottom display for games without a companion. In a browser, open the guide you want to use.
-
-The app choice is **per game**: choose a guide app for one game and a media player for another. You can also set a default from Eden Duo's main **Settings → Graphics → Second Screen** settings. Long-press a per-game setting to inherit the global choice.
-
-For a quiet screen, choose **Icon** or **Black**; choose **Off** to leave it available for apps you open yourself. Icon/Black changes during play take full effect on the next game start.
-
-## Contribute to Another Game
-
-Eden Duo is not limited to the games above. Anyone can write a companion for another game and ship it as a `.dsmod.zip`, without changing or rebuilding the emulator. Runtime 19 gives you pages declared in JSON, plus an optional native module for game data that JSON cannot reach. AI assistance is welcome: let an assistant do the repetitive reverse engineering, then check every value against the game's own screens.
-
-Start here: [Contribute to Another Game](https://github.com/igawa6/eden-duo-companions/blob/main/docs/CONTRIBUTE.md)
-
-Game-specific module sources, tests and build targets live in [eden-duo-companions/native](https://github.com/igawa6/eden-duo-companions/tree/main/native). This repository provides the generic runtime and shared ABI/SDK.
+| **No Companion** | Icon (default) / Black / Off / App | What the second screen shows for a game without a companion. App launches a guide app, browser, media player or any installed app on the second screen when the game starts. |
 
 ## Build
 
-Requirements: JDK 17, Android SDK 36, NDK 28.2.13676358, CMake 3.31.6.
+Requirements: JDK 17, Android SDK 36, NDK 28.2.13676358, CMake 3.31.6, and `glslangValidator` on `PATH`.
 
 ```sh
 cd src/android
 export ANDROID_HOME=$HOME/Android/Sdk
 export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358
 
-# Local test build ("Eden Duo Dev", installs beside the release build)
+# Local test build (installs beside the release build)
 ./gradlew assembleMainlineRelWithDebInfo
 
 # Release build, signed with your own key
@@ -164,54 +71,14 @@ export ANDROID_KEY_ALIAS=...
 ./gradlew assembleMainlineRelease
 ```
 
-The APK is written to `src/android/app/build/outputs/apk/mainline/<buildType>/`.
-
-A desktop build (`eden-cli`) is supported for companion development. It can run a companion headlessly and capture both screens.
-
-## How It Works
-
-The dual-screen runtime lives in `src/core/mods/`. Each tick it:
-
-1. Samples the game: memory points, pointer chains, and the companion's native module.
-2. Evaluates derived values and handles touch input.
-3. Redraws only what changed on the companion page.
-4. Hands the page to the second display.
-
-The package format, the module interface and the method used to build a companion for a new game are documented in the [Eden Duo Companions docs](https://github.com/igawa6/eden-duo-companions/tree/main/docs).
-
-## Repository Layout
-
-Eden Duo is upstream Eden plus a small, game-agnostic layer. Nothing in this repository knows about a particular game: no title IDs, memory offsets, asset formats or game names live in the runtime. Everything specific to a game is a companion package, loaded at run time from the companions repository.
-
-| Path | Contents |
-|------|----------|
-| `src/core/mods/` | The dual-screen runtime: manifest parser, sampling, derived values, page renderer, touch and controller input, the native-module host. Generic by design — every feature is driven by manifest keys and published values. |
-| `src/video_core/dsmod/` | The second-screen compositor and the aux-display routing in the renderer. |
-| `src/android/app/src/duo/`, `app/duo.gradle` | The Android branding and the Eden Duo app layer (library badges, companion fetch, second display). |
-| `src/yuzu_cmd/dsmod_harness.*` | The desktop test harness built into `eden-cli`: a virtual or windowed second screen (`--aux-virtual`, `--aux-window`), headless screenshots and scripted input, so a companion can be developed and tested on a PC before it reaches a device. |
-| `src/tests/core/mods/` | Unit and golden tests for the runtime. |
-| `tools/duo/`, `.upstream/` | How this fork tracks Eden nightly: the sync script, the ledger of upstream files Duo touches, and the list of deliberate divergences. |
-
-Reverse-engineering notes, per-game research, capture tooling and the maintainer's own workflow are not part of this repository; only the runtime, its tests and the tools needed to build and keep it in sync with upstream are published.
+The APK is written to `src/android/app/build/outputs/apk/mainline/<buildType>/`. A desktop build (`eden-cli`) builds on Linux and on Windows with clang-cl.
 
 ## Game Assets
 
-Eden Duo and its companions ship **no game assets**. Companion art and text are decoded at runtime from the player's own game files. Game data, keys, firmware and ROMs must not be uploaded to this repository or its releases.
+Duet Plus ships **no game assets, keys, firmware or ROMs**. Do not upload any to this repository or its releases.
 
-## AI Assistance
+## License
 
-Eden Duo was developed with AI assistance. The dual-screen runtime, the companion modules and the reverse engineering of each game were written with an AI coding assistant, then reviewed, tested and verified on real hardware.
+Duet Plus is free software, released under the [GNU General Public License v3.0](LICENSE.txt). It is not affiliated with or endorsed by Nintendo; all trademarks belong to their respective owners.
 
-If anything is wrong with Eden Duo, report issues here rather than to upstream Eden.
-
-## Kind Words from Eden Dev
-
-![Kind Words from Eden Dev](dist/screenshots/kind_words.png)
-
-## Credits and License
-
-Eden Duo is based on the open-source [Eden](https://git.eden-emu.dev/eden-emu/eden) emulator and its predecessors.
-
-Eden Duo is an independent fork. It is not affiliated with or endorsed by the Eden project or Nintendo. All trademarks belong to their respective owners.
-
-Eden Duo is free software, released under the [GNU General Public License v3.0](LICENSE.txt).
+<sub>Based on [Eden Duo](https://github.com/igawa6/eden-duo) and [Eden](https://git.eden-emu.dev/eden-emu/eden).</sub>
