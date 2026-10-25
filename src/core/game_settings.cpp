@@ -154,6 +154,7 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
 
     Settings::values.delay_fence_reports_by_title = false;
     Settings::values.fix_fp16_denormals_by_title = false;
+    Settings::values.disable_macro_hle_by_title = false;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -166,10 +167,19 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             break;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
-        case TitleID::FinalFantasyResonance:
-            // Their effect shaders divide by fp16 subnormals; flushed to zero the result goes
+            // Its effect shaders divide by fp16 subnormals; flushed to zero the result goes
             // inf/NaN and the bloom blows characters and lights out to white.
             Settings::values.fix_fp16_denormals_by_title = true;
+            break;
+        case TitleID::FinalFantasyResonance:
+            // As Fire Emblem Engage and Dragon Quest VII above, and in addition: its battle
+            // characters are drawn through a GPU macro whose HLE version inherits the parameters
+            // of the macros the game issues before its argument register arrives, which blows
+            // their materials out to white. The microcode interpreter reads only the parameters
+            // its program uses and draws them correctly, at the same frame rate, so give this
+            // title the interpreter.
+            Settings::values.fix_fp16_denormals_by_title = true;
+            Settings::values.disable_macro_hle_by_title = true;
             break;
         default:
             break;

@@ -955,6 +955,9 @@ struct Values {
     // Turn fix_fp16_denormals on for the running title unless the player set it for that game
     // (set at load, never saved).
     bool fix_fp16_denormals_by_title{};
+    // Run the running title's GPU macros through the microcode interpreter instead of their HLE
+    // versions (set at load, never saved).
+    bool disable_macro_hle_by_title{};
 
 };
 
