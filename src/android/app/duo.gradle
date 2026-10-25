@@ -19,7 +19,7 @@ android {
         applicationId = 'com.tapionallanaire.duetplus'
         // Duet Plus release version (shown to users); versionCode stays upstream's time-based
         // value so every new build installs as an update.
-        versionName = '1.1.1'
+        versionName = '1.1.2'
 
         externalNativeBuild {
             cmake {
