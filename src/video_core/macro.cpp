@@ -1344,7 +1344,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                                   method](AnyCachedMacro& cached) {
         if (std::holds_alternative<MacroInterpreterImpl>(cached) ||
             std::holds_alternative<std::unique_ptr<DynamicCachedMacro>>(cached) ||
-            Settings::values.disable_macro_hle) {
+            Settings::values.disable_macro_hle || Settings::values.disable_macro_hle_by_title) {
             maxwell3d.RefreshParameters();
         }
 
@@ -1414,7 +1414,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
 
     auto& ci = macro_cache[method];
     ci.hash = Common::HashRange(code.begin(), code.end());
-    if (!Settings::values.disable_macro_hle) {
+    if (!Settings::values.disable_macro_hle && !Settings::values.disable_macro_hle_by_title) {
         ci.program = GetHLEProgram(ci.hash);
     }
     if (std::holds_alternative<std::monostate>(ci.program)) {
