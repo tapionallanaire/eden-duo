@@ -455,10 +455,16 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             Log.warning("[EmulationFragment] Failed to load Freedreno config: ${e.message}")
         }
 
-        emulationState = EmulationState(game!!.path, game!!.programId) {
-            return@EmulationState driverViewModel.isInteractionAllowed.value &&
-                !isStoppingForRomSwap
-        }
+        emulationState = EmulationState(
+            game!!.path,
+            game!!.programId,
+            {
+                driverViewModel.isInteractionAllowed.value && !isStoppingForRomSwap
+            },
+            { titleId, beforePlay ->
+                if (beforePlay) cloudBeforePlay(titleId) else cloudAfterPlay(titleId)
+            }
+        )
     }
 
     /**
@@ -2449,10 +2455,105 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
     }
 
+    // ---- Eden Duo: Google Drive saves ----
+
+    /**
+     * Pulls the title's save before the game boots. A disagreement with the cloud is settled here,
+     * before anything is written: with the "ask" policy the user picks a side, on the main thread,
+     * while this worker waits.
+     */
+    private fun cloudBeforePlay(titleId: String) {
+        val ctx = context?.applicationContext ?: return
+        if (titleId.isEmpty()) return
+        val policy = org.yuzu.yuzu_emu.cloud.CloudSavesSettings.policy(ctx)
+        val outcome = org.yuzu.yuzu_emu.cloud.SaveSync.sync(ctx, titleId, policy)
+        if (outcome is org.yuzu.yuzu_emu.cloud.SaveSync.Outcome.Conflict) {
+            val keepLocal = askCloudConflict(ctx, titleId, outcome.remoteTime)
+            toastOutcome(ctx, org.yuzu.yuzu_emu.cloud.SaveSync.resolve(ctx, titleId, keepLocal))
+        } else {
+            toastOutcome(ctx, outcome)
+        }
+    }
+
+    /**
+     * Pushes this session's save when the game stops. A disagreement here cannot be asked about
+     * (the game is already gone): this device's save is uploaded and the cloud copy is kept beside
+     * it as a conflict file, so neither version is lost.
+     */
+    private fun cloudAfterPlay(titleId: String) {
+        val ctx = context?.applicationContext ?: return
+        if (titleId.isEmpty()) return
+        val policy = org.yuzu.yuzu_emu.cloud.CloudSavesSettings.policy(ctx)
+        val outcome = org.yuzu.yuzu_emu.cloud.SaveSync.sync(ctx, titleId, policy)
+        if (outcome is org.yuzu.yuzu_emu.cloud.SaveSync.Outcome.Conflict) {
+            toastOutcome(ctx, org.yuzu.yuzu_emu.cloud.SaveSync.resolve(ctx, titleId, true))
+        }
+    }
+
+    /** Blocks this worker until the user answers; keeps this device's save if nobody does. */
+    private fun askCloudConflict(
+        ctx: android.content.Context,
+        titleId: String,
+        remoteTime: Long
+    ): Boolean {
+        val activity = emulationActivity ?: return true
+        val localTime = org.yuzu.yuzu_emu.cloud.SaveSync.saveDir(ctx, titleId)
+            .walkTopDown().filter { it.isFile }.maxOfOrNull { it.lastModified() } ?: 0L
+        val keepLocal = java.util.concurrent.atomic.AtomicBoolean(true)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val format = java.text.DateFormat.getDateTimeInstance()
+        activity.runOnUiThread {
+            com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
+                .setTitle(R.string.cloud_conflict_title)
+                .setMessage(
+                    activity.getString(
+                        R.string.cloud_conflict_message,
+                        format.format(java.util.Date(localTime)),
+                        format.format(java.util.Date(remoteTime))
+                    )
+                )
+                .setPositiveButton(R.string.cloud_conflict_keep_device_button) { _, _ ->
+                    keepLocal.set(true)
+                    latch.countDown()
+                }
+                .setNegativeButton(R.string.cloud_conflict_use_cloud_button) { _, _ ->
+                    keepLocal.set(false)
+                    latch.countDown()
+                }
+                .setOnCancelListener { latch.countDown() }
+                .show()
+        }
+        latch.await(120, java.util.concurrent.TimeUnit.SECONDS)
+        return keepLocal.get()
+    }
+
+    private fun toastOutcome(
+        ctx: android.content.Context,
+        outcome: org.yuzu.yuzu_emu.cloud.SaveSync.Outcome
+    ) {
+        val message = when (outcome) {
+            is org.yuzu.yuzu_emu.cloud.SaveSync.Outcome.Synced -> when (outcome.action) {
+                org.yuzu.yuzu_emu.cloud.SyncAction.UPLOAD -> ctx.getString(R.string.cloud_sync_uploaded)
+                org.yuzu.yuzu_emu.cloud.SyncAction.DOWNLOAD -> ctx.getString(R.string.cloud_sync_downloaded)
+                else -> null
+            }
+
+            is org.yuzu.yuzu_emu.cloud.SaveSync.Outcome.Failed ->
+                ctx.getString(R.string.cloud_sync_failed, outcome.message)
+
+            else -> null
+        } ?: return
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(ctx, message, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private class EmulationState(
         private val gamePath: String,
         private val programId: String,
-        private val emulationCanStart: () -> Boolean
+        private val emulationCanStart: () -> Boolean,
+        // Eden Duo: cloud saves. (titleId, beforePlay) - before the game boots and after it stops.
+        private val cloudSync: (String, Boolean) -> Unit = { _, _ -> }
     ) {
         private var state: State
         private var surface: Surface? = null
@@ -2598,10 +2699,14 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         private fun runEmulation(programIndex: Int, frontendInitiated: Boolean) {
             GameHelper.onEmulationStarting(gamePath, programId)
+            // Eden Duo: the cloud save is in place before the game reads it...
+            cloudSync(programId, true)
             try {
                 NativeLibrary.run(gamePath, programIndex, frontendInitiated)
             } finally {
                 GameHelper.onEmulationStopped()
+                // ...and this session's save leaves once the game has stopped writing.
+                cloudSync(programId, false)
             }
         }
 

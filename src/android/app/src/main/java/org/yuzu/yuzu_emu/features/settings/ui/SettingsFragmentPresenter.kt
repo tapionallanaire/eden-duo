@@ -43,7 +43,8 @@ class SettingsFragmentPresenter(
     private val settingsViewModel: SettingsViewModel,
     private val adapter: SettingsAdapter,
     private var menuTag: MenuTag,
-    private var activity: FragmentActivity?
+    private var activity: FragmentActivity?,
+    private val onCloudAction: ((org.yuzu.yuzu_emu.cloud.CloudSavesSettings.Action) -> Unit)? = null
 ) {
     private var settingsList = ArrayList<SettingsItem>()
 
@@ -580,6 +581,12 @@ class SettingsFragmentPresenter(
             // Eden Duo: Second Screen settings only exist on a device that has a second screen.
             if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(context)) {
                 org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            }
+
+            // Eden Duo: Google Drive saves. The rows exist on every device; signing in needs the
+            // OAuth client of this build, and the account row says so when it is missing.
+            onCloudAction?.let { action ->
+                org.yuzu.yuzu_emu.cloud.CloudSavesSettings.addTo(this, context, action)
             }
         }
     }

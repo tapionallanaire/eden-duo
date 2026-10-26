@@ -38,4 +38,16 @@
         <item>2</item>
         <item>3</item>
     </integer-array>
+    <!-- Eden Duo: Settings -> Google Drive saves -->
+    <string-array name="cloudConflictChoices">
+        <item>@string/cloud_conflict_ask</item>
+        <item>@string/cloud_conflict_keep_device</item>
+        <item>@string/cloud_conflict_use_cloud</item>
+    </string-array>
+    <integer-array name="cloudConflictValues">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </integer-array>
+
 </resources>

@@ -50,6 +50,19 @@ class SettingsFragment : Fragment() {
 
     private val settingsViewModel: SettingsViewModel by activityViewModels()
 
+    /** Eden Duo: Google sign-in for cloud saves. The picker owns the consent UI. */
+    private val cloudSignInLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@registerForActivityResult
+        try {
+            org.yuzu.yuzu_emu.cloud.CloudAuth.onSignInResult(requireContext(), result.data)
+        } catch (e: java.io.IOException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+        }
+        presenter.loadSettingsList(true)
+    }
+
     private val requestAllFilesPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
@@ -96,7 +109,7 @@ class SettingsFragment : Fragment() {
             settingsAdapter!!,
             args.menuTag,
             activity
-        )
+        ) { action -> handleCloudAction(action) }
 
         val toolbarTitle = resolveToolbarTitle()
         configureToolbar(toolbarTitle)
@@ -426,4 +439,24 @@ private fun getPlayerIndex(): Int =
             }
             .show()
     }
+    /** Eden Duo: Google Drive save rows. Sign-in needs an activity; the account row is a tap. */
+    private fun handleCloudAction(action: org.yuzu.yuzu_emu.cloud.CloudSavesSettings.Action) {
+        val context = requireContext()
+        when (action) {
+            org.yuzu.yuzu_emu.cloud.CloudSavesSettings.Action.SIGN_IN -> {
+                if (!org.yuzu.yuzu_emu.cloud.CloudAuth.isConfigured(context)) {
+                    Toast.makeText(context, R.string.cloud_not_configured, Toast.LENGTH_LONG).show()
+                    return
+                }
+                cloudSignInLauncher.launch(org.yuzu.yuzu_emu.cloud.CloudAuth.signInIntent(context))
+            }
+
+            org.yuzu.yuzu_emu.cloud.CloudSavesSettings.Action.SIGN_OUT -> {
+                org.yuzu.yuzu_emu.cloud.CloudAuth.signOut(context)
+                Toast.makeText(context, R.string.cloud_signed_out, Toast.LENGTH_SHORT).show()
+                presenter.loadSettingsList(true)
+            }
+        }
+    }
+
 }

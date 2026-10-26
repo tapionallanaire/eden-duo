@@ -341,6 +341,7 @@ dependencies {
     implementation("androidx.preference:preference-ktx:1.2.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.android.gms:play-services-auth:21.2.0")
     implementation("io.coil-kt:coil:2.2.2")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.2")
