@@ -2483,6 +2483,9 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private fun cloudAfterPlay(titleId: String) {
         val ctx = context?.applicationContext ?: return
         if (titleId.isEmpty()) return
+        // A shader warm-up run writes a throwaway save that the launch restores afterwards, so it
+        // must not reach the cloud. Read by key, because the warm-up feature is not in this branch.
+        if ((activity?.intent?.getIntExtra("org.yuzu.yuzu_emu.WARMUP_MINUTES", 0) ?: 0) > 0) return
         val policy = org.yuzu.yuzu_emu.cloud.CloudSavesSettings.policy(ctx)
         val outcome = org.yuzu.yuzu_emu.cloud.SaveSync.sync(ctx, titleId, policy)
         if (outcome is org.yuzu.yuzu_emu.cloud.SaveSync.Outcome.Conflict) {
