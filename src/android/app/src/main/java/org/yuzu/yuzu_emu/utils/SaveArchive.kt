@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 igawa6
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package org.yuzu.yuzu_emu.cloud
+package org.yuzu.yuzu_emu.utils
 
 import java.io.File
 import java.io.IOException

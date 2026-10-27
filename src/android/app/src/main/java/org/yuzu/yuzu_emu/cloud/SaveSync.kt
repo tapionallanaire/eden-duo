@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONObject
 import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.SaveArchive
 
 /**
  * Eden Duo: a game's save folder, kept in step with the one in the user's Drive.
