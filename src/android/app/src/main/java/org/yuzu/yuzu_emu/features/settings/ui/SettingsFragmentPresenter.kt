@@ -577,7 +577,10 @@ class SettingsFragmentPresenter(
             add(IntSetting.VERTICAL_ALIGNMENT.key)
             add(BooleanSetting.PICTURE_IN_PICTURE.key)
 
-            org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            // Eden Duo: Second Screen settings only exist on a device that has a second screen.
+            if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(context)) {
+                org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            }
         }
     }
 

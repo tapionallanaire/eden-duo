@@ -306,7 +306,15 @@ void OnRenderWindowTeardown() {
 
 } // namespace DSModSession
 
+#include "video_core/dsmod/duo_switch.h"
+
 extern "C" {
+
+// Eden Duo: the frontend tells us once whether this device has a second panel at all.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_setDuoAvailable(JNIEnv* env, jobject instance,
+                                                           jboolean available) {
+    VideoCore::DSMod::SetDuoEnabled(static_cast<bool>(available));
+}
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_auxSurfaceChanged(JNIEnv* env, jobject instance,
                                                              jobject surf) {

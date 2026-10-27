@@ -44,6 +44,13 @@ class AuxCompanionActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Eden Duo: nothing starts this on a device without a second panel (a stale launch
+        // request, or a frontend intent), and starting it would only add a window nobody sees.
+        if (org.yuzu.yuzu_emu.duo.DuoCapability.isSingleScreen(this)) {
+            Log.info("[AuxCompanion] single-screen device; closing")
+            finishCompanion(this)
+            return
+        }
         // Only the game starts this. Recreated by the system after a process restart or once
         // the game let it go, there is no game to be the second screen of. A recreation for a
         // configuration change not listed in the manifest is kept: the game still wants it,

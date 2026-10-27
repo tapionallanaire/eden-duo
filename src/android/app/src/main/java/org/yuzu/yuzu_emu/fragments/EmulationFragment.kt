@@ -916,6 +916,12 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                     true
                 }
 
+                // Eden Duo: give back what the renderer caches when the device is short on memory.
+                R.id.menu_recover_memory -> {
+                    org.yuzu.yuzu_emu.utils.MemoryGuard.recoverWithToast(requireContext())
+                    true
+                }
+
                 // Eden Duo: hide / show the second-screen companion (CompanionToggle).
                 R.id.menu_toggle_companion -> {
                     org.yuzu.yuzu_emu.duo.CompanionToggle.toggle(requireContext())
@@ -1644,12 +1650,25 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         addQuickSettings()
         dualScreen.onResume()
-        b.surfaceInputOverlay.touchscreenFilter = dualScreen.gameTouch::filter // Eden Duo
+        // Eden Duo: the companion toggle gesture only exists where a companion window can.
+        if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+            // Eden Duo: the companion gesture exists only where there is a companion to toggle.
+            b.surfaceInputOverlay.touchscreenFilter =
+                if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+                    dualScreen.gameTouch::filter
+                } else {
+                    null
+                }
+        }
     }
 
     // Eden Duo: the in-game menu's companion toggle names what it will do.
     private fun updateCompanionMenuEntry() {
         val item = _binding?.inGameMenu?.menu?.findItem(R.id.menu_toggle_companion) ?: return
+        // Eden Duo: no second panel, no companion to hide or show.
+        val duoAvailable = org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())
+        item.isVisible = duoAvailable
+        if (!duoAvailable) return
         item.title = getString(
             if (dualScreen.isCompanionHiddenByUser) {
                 R.string.companion_toggle_show

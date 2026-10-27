@@ -8,6 +8,7 @@ package org.yuzu.yuzu_emu.activities
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -252,8 +253,21 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         return super.onKeyDown(keyCode, event)
     }
 
+    /**
+     * Eden Duo: Android asks us to give memory back before it kills the process. Collect the
+     * renderer's caches so the game survives what would otherwise look like a crash.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            org.yuzu.yuzu_emu.utils.MemoryGuard.recover(this)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        // Eden Duo: if the device is already tight, say so before Android closes the game.
+        org.yuzu.yuzu_emu.utils.MemoryGuard.warnIfLow(this)
         nfcReader.startScanning()
         startMotionSensorListener()
         InputHandler.updateControllerData()

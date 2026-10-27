@@ -40,6 +40,13 @@ class DualScreenEmulationController(
     private val secondScreenTitle: () -> String?,
     private val emulationStarted: () -> Boolean
 ) {
+    /**
+     * Eden Duo: a single-screen device gets none of this. Every entry point asks this first, so
+     * nothing is created, no display listener is registered and no window is shown or retried.
+     */
+    private val duoSingleScreen: Boolean
+        get() = DuoCapability.isSingleScreen(fragment.context)
+
     private companion object {
         const val AUX_RETRY_DELAY_MS = 300L
         const val IDLE_RECHECK_ATTEMPTS = 20 // x AUX_RETRY_DELAY_MS
@@ -159,6 +166,11 @@ class DualScreenEmulationController(
     }
 
     fun onStart() {
+        if (duoSingleScreen) {
+            auxWanted = false
+            Log.info("[EmulationFragment] DSMod: single-screen device, Duo disabled")
+            return
+        }
         auxWanted = true
         CompanionToggle.register(this)
         displayManager()?.let { dm ->
@@ -208,6 +220,7 @@ class DualScreenEmulationController(
      * a companion and never starts the No Companion app. Main thread.
      */
     fun toggleCompanion(nowMs: Long): CompanionToggleOutcome {
+        if (duoSingleScreen) return CompanionToggleOutcome.NO_SECOND_SCREEN
         val game = emulationActivity() ?: fragment.activity
         val outcome = toggleState.toggle(nowMs, windowState(), game != null && hasSecondScreen(game))
         Log.info("[EmulationFragment] DSMod: companion toggle: $outcome")
@@ -258,7 +271,7 @@ class DualScreenEmulationController(
 
     /** Coalesces bursts of display events into one attempt. */
     private fun scheduleAuxRetry() {
-        if (!auxWanted) return
+        if (!auxWanted || duoSingleScreen) return
         auxHandler.removeCallbacks(auxRetry)
         auxHandler.postDelayed(auxRetry, AUX_RETRY_DELAY_MS)
     }
@@ -279,6 +292,7 @@ class DualScreenEmulationController(
      */
     private fun dropIdleCompanion() {
         auxHandler.removeCallbacks(idleRecheck)
+        if (duoSingleScreen) return
         if (!emulationStarted()) return
         if (auxOff) {
             // Closes the window regardless of how onGameResolved and showAuxPresentation raced
@@ -338,6 +352,7 @@ class DualScreenEmulationController(
 
     /** No Companion App: opens the chosen app, once per boot; on failure, the Icon page. */
     private fun launchCompanionApp() {
+        if (duoSingleScreen) return
         if (companionAppTried) return
         val game = emulationActivity() ?: return
         companionAppTried = true
@@ -350,6 +365,7 @@ class DualScreenEmulationController(
     }
 
     private fun showAuxPresentation() {
+        if (duoSingleScreen) return
         if (!toggleState.allowsAutoShow()) return
         if (isAuxOff()) return
         // Eden Duo: with the game on a secondary display the second screen is the default one,

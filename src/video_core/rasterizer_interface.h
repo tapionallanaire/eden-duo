@@ -158,6 +158,10 @@ public:
     /// Notify rasterizer that a frame is about to finish
     virtual void TickFrame() = 0;
 
+    /// Eden Duo: give back host memory that is no longer needed (cache garbage collection) when the
+    /// device reports low memory. Runs on the GPU thread; the default does nothing.
+    virtual void RecoverMemory() {}
+
     virtual bool AccelerateConditionalRendering() {
         return false;
     }

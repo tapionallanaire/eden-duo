@@ -1932,4 +1932,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
         <item quantity="other">Copied %d saves</item>
     </plurals>
 
+    <!-- Eden Duo: memory guard -->
+    <string name="memory_low_title">Low memory</string>
+    <string name="memory_low_message">Android is running out of memory (%1$s). Eden can be closed without warning while a game runs. Close other apps, or free what Eden is holding right now.</string>
+    <string name="memory_free_now">Free memory</string>
+    <string name="memory_close_game">Close Eden</string>
+    <string name="memory_recovered">Freed %1$d MB</string>
+    <string name="memory_already_clean">Nothing to reclaim right now (%1$s)</string>
+    <string name="menu_recover_memory">Recover memory</string>
 </resources>

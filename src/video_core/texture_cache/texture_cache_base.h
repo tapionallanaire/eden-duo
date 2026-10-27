@@ -150,6 +150,8 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     };
 
 public:
+    /// Eden Duo: collect unused entries now (memory pressure), instead of on the next insert.
+    void PurgeUnused();
     explicit TextureCache(Runtime&, Tegra::MaxwellDeviceMemoryManager&);
 
     /// Notify the cache that a new frame has been queued

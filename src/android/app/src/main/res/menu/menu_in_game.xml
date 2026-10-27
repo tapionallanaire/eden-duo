@@ -45,6 +45,11 @@
         android:title="@string/companion_toggle_hide" />
 
     <item
+        android:id="@+id/menu_recover_memory"
+        android:icon="@drawable/ic_dual_screen"
+        android:title="@string/menu_recover_memory" />
+
+    <item
         android:id="@+id/menu_load_amiibo"
         android:icon="@drawable/ic_nfc"
         android:title="@string/load_amiibo" />

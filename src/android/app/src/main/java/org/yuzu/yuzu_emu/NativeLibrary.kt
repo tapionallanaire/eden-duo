@@ -746,6 +746,12 @@ object NativeLibrary {
     // DSMod second-screen surface
     external fun auxSurfaceChanged(surf: Surface)
 
+    /** Eden Duo: false on a single-screen device, which turns the whole Duo path off. */
+    external fun setDuoAvailable(available: Boolean)
+
+    /** Eden Duo: drop cached host resources (textures, buffers) and return the heap to the OS. */
+    external fun recoverMemory()
+
     external fun auxSurfaceDestroyed()
 
     /**
