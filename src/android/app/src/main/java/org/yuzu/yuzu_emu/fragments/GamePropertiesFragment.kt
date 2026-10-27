@@ -555,6 +555,22 @@ class GamePropertiesFragment : Fragment() {
                         )
                     )
                 }
+                // Eden Duo: shader warm-up. A cache only grows while the game runs, so this is a
+                // time-boxed run of the title with its saves put back afterwards.
+                add(
+                    SubmenuProperty(
+                        R.string.warm_up_shaders,
+                        R.string.warm_up_shaders_description,
+                        R.drawable.ic_play,
+                        details = {
+                            val game = args.game
+                            val count = org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(game)
+                            requireContext().getString(R.string.warm_up_shader_count, count)
+                        },
+                        action = { showWarmUpPicker() }
+                    )
+                )
+
                 if (NativeLibrary.playTimeManagerGetPlayTime(args.game.programId) > 0) {
                     add(
                         SubmenuProperty(
@@ -839,4 +855,34 @@ class GamePropertiesFragment : Fragment() {
             ).show()
         }
     }
+    /** Eden Duo: asks how long the warm-up runs, then starts it with the saves backed up. */
+    private fun showWarmUpPicker() {
+        val labels = org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS
+            .map { getString(R.string.warm_up_minutes, it) }
+            .toTypedArray()
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.warm_up_duration_title)
+            .setMessage(R.string.warm_up_confirmation)
+            .setItems(labels) { _, which -> startWarmUp(org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS[which]) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun startWarmUp(minutes: Int) {
+        val game = args.game
+        viewLifecycleOwner.lifecycleScope.launch {
+            val backup = withContext(Dispatchers.IO) {
+                org.yuzu.yuzu_emu.utils.WarmUp.backupSaves(requireContext(), game)
+            }
+            val before = org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(game)
+            startActivity(
+                game.launchIntent.apply {
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, minutes)
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_BACKUP, backup?.absolutePath)
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SHADERS_BEFORE, before)
+                }
+            )
+        }
+    }
+
 }

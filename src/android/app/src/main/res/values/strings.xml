@@ -1940,4 +1940,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="memory_recovered">Freed %1$d MB</string>
     <string name="memory_already_clean">Nothing to reclaim right now (%1$s)</string>
     <string name="menu_recover_memory">Recover memory</string>
+    <!-- Eden Duo: shader warm-up -->
+    <string name="warm_up_shaders">Warm up shaders</string>
+    <string name="warm_up_shaders_description">Run this game for a set time to build its shader cache, then put your saves back. Reaches the title screen and the first scenes only.</string>
+    <string name="warm_up_shader_count">%1$d shaders cached</string>
+    <string name="warm_up_duration_title">Warm up shaders for…</string>
+    <string name="warm_up_confirmation">The game runs on its own for this long; your save is backed up first and restored afterwards.</string>
+    <string name="warm_up_minutes">%1$d minutes</string>
+    <string name="warm_up_remaining">Warming up shaders · %1$s left</string>
+    <string name="warm_up_done">Warm-up finished: %1$d new shaders</string>
 </resources>
