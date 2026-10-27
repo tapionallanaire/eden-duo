@@ -1940,4 +1940,28 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="memory_recovered">Freed %1$d MB</string>
     <string name="memory_already_clean">Nothing to reclaim right now (%1$s)</string>
     <string name="menu_recover_memory">Recover memory</string>
+    <!-- Eden Duo: Google Drive saves -->
+    <string name="cloud_saves">Google Drive saves</string>
+    <string name="cloud_account">Google account</string>
+    <string name="cloud_sign_in_description">Tap to sign in and sync this game\'s save</string>
+    <string name="cloud_signed_in_as">Signed in as %1$s. Tap to sign out.</string>
+    <string name="cloud_sync_enabled">Sync saves with Google Drive</string>
+    <string name="cloud_sync_enabled_description">Pull this game\'s save before it starts and upload it after it stops. Each game keeps one save in Drive.</string>
+    <string name="cloud_conflict_policy">When this device and Drive disagree</string>
+    <string name="cloud_conflict_policy_description">Both changed since the last sync. Ask shows the times and lets you choose; the other two pick a side silently.</string>
+    <string name="cloud_conflict_ask">Ask each time</string>
+    <string name="cloud_conflict_keep_device">Keep this device\'s save</string>
+    <string name="cloud_conflict_use_cloud">Use the Drive save</string>
+    <string name="cloud_conflict_title">Save conflict</string>
+    <string name="cloud_conflict_message">This game\'s save is different on this device and on Google Drive.\n\nThis device: %1$s\nGoogle Drive: %2$s</string>
+    <string name="cloud_conflict_keep_device_button">Keep this device\'s save</string>
+    <string name="cloud_conflict_use_cloud_button">Use the Drive save</string>
+    <string name="cloud_sign_in_failed">Google sign-in failed</string>
+    <string name="cloud_sign_in_cancelled">Sign-in cancelled</string>
+    <string name="cloud_not_configured">Google Drive sync is not set up for this build (no OAuth client registered)</string>
+    <string name="cloud_signed_out">Signed out of Google</string>
+    <string name="cloud_sync_failed">Cloud save failed: %1$s</string>
+    <string name="cloud_sync_uploaded">Save uploaded to Drive</string>
+    <string name="cloud_sync_downloaded">Save downloaded from Drive</string>
+    <string name="google_drive_client_id"></string>
 </resources>
