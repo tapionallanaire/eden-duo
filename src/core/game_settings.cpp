@@ -120,33 +120,71 @@ EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer) {
 }
 
 namespace {
+/// At boot ([force] false) a title value only fills a setting the user left on global; applying
+/// the optimal settings ([force] true) replaces the game's own value too.
 template <typename T, typename Setting>
-void DefaultForTitle(Setting& setting, T value) {
-    if (setting.UsingGlobal()) {
+void DefaultForTitle(Setting& setting, T value, bool force) {
+    if (force || setting.UsingGlobal()) {
         setting.SetGlobal(false);
         setting.SetValue(value);
     }
 }
-} // namespace
 
-void LoadBootOverrides(std::uint64_t program_id) {
+bool TitleSettings(std::uint64_t program_id, bool force) {
+    const auto DefaultForTitle = [force](auto& setting, auto value) {
+        GameSettings::DefaultForTitle(setting, value, force);
+    };
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::FinalFantasyResonance:
-            // Its CPU builds draw data from GPU results; with the GPU thread running behind
-            // (Adreno), it reads them before they land and the HUD blinks, then garbage commands
-            // crash the driver. Baked vertex formats from those commands are invalid too.
-            // Its fence values must also wait for the GPU, or the HUD still blinks.
+            // The bloom hack scales sampled RGBA values and corrupts this game's sprite colours.
+            DefaultForTitle(Settings::values.fix_bloom_effects, false);
+            // Async GPU produces HUD dropouts and guest panics on Adreno. Keep guest command
+            // submission synchronous until that path is verified through gameplay.
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, false);
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Docked);
+            DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::Mailbox);
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
+            DefaultForTitle(Settings::values.dma_accuracy, Settings::DmaAccuracy::Safe);
+            DefaultForTitle(Settings::values.sync_memory_operations, true);
+            DefaultForTitle(Settings::values.use_disk_shader_cache, true);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.enable_buffer_history, true);
+#ifdef __ANDROID__
+            DefaultForTitle(Settings::values.use_optimized_vertex_buffers, true);
+#endif
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            DefaultForTitle(Settings::values.dyna_state, Settings::ExtendedDynamicState::EDS3);
             DefaultForTitle(Settings::values.vertex_input_dynamic_state, true);
+            // FXAA smears its character faces; native resolution keeps them sharp without it.
+            DefaultForTitle(Settings::values.anti_aliasing, Settings::AntiAliasing::None);
             DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
             LOG_INFO(Core, "Title defaults: async GPU {}, vertex input dynamic state {}, fence {}",
                      Settings::values.use_asynchronous_gpu_emulation.GetValue(),
                      Settings::values.vertex_input_dynamic_state.GetValue(),
                      Settings::CanonicalizeEnum(Settings::values.gpu_fence_behavior.GetValue()));
-            break;
+            return true;
         default:
-            break;
+            return false;
     }
+}
+} // namespace
+
+void LoadBootOverrides(std::uint64_t program_id) {
+    TitleSettings(program_id, false);
+}
+
+bool HasOptimalSettings(std::uint64_t program_id) {
+    switch (static_cast<TitleID>(program_id)) {
+        case TitleID::FinalFantasyResonance:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool ApplyOptimalSettings(std::uint64_t program_id) {
+    return TitleSettings(program_id, true);
 }
 
 void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& renderer) {
