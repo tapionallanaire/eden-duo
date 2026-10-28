@@ -64,6 +64,11 @@ public:
     /// EDEN_NO_PRESENT (headless verification): never hand a primary frame to the window.
     static bool PrimaryPresentDisabled();
 
+    /// Set from the frontend: false on a single-screen device, where Duo has nothing to present.
+    /// While disabled Route() hands the guest's layers straight back and no aux work is done.
+    static void SetDuoEnabled(bool enabled);
+    static bool DuoEnabled();
+
 private:
     void SyncAuxWindow();
     void RenderAuxWindow(std::span<const Tegra::FramebufferConfig> layers);

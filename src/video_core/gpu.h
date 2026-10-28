@@ -171,6 +171,9 @@ public:
 
     void WaitForIdle();
 
+    /// Eden Duo: drop cached host resources when the device is low on memory.
+    void RecoverMemory();
+
     /// Tick pending requests within the GPU.
     void TickWork();
 

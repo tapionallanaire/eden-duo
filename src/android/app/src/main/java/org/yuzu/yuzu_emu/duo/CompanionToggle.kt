@@ -59,6 +59,7 @@ object CompanionToggle {
 
     /** Toggles the running game's companion and says what happened. Main thread. */
     fun toggle(context: Context) {
+        if (DuoCapability.isSingleScreen(context)) return
         val running = controller
         if (running == null) {
             toast(context, R.string.companion_toggle_no_game)
@@ -174,6 +175,11 @@ class CompanionTileService : TileService() {
 
     private fun update() {
         val tile = qsTile ?: return
+        if (DuoCapability.isSingleScreen(this)) {
+            tile.state = Tile.STATE_UNAVAILABLE
+            tile.updateTile()
+            return
+        }
         val running = CompanionToggle.isGameRunning
         val hidden = CompanionToggle.isHidden
         tile.label = getString(R.string.companion_tile)

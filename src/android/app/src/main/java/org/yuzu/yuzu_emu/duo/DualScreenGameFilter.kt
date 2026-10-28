@@ -8,9 +8,11 @@ import android.view.Menu
 import android.view.MenuItem
 import android.widget.TextView
 import androidx.core.content.edit
+import androidx.core.view.isVisible
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.material.button.MaterialButton
 import org.yuzu.yuzu_emu.R
+import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.GameAdapter
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.model.GamesViewModel
@@ -35,8 +37,11 @@ class DualScreenGameFilter(
         const val PREF_SHOW_UNOWNED = "GamesShowUnownedDualScreen"
     }
 
-    private var dualScreenOnly = preferences.getBoolean(PREF_DUAL_SCREEN_ONLY, false)
-    private var showUnowned = preferences.getBoolean(PREF_SHOW_UNOWNED, true)
+    // One screen: the filter, the section and the badges do not exist, whatever was saved before
+    // (a user who turned "dual-screen games only" on must still see every game).
+    private val duo = DuoCapability.isAvailable(YuzuApplication.appContext)
+    private var dualScreenOnly = duo && preferences.getBoolean(PREF_DUAL_SCREEN_ONLY, false)
+    private var showUnowned = duo && preferences.getBoolean(PREF_SHOW_UNOWNED, true)
 
     /** [games] reduced to the titles with a companion while the filter is on. */
     fun filter(games: List<Game>): List<Game> =
@@ -67,6 +72,7 @@ class DualScreenGameFilter(
 
     /** Adds the "show dual-screen games not in your library" switch to the filter menu. */
     fun addMenuItem(menu: Menu) {
+        if (!duo) return
         menu.add(
             Menu.NONE,
             R.id.companion_unowned_toggle,
@@ -90,6 +96,7 @@ class DualScreenGameFilter(
 
     /** Feeds the companion badges and refilters when the supported titles change. */
     fun collect(owner: LifecycleOwner) {
+        if (!duo) return // no title ids reach the badges, so every card hides them
         gamesViewModel().dualScreen.dualScreenInstallStates.collect(owner) {
             adapter().dualScreenBadges.setInstallStates(it)
         }
@@ -100,6 +107,8 @@ class DualScreenGameFilter(
     }
 
     fun bindButton(button: MaterialButton) {
+        button.isVisible = duo
+        if (!duo) return
         updateButton(button)
         button.setOnClickListener {
             dualScreenOnly = !dualScreenOnly

@@ -962,6 +962,15 @@ void RasterizerVulkan::FlushCommands() {
     scheduler.Flush();
 }
 
+void RasterizerVulkan::RecoverMemory() {
+    // Runs on the GPU thread with the guest stopped for this instant: collect both caches.
+    {
+        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        texture_cache.PurgeUnused();
+        buffer_cache.PurgeUnused();
+    }
+}
+
 void RasterizerVulkan::TickFrame() {
     draw_counter = 0;
     guest_descriptor_queue.TickFrame();

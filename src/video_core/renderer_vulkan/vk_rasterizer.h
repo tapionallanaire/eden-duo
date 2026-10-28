@@ -125,6 +125,9 @@ public:
     void TiledCacheBarrier() override;
     void FlushCommands() override;
     void TickFrame() override;
+
+    /// Eden Duo: drop textures and buffers nothing is using, so the device gets the memory back.
+    void RecoverMemory() override;
     bool AccelerateConditionalRendering() override;
     bool HasDrawTransformFeedback() override;
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,

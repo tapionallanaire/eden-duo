@@ -68,6 +68,13 @@ class DualScreenModFetcherDialogFragment : DialogFragment() {
 
     override fun onStart() {
         super.onStart()
+        // Eden Duo: a fetcher saved by a two-screen process can be restored in a later process
+        // that now starts single-screen; the picker and result listeners are gated, but this
+        // dialog would otherwise still fetch and show usable dual-screen UI.
+        if (org.yuzu.yuzu_emu.duo.DuoCapability.isSingleScreen(requireContext())) {
+            dismiss()
+            return
+        }
         val alert = requireDialog() as AlertDialog
         alert.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener {
             selected?.let { release ->

@@ -7,6 +7,7 @@ import android.annotation.SuppressLint
 import android.os.Build
 import android.widget.Toast
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.duo.DuoUpdates
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.activities.EmulationActivity
@@ -576,7 +577,10 @@ class SettingsFragmentPresenter(
             add(IntSetting.VERTICAL_ALIGNMENT.key)
             add(BooleanSetting.PICTURE_IN_PICTURE.key)
 
-            org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            // Eden Duo: Second Screen settings only exist on a device that has a second screen.
+            if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(context)) {
+                org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            }
         }
     }
 
@@ -1350,7 +1354,7 @@ class SettingsFragmentPresenter(
             add(HeaderSetting(R.string.app_settings))
             add(IntSetting.APP_LANGUAGE.key)
 
-            if (NativeLibrary.isUpdateCheckerEnabled()) {
+            if (NativeLibrary.isUpdateCheckerEnabled() || DuoUpdates.enabled(YuzuApplication.appContext)) {
                 add(BooleanSetting.ENABLE_UPDATE_CHECKS.key)
             }
 

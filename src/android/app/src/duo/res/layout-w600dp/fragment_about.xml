@@ -268,8 +268,10 @@
                         app:iconSize="24dp" />
                 </LinearLayout>
 
-                <!-- Eden Duo: art credit for the library's "not in your library" covers. -->
+                <!-- Eden Duo: art credit for the library's "not in your library" covers (hidden
+                     on one screen, where that section does not exist). -->
                 <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/about_cover_art_credit"
                     style="@style/TextAppearance.Material3.BodySmall"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

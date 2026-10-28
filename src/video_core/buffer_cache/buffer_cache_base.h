@@ -219,6 +219,8 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
     };
 
 public:
+    /// Eden Duo: collect unused entries now (memory pressure), instead of on the next insert.
+    void PurgeUnused();
     explicit BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_);
 
     ~BufferCache();

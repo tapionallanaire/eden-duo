@@ -173,6 +173,13 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
                      Settings::values.vertex_input_dynamic_state.GetValue(),
                      Settings::CanonicalizeEnum(Settings::values.use_docked_mode.GetValue()));
             return true;
+        case TitleID::PokemonScarlet:
+        case TitleID::PokemonViolet:
+            // Every new area and cutscene builds dozens of pipelines; compiled synchronously, the
+            // game freezes on them (Scarlet's intro: 78 s from the enrollment form to Clavell on a
+            // fresh cache, 63 s with asynchronous shaders, the photo still drawn).
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            return true;
         default:
             return false;
     }
@@ -186,6 +193,8 @@ void LoadBootOverrides(std::uint64_t program_id) {
 bool HasOptimalSettings(std::uint64_t program_id) {
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::FinalFantasyResonance:
+        case TitleID::PokemonScarlet:
+        case TitleID::PokemonViolet:
             return true;
         default:
             return false;

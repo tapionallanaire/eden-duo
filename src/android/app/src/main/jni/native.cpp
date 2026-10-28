@@ -389,6 +389,10 @@ void EmulationSession::ShutdownEmulation() {
         m_system.DetachDebugger();
         m_system.ShutdownMainProcess();
         m_load_result = Core::SystemResultStatus::ErrorNotInitialized;
+        // Release this game's second-screen window and its Vulkan objects before the next
+        // game starts. The success path used to return before this teardown, so they were
+        // carried over into whatever was opened next.
+        DSModSession::OnRenderWindowTeardown();
         m_window.reset();
         OnEmulationStopped(Core::SystemResultStatus::Success);
         return;
@@ -999,6 +1003,16 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_pauseEmulation(JNIEnv* env, jclass cl
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_stopEmulation(JNIEnv* env, jclass clazz) {
     EmulationSession::GetInstance().HaltEmulation();
+}
+
+// Eden Duo: hand back host memory that the caches no longer need, when Android reports low memory
+// or the user asks for it. Safe to call while a game runs; does nothing when none does.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_recoverMemory(JNIEnv* env, jclass clazz) {
+    auto& session = EmulationSession::GetInstance();
+    if (!session.IsRunning()) {
+        return;
+    }
+    session.System().GPU().RecoverMemory();
 }
 
 jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_isRunning(JNIEnv* env, jclass clazz) {

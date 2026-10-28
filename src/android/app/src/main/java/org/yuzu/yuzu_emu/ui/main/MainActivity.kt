@@ -27,6 +27,7 @@ import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.io.File
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.duo.DuoUpdates
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.databinding.ActivityMainBinding
 import org.yuzu.yuzu_emu.dialogs.NetPlayDialog
@@ -163,11 +164,24 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         val firstTimeSetup = PreferenceManager.getDefaultSharedPreferences(applicationContext)
                 .getBoolean(Settings.PREF_FIRST_APP_LAUNCH, true)
 
-        if (!firstTimeSetup && NativeLibrary.isUpdateCheckerEnabled() && BooleanSetting.ENABLE_UPDATE_CHECKS.getBoolean()) {
-             checkForUpdates()
+        if (!firstTimeSetup && BooleanSetting.ENABLE_UPDATE_CHECKS.getBoolean()) {
+            if (NativeLibrary.isUpdateCheckerEnabled()) {
+                checkForUpdates()
+            } else {
+                checkDuoUpdate()
+            }
         }
         setInsets()
         applyFullscreenPreference()
+    }
+
+    /** Duet Plus reads its own GitHub releases; Eden's checker points at Eden's feed. */
+    private fun checkDuoUpdate() {
+        if (!DuoUpdates.enabled(this)) return
+        Thread {
+            val release = DuoUpdates.latest(this) ?: return@Thread
+            runOnUiThread { showUpdateDialog(release) }
+        }.start()
     }
 
     private fun checkForUpdates() {

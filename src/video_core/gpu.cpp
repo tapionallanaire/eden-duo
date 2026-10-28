@@ -146,6 +146,18 @@ struct GPU::Impl {
         sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
     }
 
+    /// Eden Duo: let the rasterizer drop cached host resources on the GPU thread, then hand the
+    /// freed heap back to the system. Called when Android reports low memory.
+    void RecoverMemory() {
+        const u64 fence = RequestSyncOperation([this] {
+            if (renderer) {
+                renderer->ReadRasterizer()->RecoverMemory();
+            }
+        });
+        gpu_thread.TickGPU(is_async);
+        WaitForSyncOperation(fence);
+    }
+
     void WaitForIdle() {
         const u64 fence = RequestSyncOperation([] {});
         gpu_thread.TickGPU(is_async);
@@ -557,6 +569,10 @@ void GPU::Start() {
 
 void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
+}
+
+void GPU::RecoverMemory() {
+    impl->RecoverMemory();
 }
 
 void GPU::WaitForIdle() {
