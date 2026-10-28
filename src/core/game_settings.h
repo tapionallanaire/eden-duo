@@ -49,6 +49,8 @@ enum class TitleID : std::uint64_t {
     FireEmblemEngage = 0x0100A6301214E000ULL,
     DragonQuestVIIReimagined = 0x0100A9D01C446000ULL,
     FinalFantasyResonance = 0x0100606026F12000ULL,
+    PokemonScarlet = 0x0100A3D008C5C000ULL,
+    PokemonViolet = 0x01008F6008C5E000ULL,
 };
 
 struct EnvironmentInfo {
