@@ -22,6 +22,7 @@
 - Shorten first-time loads in **Pokémon Scarlet and Violet**: their new areas and cutscenes build dozens of pipelines each, and building them synchronously froze the game. Asynchronous shader building is now on by default for these titles (the per-game setting still wins). On a Retroid Pocket Flip 2 with an empty shader cache, the opening from the enrollment form to Director Clavell takes 63 s instead of 78 s.
 - Fix a crash (null pointer in the Vulkan scheduler on the `nvservices` thread) when a game unmaps memory holding a render target while a clear is still deferred: the unmap recorded the pending clear from the guest thread into the render thread's command stream. Removed framebuffers are now kept in place until the render thread retires them.
 - The in-game overlay names a release by the app's own name: "Duet Plus 1.1.2" instead of "Eden Duo 1.1.2".
+- On a single-screen Android device, Eden Duo now decides once at startup (from the display count) and disables the whole dual-screen path for that process: the companion catalog fetch, dual-screen add-on scans/badges and mod install/fetch are skipped, and natively the DSMod runtime, load plans, module code cache and second-screen presenter are not created. Attach a second display and restart to enable it. The `dsm` service stays registered for compatibility (a guest asking for a missing service would wait forever), so it is not disabled.
 
 ## 1.3.2.2
 

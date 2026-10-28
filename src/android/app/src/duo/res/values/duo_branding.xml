@@ -9,7 +9,7 @@
     <color name="ic_launcher_background">#000000</color>
 
     <!-- \"cheats/" "romfs/" and \"exefs/ should not be translated -->
-    <string name="addon_notice_description">In order to install mods and cheats, you must select a folder that contains a cheats/, romfs/, or exefs/ directory. We can\'t verify if these will be compatible with your game so be careful! Dual screen companions (.dsmod.zip files) are installed with Install → Dual screen mods instead.</string>
+    <string name="addon_notice_description_duo">In order to install mods and cheats, you must select a folder that contains a cheats/, romfs/, or exefs/ directory. We can\'t verify if these will be compatible with your game so be careful! Dual screen companions (.dsmod.zip files) are installed with Install → Dual screen mods instead.</string>
     <!-- \"cheats/" "romfs/" and \"exefs/ should not be translated -->
-    <string name="invalid_directory_description">Please make sure that the directory you selected contains a cheats/, romfs/, or exefs/ folder and try again. For a dual screen companion (.dsmod.zip), use Install → Dual screen mods.</string>
+    <string name="invalid_directory_description_duo">Please make sure that the directory you selected contains a cheats/, romfs/, or exefs/ folder and try again. For a dual screen companion (.dsmod.zip), use Install → Dual screen mods.</string>
 </resources>

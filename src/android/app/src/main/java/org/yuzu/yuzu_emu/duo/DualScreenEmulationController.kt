@@ -126,6 +126,7 @@ class DualScreenEmulationController(
      */
     fun onGameConfigLoaded(customConfigGame: Game?) {
         SecondScreenPerGame.runningConfigGame = customConfigGame
+        if (duoSingleScreen) return // no idle page to configure
         NativeLibrary.setNoCompanionOverride(NoCompanion.perGameValue(secondScreenTitle()) ?: -1)
     }
 
@@ -137,6 +138,7 @@ class DualScreenEmulationController(
      * launchCompanionApp is not called here: it only runs after boot, from dropIdleCompanion.
      */
     fun onGameResolved() {
+        if (duoSingleScreen) return
         val decidedBefore = auxOffChecked
         val hidesNow = isAuxOff()
         if (!AuxWindowRules.closesWindowOnResolve(decidedBefore, hidesNow)) return
@@ -150,6 +152,8 @@ class DualScreenEmulationController(
 
     /** The game finished booting. */
     fun onEmulationStarted() {
+        // One screen: noCompanionApplied stays null, which also keeps reapplyNoCompanion inert.
+        if (duoSingleScreen) return
         idleRecheckLeft = IDLE_RECHECK_ATTEMPTS
         noCompanionApplied = noCompanionNow()
         dropIdleCompanion()

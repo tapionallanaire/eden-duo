@@ -86,7 +86,11 @@ class AddonsFragment : Fragment() {
                 MessageDialogFragment.newInstance(
                     requireActivity(),
                     titleId = R.string.addon_notice,
-                    descriptionId = R.string.addon_notice_description,
+                    descriptionId = if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+                        R.string.addon_notice_description_duo
+                    } else {
+                        R.string.addon_notice_description
+                    },
                     dismissible = false,
                     positiveAction = { addonViewModel.showModInstallPicker(true) },
                     negativeAction = {},
@@ -149,7 +153,11 @@ class AddonsFragment : Fragment() {
                 MessageDialogFragment.newInstance(
                     requireActivity(),
                     titleId = R.string.invalid_directory,
-                    descriptionId = R.string.invalid_directory_description
+                    descriptionId = if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+                        R.string.invalid_directory_description_duo
+                    } else {
+                        R.string.invalid_directory_description
+                    }
                 ).show(parentFragmentManager, MessageDialogFragment.TAG)
                 return@registerForActivityResult
             }
@@ -159,7 +167,11 @@ class AddonsFragment : Fragment() {
             val errorMessage = MessageDialogFragment.newInstance(
                 requireActivity(),
                 titleId = R.string.invalid_directory,
-                descriptionId = R.string.invalid_directory_description
+                descriptionId = if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+                    R.string.invalid_directory_description_duo
+                } else {
+                    R.string.invalid_directory_description
+                }
             )
             if (isValid) {
                 ProgressDialogFragment.newInstance(

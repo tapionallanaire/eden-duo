@@ -649,10 +649,13 @@ void ModRuntime::Tick() {
             UpdateHostValues(); // runtime 21: what the module's get_i64 answers
             RunGameModule(snapshot, true);
         }
-        // What the package does to the game itself must not depend on whether a second display
-        // exists (lid closed at boot, one-display setups): code patches, spies, and the watchdog
-        // for a call that went in just before the surface vanished. With the surface shown these
-        // run from ApplyEnforceRules / after the page binds, exactly as before.
+        // What the package does to the game itself must not depend on whether the second display
+        // is shown right now (lid closed at boot, panel switched off): code patches, spies, and
+        // the watchdog for a call that went in just before the surface vanished. With the surface
+        // shown these run from ApplyEnforceRules / after the page binds, exactly as before. A
+        // device with only one display never gets here: it runs no ModRuntime and no load plan
+        // (VideoCore::DSMod::DuoEnabled, checked in System::RegisterDualScreenMod and at the
+        // shared load-plan selection boundary in mod_load_plan.cpp).
         MaintainGuestBridge();
         ArmSpies();
         NavOff("second screen hidden"); // runtime 17: the game gets its controller back

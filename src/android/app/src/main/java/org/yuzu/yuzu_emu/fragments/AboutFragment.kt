@@ -113,6 +113,9 @@ class AboutFragment : Fragment() {
         }
         binding.buttonDuoKofi.setOnClickListener { openLink(getString(R.string.eden_duo_kofi_link)) }
         binding.buttonDuoPoll.setOnClickListener { openLink(getString(R.string.eden_duo_poll_link)) }
+        // Eden Duo: one screen shows no GameTDB covers (no "not in your library" section).
+        binding.aboutCoverArtCredit.visibility =
+            if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) View.VISIBLE else View.GONE
         binding.buttonDiscord.setOnClickListener { openLink(getString(R.string.discord_link)) }
         binding.buttonStoat.setOnClickListener { openLink(getString(R.string.stoat_link)) }
         binding.buttonX.setOnClickListener { openLink(getString(R.string.x_link)) }
