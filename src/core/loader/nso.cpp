@@ -72,6 +72,8 @@ FileType AppLoader_NSO::IdentifyType(const FileSys::VirtualFile& in_file) {
 
 std::optional<std::string> AppLoader_NSO::LoadPlanTargetModule(Core::System& system,
                                                                u64 title_id) {
+    // Load-plan selection itself is gated on VideoCore::DSMod::DuoEnabled at the shared boundary in
+    // Core::Mods::SelectLoadPlanPackage, so a single-screen device gets no target here.
     return Core::Mods::LoadPlanTargetModule(system, title_id);
 }
 

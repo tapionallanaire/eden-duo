@@ -74,6 +74,8 @@ class DualScreenLibraryState(
     }.getOrDefault(emptyMap())
 
     fun refreshInstalledCompanions() {
+        // One screen: no companion to install, so no add-on folder scans.
+        if (DuoCapability.isSingleScreen(YuzuApplication.appContext)) return
         scope.launch {
             statusJob?.cancel()
             statusJob = scope.launch {
@@ -111,6 +113,8 @@ class DualScreenLibraryState(
 
     /** Show cached support immediately and refresh once per minute when the library opens. */
     fun refreshDualScreenSupport(force: Boolean = false) {
+        // One screen: no badges, filter or section to feed, so no GitHub catalog request.
+        if (DuoCapability.isSingleScreen(YuzuApplication.appContext)) return
         refreshInstalledCompanions()
         val now = android.os.SystemClock.elapsedRealtime()
         if ((!force && lastCatalogAttempt != 0L && now - lastCatalogAttempt < 60_000L) ||

@@ -69,6 +69,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
+#include "video_core/dsmod/duo_switch.h"
 
 namespace Core {
 
@@ -941,7 +942,9 @@ Core::Mods::ModRuntime* System::ModRuntime() {
 void System::RegisterDualScreenMod(const std::array<u8, 0x20>& build_id, VAddr main_region_begin,
                                    u64 main_region_size) {
     // Called from the loader, before the application process exists: just remember the extents.
-    if (impl->pending_mod_base != 0) {
+    // A single-screen device never gets a ModRuntime: with nothing remembered here, Load skips
+    // Discover/IdleManifest and no DSMod::Tick event or package module is ever set up.
+    if (impl->pending_mod_base != 0 || !VideoCore::DSMod::DuoEnabled()) {
         return; // first module wins (main)
     }
     impl->pending_mod_build_id = build_id;
