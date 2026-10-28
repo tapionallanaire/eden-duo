@@ -170,6 +170,15 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // game freezes on them (Scarlet's intro: 78 s from the enrollment form to Clavell on a
             // fresh cache, 63 s with asynchronous shaders, the photo still drawn).
             DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            // The set measured on the Retroid Pocket Flip 2 (Snapdragon 865, 1x): 29.5-30 FPS in
+            // the overworld. The GPU-write fixes it relies on are for async GPU at low accuracy.
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            DefaultForTitle(Settings::values.dma_accuracy, Settings::DmaAccuracy::Default);
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Default);
+            DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
+            // Boosted GPU timing looked the same and was slower in the overworld.
+            DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
             return true;
         default:
             return false;
