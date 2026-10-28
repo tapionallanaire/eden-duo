@@ -567,6 +567,15 @@ TransformBufferCopies(std::span<const VideoCommon::BufferCopy> copies, size_t bu
     }
 }
 
+/// True when one format is the other with red and blue exchanged.
+[[nodiscard]] bool IsRedBlueReorder(VkFormat a, VkFormat b) {
+    const auto pair = [a, b](VkFormat x, VkFormat y) {
+        return (a == x && b == y) || (a == y && b == x);
+    };
+    return pair(VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_FORMAT_B8G8R8A8_UNORM) ||
+           pair(VK_FORMAT_A8B8G8R8_SRGB_PACK32, VK_FORMAT_B8G8R8A8_SRGB);
+}
+
 [[nodiscard]] SwizzleSource SwapGreenRed(SwizzleSource value) {
     switch (value) {
     case SwizzleSource::R:
@@ -2526,6 +2535,18 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         }
     }
     auto format_info = MaxwellToVK::SurfaceFormat(*device, FormatType::Optimal, true, format);
+    if (!info.IsRenderTarget()) {
+        // Sample through the image's own format when this view only reorders red and blue: the
+        // same texels, with red and blue exchanged in the swizzle instead. Turnip "Gen8 V38"
+        // (Mesa 27) returns red and blue swapped when a BGRA8 image is viewed as RGBA8 on
+        // Adreno 7xx; FINAL FANTASY RESONANCE draws its sprites that way (Rain's hair came out cyan).
+        const VkFormat image_format =
+            MaxwellToVK::SurfaceFormat(*device, FormatType::Optimal, true, image.info.format).format;
+        if (IsRedBlueReorder(format_info.format, image_format)) {
+            format_info.format = image_format;
+            std::ranges::transform(swizzle, swizzle.begin(), SwapBlueRed);
+        }
+    }
     if (device->ApiVersion() >= VK_API_VERSION_1_3) {
         const VkFormatProperties3 properties3 =
             device->GetPhysical().GetFormatProperties3(format_info.format);
