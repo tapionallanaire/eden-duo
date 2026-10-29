@@ -839,6 +839,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& given_pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, bool defer_emit) try {
+    // No vertex program: Vulkan has no pipeline for that and Turnip (Mesa 27, V38 and v27 R1)
+    // dereferences the missing stage. FINAL FANTASY RESONANCE issues such a draw under the macro
+    // interpreter; once cached, every boot crashed loading it. Draw nothing, as nothing valid can.
+    if (key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] == 0) {
+        return nullptr;
+    }
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
