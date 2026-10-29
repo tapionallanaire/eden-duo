@@ -12,6 +12,7 @@
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
+#include <algorithm>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
@@ -92,20 +93,32 @@ public:
         };
         // No WAIT_BIT: Turnip gives up on a waited query after about two seconds and loses the
         // whole device ("query timeout"), which FINAL FANTASY RESONANCE hit within minutes on the
-        // Retroid Pocket Flip 2. Wait for the submitted work that used the bank instead, then take
-        // what is there: a query that still isn't available was never ended, and a partial count
-        // beats losing the device.
+        // Retroid Pocket Flip 2. Wait for the submitted work that used the bank instead.
         VkResult query_result = read(0);
         if (query_result == VK_NOT_READY) {
             if (last_used_tick < scheduler.GetMasterSemaphore().CurrentTick()) {
                 scheduler.GetMasterSemaphore().Wait(last_used_tick);
             }
             query_result = read(0);
-            if (query_result == VK_NOT_READY) {
-                query_result = read(VK_QUERY_RESULT_PARTIAL_BIT);
-                if (query_result == VK_NOT_READY) {
-                    query_result = VK_SUCCESS;
+        }
+        if (query_result == VK_NOT_READY) {
+            // Still not there: the work isn't submitted yet. Report what isn't available as at
+            // least one sample passed. Read as 0, the game took its characters for hidden and drew
+            // them as glowing see-through silhouettes (FINAL FANTASY RESONANCE on the AYN Thor);
+            // a wrong "visible" only costs a draw.
+            std::vector<u64> with_availability(size * 2);
+            query_result = dev.GetQueryResults(
+                *query_pool, static_cast<u32>(start), static_cast<u32>(size),
+                sizeof(u64) * with_availability.size(), with_availability.data(), sizeof(u64) * 2,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_PARTIAL_BIT |
+                    VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (query_result == VK_SUCCESS || query_result == VK_NOT_READY) {
+                for (size_t i = 0; i < size; ++i) {
+                    const u64 value = with_availability[i * 2];
+                    const bool available = with_availability[i * 2 + 1] != 0;
+                    host_results[start + i] = available ? value : (std::max)(value, u64{1});
                 }
+                query_result = VK_SUCCESS;
             }
         }
         switch (query_result) {
