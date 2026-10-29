@@ -84,9 +84,30 @@ public:
 
     void Sync(size_t start, size_t size) {
         const auto& dev = device.GetLogical();
-        const VkResult query_result = dev.GetQueryResults(
-            *query_pool, static_cast<u32>(start), static_cast<u32>(size), sizeof(u64) * size,
-            &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        const auto read = [&](VkQueryResultFlags flags) {
+            return dev.GetQueryResults(*query_pool, static_cast<u32>(start),
+                                       static_cast<u32>(size), sizeof(u64) * size,
+                                       &host_results[start], sizeof(u64),
+                                       VK_QUERY_RESULT_64_BIT | flags);
+        };
+        // No WAIT_BIT: Turnip gives up on a waited query after about two seconds and loses the
+        // whole device ("query timeout"), which FINAL FANTASY RESONANCE hit within minutes on the
+        // Retroid Pocket Flip 2. Wait for the submitted work that used the bank instead, then take
+        // what is there: a query that still isn't available was never ended, and a partial count
+        // beats losing the device.
+        VkResult query_result = read(0);
+        if (query_result == VK_NOT_READY) {
+            if (last_used_tick < scheduler.GetMasterSemaphore().CurrentTick()) {
+                scheduler.GetMasterSemaphore().Wait(last_used_tick);
+            }
+            query_result = read(0);
+            if (query_result == VK_NOT_READY) {
+                query_result = read(VK_QUERY_RESULT_PARTIAL_BIT);
+                if (query_result == VK_NOT_READY) {
+                    query_result = VK_SUCCESS;
+                }
+            }
+        }
         switch (query_result) {
         case VK_SUCCESS:
             return;
