@@ -4,7 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono> // PIPEPROBE
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -319,11 +318,7 @@ GraphicsPipeline::GraphicsPipeline(
                 emit_modules(spv_modules);
                 emit_modules = nullptr;
             }
-            const auto make_start = std::chrono::steady_clock::now(); // PIPEPROBE
             MakePipeline(render_pass);
-            LOG_WARNING(Render_Vulkan, "PIPEPROBE driver_us={}", // PIPEPROBE
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - make_start).count());
         } catch (const std::exception& exception) {
             // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());

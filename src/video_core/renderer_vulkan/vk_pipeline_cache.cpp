@@ -4,7 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono> // PIPEPROBE
 #include <algorithm>
 #include <cstddef>
 #include <fstream>
@@ -992,16 +991,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
-    const auto probe_start = std::chrono::steady_clock::now(); // PIPEPROBE
     GraphicsEnvironments environments;
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
 
     main_pools.ReleaseContents();
     auto pipeline{CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr,
                                          true, true)};
-    LOG_WARNING(Render_Vulkan, "PIPEPROBE graphics gpu_thread_us={}", // PIPEPROBE
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - probe_start).count());
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }
