@@ -1649,10 +1649,9 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
         if (buffer.IsInBounds(device_addr, size)) {
-            const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
-            if (should_sync) {
-                SynchronizeBufferWrites(buffer);
-            }
+            // No wait for the buffer's last GPU write: every caller binds it for GPU use, which
+            // the rasterizer's barriers order, and CPU reads download it. Waiting here stalled
+            // the GPU thread on the host GPU at each draw (FINAL FANTASY RESONANCE: 40% of it).
             bool usable = true;
             if constexpr (requires { buffer.IsSparseCompatible(); }) {
                 if (sparse_compatible && !buffer.IsSparseCompatible()) {
@@ -1665,16 +1664,6 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
         }
     }
     return CreateBuffer(device_addr, size, sparse_compatible);
-}
-
-template <class P>
-void BufferCache<P>::SynchronizeBufferWrites(Buffer& buffer) {
-    if constexpr (!IS_OPENGL) {
-        const u64 buffer_tick = buffer.getWriteTick();
-        if (!runtime.IsFree(buffer_tick)) {
-            runtime.Wait(buffer_tick);
-        }
-    }
 }
 
 template <class P>
