@@ -284,11 +284,11 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     dest_buffer.MarkUsage(copy.dst_offset, copy.size);
     runtime.CopyBuffer(dest_buffer, src_buffer, copies, true);
     if (has_new_downloads) {
+        // The copy runs on the GPU in order with the work around it, and its destination is now
+        // GPU-modified, so a CPU or command-stream read downloads it. Waiting for the GPU here
+        // drained the queue at each copy: 42% of the GPU thread in FINAL FANTASY RESONANCE's
+        // battles, which copy GPU-written data every frame.
         memory_tracker.MarkRegionAsGpuModified(*cpu_dest_address, amount);
-        const bool should_sync = Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
-        if (should_sync) {
-            runtime.Finish();
-        }
     }
 
     {
