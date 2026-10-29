@@ -228,14 +228,11 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             Settings::values.fix_fp16_denormals_by_title = true;
             break;
         case TitleID::FinalFantasyResonance:
-            // As Fire Emblem Engage and Dragon Quest VII above, and in addition: its battle
-            // characters are drawn through a GPU macro whose HLE version inherits the parameters
-            // of the macros the game issues before its argument register arrives, which blows
-            // their materials out to white. The microcode interpreter reads only the parameters
-            // its program uses and draws them correctly, at the same frame rate, so give this
-            // title the interpreter.
+            // As Fire Emblem Engage and Dragon Quest VII above. Its macros run as HLE again: the
+            // battle characters they once blew out to white draw correctly now, and the
+            // interpreter downloaded their GPU-written arguments, a full GPU round trip each,
+            // which held battles at 27-28 FPS (29 with HLE) on the Thor.
             Settings::values.fix_fp16_denormals_by_title = true;
-            Settings::values.disable_macro_hle_by_title = true;
             break;
         default:
             break;
