@@ -5,10 +5,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstddef>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <memory>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
@@ -96,16 +98,24 @@ public:
         // Retroid Pocket Flip 2. Wait for the submitted work that used the bank instead.
         VkResult query_result = read(0);
         if (query_result == VK_NOT_READY) {
-            if (last_used_tick < scheduler.GetMasterSemaphore().CurrentTick()) {
-                scheduler.GetMasterSemaphore().Wait(last_used_tick);
+            // The game needs the real counts: FINAL FANTASY RESONANCE drew its characters as
+            // glowing silhouettes when unavailable results read as 0, and as dark ones at 1, on the
+            // AYN Thor. When the work using the bank isn't submitted yet, wait for the GPU thread
+            // to submit it, then for the GPU, as WAIT_BIT would but without Turnip's timeout.
+            auto& semaphore = scheduler.GetMasterSemaphore();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+            while (last_used_tick >= semaphore.CurrentTick() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::microseconds{200});
+            }
+            if (last_used_tick < semaphore.CurrentTick()) {
+                semaphore.Wait(last_used_tick);
             }
             query_result = read(0);
         }
         if (query_result == VK_NOT_READY) {
-            // Still not there: the work isn't submitted yet. Report what isn't available as at
-            // least one sample passed. Read as 0, the game took its characters for hidden and drew
-            // them as glowing see-through silhouettes (FINAL FANTASY RESONANCE on the AYN Thor);
-            // a wrong "visible" only costs a draw.
+            // Still not there after a second (a query that was never ended): report what isn't
+            // available as at least one sample passed rather than stall the fence thread.
             std::vector<u64> with_availability(size * 2);
             query_result = dev.GetQueryResults(
                 *query_pool, static_cast<u32>(start), static_cast<u32>(size),
