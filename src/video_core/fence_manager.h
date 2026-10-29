@@ -91,7 +91,11 @@ public:
             func();
         }
         fences.push(std::move(new_fence));
-        if (should_flush) {
+        // A delayed operation only runs once the GPU reaches this fence, and something usually
+        // waits for it (the GPU thread itself after a synced command list, the guest polling a
+        // semaphore). Left in the scheduler until the next flush it never reached the GPU, and
+        // nothing else was going to flush: FINAL FANTASY RESONANCE froze in battle.
+        if (should_flush || delay_fence) {
             rasterizer.FlushCommands();
         }
         if constexpr (can_async_check) {

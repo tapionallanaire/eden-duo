@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono> // PIPEPROBE
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -155,7 +156,7 @@ size_t NumAttachments(const FixedPipelineState& state) {
 }
 
 template <typename Spec>
-bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+bool Passes(const std::array<bool, NUM_STAGES>& modules,
             const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!Spec::enabled_stages[stage] && modules[stage]) {
@@ -189,7 +190,7 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
 using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
 
 template <typename Spec, typename... Specs>
-ConfigureFuncPtr FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+ConfigureFuncPtr FindSpec(const std::array<bool, NUM_STAGES>& modules,
                           const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
     if constexpr (sizeof...(Specs) > 0) {
         if (!Passes<Spec>(modules, stage_infos)) {
@@ -239,7 +240,7 @@ struct DefaultSpec {
     static constexpr bool has_images = true;
 };
 
-ConfigureFuncPtr ConfigureFunc(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+ConfigureFuncPtr ConfigureFunc(const std::array<bool, NUM_STAGES>& modules,
                                const std::array<Shader::Info, NUM_STAGES>& infos) {
     return FindSpec<SimpleVertexSpec, SimpleVertexFragmentSpec, SimpleStorageSpec, SimpleImageSpec,
                     DefaultSpec>(modules, infos);
@@ -255,11 +256,12 @@ GraphicsPipeline::GraphicsPipeline(
     Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
-    const std::array<const Shader::Info*, NUM_STAGES>& infos)
+    const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitModules emit_modules_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      emit_modules{std::move(emit_modules_)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -313,8 +315,17 @@ GraphicsPipeline::GraphicsPipeline(
         const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
         Validate();
         try {
+            if (emit_modules) {
+                emit_modules(spv_modules);
+                emit_modules = nullptr;
+            }
+            const auto make_start = std::chrono::steady_clock::now(); // PIPEPROBE
             MakePipeline(render_pass);
-        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan, "PIPEPROBE driver_us={}", // PIPEPROBE
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - make_start).count());
+        } catch (const std::exception& exception) {
+            // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             std::scoped_lock lock{build_mutex};
             is_built = true;
@@ -335,12 +346,31 @@ GraphicsPipeline::GraphicsPipeline(
             shader_notify->MarkShaderComplete();
         }
     }};
+    build_func = std::move(func);
     if (worker_thread) {
-        worker_thread->QueueWork(std::move(func));
+        worker_thread->QueueWork([this] { RunBuild(); });
     } else {
-        func();
+        RunBuild();
     }
-    configure_func = ConfigureFunc(spv_modules, stage_infos);
+    std::array<bool, NUM_STAGES> present_stages{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        present_stages[stage] = infos[stage] != nullptr;
+    }
+    configure_func = ConfigureFunc(present_stages, stage_infos);
+}
+
+void GraphicsPipeline::RunBuild() {
+    if (build_claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    build_func();
+    build_func = nullptr;
+}
+
+void GraphicsPipeline::BuildUrgently(Common::ThreadWorker& worker) {
+    if (!build_claimed.load(std::memory_order_acquire)) {
+        worker.QueueWork([this] { RunBuild(); });
+    }
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
