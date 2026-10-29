@@ -388,24 +388,11 @@ NvResult nvhost_as_gpu::UnmapBuffer(IoctlUnmapBuffer& params) {
             return NvResult::BadValue;
         }
 
-        auto const it = mapping_map.find(params.offset);
-        auto const mapping = it->second;
-        if (!mapping.fixed) {
-            auto& allocator{mapping.big_page ? *vm.big_page_allocator : *vm.small_page_allocator};
-            u32 page_size_bits{mapping.big_page ? vm.big_page_size_bits : VM::PAGE_SIZE_BITS};
-            allocator.Free(u32(mapping.offset >> page_size_bits), u32(mapping.size >> page_size_bits));
-        }
-
-        // Sparse mappings shouldn't be fully unmapped, just returned to their sparse state
-        // Only FreeSpace can unmap them fully
-        if (mapping.sparse_alloc) {
-            gmmu->MapSparse(params.offset, mapping.size, mapping.big_page);
-        } else {
-            gmmu->Unmap(params.offset, mapping.size);
-        }
-
-        nvmap.UnpinHandle(mapping.handle);
-        mapping_map.erase(params.offset);
+        // Shared with FreeSpace. This copy freed the unrounded size, so every map and unmap of a
+        // buffer that isn't a whole number of pages leaked one page of GPU address space:
+        // FINAL FANTASY RESONANCE ran out after about nine minutes on the AYN Thor
+        // ("Failed to allocate free space in the GPU AS"), and aborted.
+        void(FreeMappingLocked(params.offset)); // found above, so it is freed
         map_buffer_offsets.erase(params.offset);
     }
     return NvResult::Success;
