@@ -278,7 +278,12 @@ void MaxwellDMA::CopyPitchToBlockLinear() {
     GPUVAddr dst_addr = regs.offset_out;
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::SafeRead> tmp_read_buffer(
         memory_manager, src_addr, src_size, &read_buffer);
-    Tegra::Memory::GpuGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadCachedWrite>
+    // The whole block-linear footprint is read, patched and written back, then invalidated. The
+    // read must see what the GPU wrote there first: FINAL FANTASY RESONANCE fills its volumetric
+    // lightmap atlas with a compute shader and patches bricks into it with this copy, and an
+    // unsafe read handed the atlas back to the texture cache with those bricks replaced by stale
+    // guest bytes (party sprites lit by garbage).
+    Tegra::Memory::GpuGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::SafeReadCachedWrite>
         tmp_write_buffer(memory_manager, dst_addr, dst_size, &write_buffer);
 
     //  If the input is linear and the output is tiled, swizzle the input and copy it over.
