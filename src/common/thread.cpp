@@ -105,6 +105,8 @@ enum class CoreGroup {
     Unrestricted,
     Performance,
     Efficiency,
+    /// The performance cores, including one kept for this group alone (see performance_shared).
+    Critical,
 };
 
 struct ThreadPolicy {
@@ -124,6 +126,9 @@ struct CpuTopologyState {
     std::mutex topology_mutex;
     cpu_set_t allowed{};
     cpu_set_t performance{};
+    /// The performance cores other threads use: all but a strictly fastest one (Snapdragon 865's
+    /// prime core), which is left to the critical group.
+    cpu_set_t performance_shared{};
     cpu_set_t efficiency{};
     bool separated = false;
     bool initialized = false;
@@ -204,6 +209,48 @@ u64 ReadCpuMidr(s32 cpu) {
     return midr;
 }
 
+/// The affinity mask of [tid] in this process (0: the main thread). sched_getaffinity reports only
+/// the CPUs active at that moment: Qualcomm's core_ctl parks idle big and prime cores, so at launch
+/// a Snapdragon 865 reported 0-5 and the GPU and CPU threads ran on two big and two little cores
+/// for the whole session, the prime core unused. Cpus_allowed_list is the mask itself.
+bool ReadAllowedCpus(pid_t tid, cpu_set_t& mask) {
+    std::ifstream file(tid == 0 ? std::string("/proc/self/status")
+                                : "/proc/self/task/" + std::to_string(tid) + "/status");
+    constexpr std::string_view key = "Cpus_allowed_list:";
+    std::string line;
+    while (file && std::getline(file, line)) {
+        if (!line.starts_with(key)) {
+            continue;
+        }
+        CPU_ZERO(&mask);
+        const char* cursor = line.c_str() + key.size();
+        while (*cursor != '\0') {
+            char* end = nullptr;
+            const s64 first = std::strtol(cursor, &end, 10);
+            if (end == cursor) {
+                break;
+            }
+            s64 last = first;
+            if (*end == '-') {
+                cursor = end + 1;
+                last = std::strtol(cursor, &end, 10);
+                if (end == cursor) {
+                    break;
+                }
+            }
+            for (s64 cpu = first; cpu <= last && cpu < CPU_SETSIZE; ++cpu) {
+                CPU_SET(cpu, &mask);
+            }
+            cursor = *end == ',' ? end + 1 : end;
+        }
+        if (CPU_COUNT(&mask) > 0) {
+            return true;
+        }
+        break;
+    }
+    return sched_getaffinity(tid == 0 ? getpid() : tid, sizeof(mask), &mask) == 0;
+}
+
 std::vector<CoreInfo> CollectCores(const cpu_set_t& allowed, s32 total, const char* node,
                                    bool require_all) {
     std::vector<CoreInfo> cores;
@@ -242,9 +289,10 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     state.separated = false;
     CPU_ZERO(&state.allowed);
     CPU_ZERO(&state.performance);
+    CPU_ZERO(&state.performance_shared);
     CPU_ZERO(&state.efficiency);
 
-    if (sched_getaffinity(getpid(), sizeof(state.allowed), &state.allowed) != 0) {
+    if (!ReadAllowedCpus(0, state.allowed)) {
         LOG_WARNING(Common, "Could not query process CPU affinity: {}",
                     ::Common::GetLastErrorMsg());
         return;
@@ -294,6 +342,10 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     if (taken == 0) {
         return;
     }
+    state.performance_shared = state.performance;
+    if (taken >= 3 && cores[0].weight > cores[1].weight) {
+        CPU_CLR(cores[0].cpu, &state.performance_shared);
+    }
 
     for (s32 cpu = 0; cpu < total; ++cpu) {
         if (CPU_ISSET(cpu, &state.allowed) && !CPU_ISSET(cpu, &state.performance)) {
@@ -320,7 +372,7 @@ void RefreshTopologyLocked(CpuTopologyState& state) {
     }
     cpu_set_t current;
     CPU_ZERO(&current);
-    if (sched_getaffinity(getpid(), sizeof(current), &current) != 0) {
+    if (!ReadAllowedCpus(0, current)) {
         return;
     }
     if (std::memcmp(&current, &state.allowed, sizeof(current)) != 0) {
@@ -333,7 +385,9 @@ bool ApplyCoreGroupLocked(CpuTopologyState& state, pid_t tid, CoreGroup group,
     const bool restrict_group = group != CoreGroup::Unrestricted && state.separated;
     const cpu_set_t* mask = &state.allowed;
     if (restrict_group) {
-        mask = group == CoreGroup::Performance ? &state.performance : &state.efficiency;
+        mask = group == CoreGroup::Critical      ? &state.performance
+               : group == CoreGroup::Performance ? &state.performance_shared
+                                                 : &state.efficiency;
     }
     if (CPU_COUNT(mask) == 0) {
         return false;
@@ -374,7 +428,7 @@ void SnapshotCanaryLocked(CpuTopologyState& state) {
         }
         cpu_set_t mask;
         CPU_ZERO(&mask);
-        if (sched_getaffinity(policy.tid, sizeof(mask), &mask) != 0) {
+        if (!ReadAllowedCpus(policy.tid, mask)) {
             continue;
         }
         state.canary_tid = policy.tid;
@@ -549,6 +603,16 @@ void SetCurrentThreadToPerformanceCores() {
 #endif
 }
 
+void SetCurrentThreadToCriticalCores() {
+#if defined(__ANDROID__)
+    if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
+        SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
+        return;
+    }
+    SetCurrentThreadCoreGroup(CoreGroup::Critical);
+#endif
+}
+
 void SetCurrentThreadToEfficiencyCores() {
 #if defined(__ANDROID__)
     if (ADPF::AddCurrentThread(ADPF::Session::Background)) {
@@ -621,7 +685,7 @@ void PollThreadPolicies() {
 
     cpu_set_t current;
     CPU_ZERO(&current);
-    if (sched_getaffinity(tid, sizeof(current), &current) == 0 &&
+    if (ReadAllowedCpus(tid, current) &&
         std::memcmp(&current, &expected, sizeof(current)) == 0) {
         return;
     }

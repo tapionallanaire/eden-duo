@@ -235,7 +235,12 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
 
     // Move non-critical operations outside the locked section
     const u64 tpidr_el0_cache = m_guest_ctx.tpidr_el0;
-    const u64 tpidrro_el0_cache = m_guest_ctx.tpidrro_el0;
+    // The TLS pointer is fixed for a thread's life and read-only to guest code, so take it from
+    // the thread rather than this core's cache. The cache could still hold 0 when a new thread
+    // first ran: its first read of TLS (nn::os's ThreadType at TLS+0x1F8) hit address 0x1F8,
+    // and FINAL FANTASY RESONANCE panicked at boot or froze in battle on the Flip 2.
+    const u64 tpidrro_el0_cache = GetInteger(thread->GetTlsAddress());
+    m_guest_ctx.tpidrro_el0 = tpidrro_el0_cache;
 
     // Critical section begins - minimize operations here
     m_running_thread = thread;

@@ -142,10 +142,25 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             shader_notify->MarkShaderComplete();
         }
     }};
+    build_func = std::move(func);
     if (thread_worker) {
-        thread_worker->QueueWork(std::move(func));
+        thread_worker->QueueWork([this] { RunBuild(); });
     } else {
-        func();
+        RunBuild();
+    }
+}
+
+void ComputePipeline::RunBuild() {
+    if (build_claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    build_func();
+    build_func = nullptr;
+}
+
+void ComputePipeline::BuildUrgently(Common::ThreadWorker& worker) {
+    if (!build_claimed.load(std::memory_order_acquire)) {
+        worker.QueueWork([this] { RunBuild(); });
     }
 }
 

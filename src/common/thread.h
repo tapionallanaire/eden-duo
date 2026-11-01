@@ -108,6 +108,9 @@ enum class ThreadPlacement : u32 {
 void SetCurrentThreadPriority(ThreadPriority new_priority);
 void SetCurrentThreadName(const char* name);
 void SetCurrentThreadToPerformanceCores();
+/// Performance cores, plus a fastest core no other thread is given: for the one thread the frame
+/// waits on most (the GPU thread).
+void SetCurrentThreadToCriticalCores();
 void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();

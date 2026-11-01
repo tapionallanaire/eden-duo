@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -120,6 +124,20 @@ EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer) {
 }
 
 namespace {
+#ifdef __ANDROID__
+/// The GPU's family from the kernel driver, readable before any Vulkan device exists.
+bool IsAdreno6xx() {
+    std::FILE* const file = std::fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
+    if (file == nullptr) {
+        return false;
+    }
+    char model[32]{};
+    const bool read = std::fgets(model, sizeof(model), file) != nullptr;
+    std::fclose(file);
+    return read && std::strncmp(model, "Adreno6", 7) == 0;
+}
+#endif
+
 /// At boot ([force] false) a title value only fills a setting the user left on global; applying
 /// the optimal settings ([force] true) replaces the game's own value too.
 template <typename T, typename Setting>
@@ -179,6 +197,15 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // game freezes on them (Scarlet's intro: 78 s from the enrollment form to Clavell on a
             // fresh cache, 63 s with asynchronous shaders, the photo still drawn).
             DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            // The set measured on the Retroid Pocket Flip 2 (Snapdragon 865, 1x): 29.5-30 FPS in
+            // the overworld. The GPU-write fixes it relies on are for async GPU at low accuracy.
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            DefaultForTitle(Settings::values.dma_accuracy, Settings::DmaAccuracy::Default);
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Default);
+            DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
+            // Boosted GPU timing looked the same and was slower in the overworld.
+            DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
             return true;
         default:
             return false;
@@ -188,6 +215,23 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
 
 void LoadBootOverrides(std::uint64_t program_id) {
     TitleSettings(program_id, false);
+#ifdef __ANDROID__
+    if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && IsAdreno6xx()) {
+        // Turnip's binned (GMEM) rendering hangs the Adreno 6xx in this game's post-processing
+        // passes: the GPU sits in vertex fetch and visibility-stream decode until KGSL resets it
+        // (VK_ERROR_DEVICE_LOST within minutes on the Retroid Pocket Flip 2, Adreno 650).
+        // Rendering straight to memory draws the same image, at about the same frame rate there.
+        // Turnip reads TU_DEBUG when the GPU is created, which comes after this.
+        // ponytail: stays set for the rest of the process (a later game in it also renders to
+        // memory, a little slower); unset it per launch if that ever matters.
+        const std::string current = std::getenv("TU_DEBUG") ? std::getenv("TU_DEBUG") : "";
+        if (current.find("sysmem") == std::string::npos) {
+            const std::string value = current.empty() ? "sysmem" : current + ",sysmem";
+            setenv("TU_DEBUG", value.c_str(), 1);
+            LOG_INFO(Core, "Title defaults: TU_DEBUG={}", value);
+        }
+    }
+#endif
 }
 
 bool HasOptimalSettings(std::uint64_t program_id) {
