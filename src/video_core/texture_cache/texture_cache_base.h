@@ -265,6 +265,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Return true when an image in the region holds GPU writes guest memory does not have
+    [[nodiscard]] bool HasUnsavedGpuWrites(DAddr addr, size_t size);
+
     [[nodiscard]] bool IsRescaling() const noexcept;
 
     [[nodiscard]] bool IsRescaling(const ImageViewBase& image_view) const noexcept;

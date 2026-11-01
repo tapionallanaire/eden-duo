@@ -108,6 +108,7 @@ public:
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) override;
     void OnCacheInvalidation(DAddr addr, u64 size) override;
+    bool HasUnsavedImageWrites(DAddr addr, u64 size) override;
     bool OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size) override;
     bool WaitForPendingDownload(DAddr addr, u64 size) override;
     bool IsRegionAwaitingDownload(DAddr addr, u64 size) override;

@@ -1068,6 +1068,20 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
 }
 
 template <class P>
+bool TextureCache<P>::HasUnsavedGpuWrites(DAddr addr, size_t size) {
+    bool unsaved = false;
+    ForEachImageInRegion(addr, size, [&unsaved](ImageId, ImageBase& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & ImageFlagBits::CpuModified)) {
+            return false;
+        }
+        unsaved = true;
+        return true;
+    });
+    return unsaved;
+}
+
+template <class P>
 bool TextureCache<P>::IsRegionGpuModified(DAddr addr, size_t size) {
     bool is_modified = false;
     ForEachImageInRegion(addr, size, [&is_modified](ImageId, ImageBase& image) {

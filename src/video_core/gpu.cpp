@@ -13,11 +13,13 @@
 #include <memory>
 #include <utility>
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/device_memory_manager.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
 #include "core/hle/service/nvdrv/nvdata.h"
@@ -276,7 +278,9 @@ struct GPU::Impl {
                             return;
                         }
                     }
-                    rasterizer->FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
+                    rasterizer->FlushRegion(addr, size,
+                                            VideoCommon::CacheType::BufferCache |
+                                                VideoCommon::CacheType::TextureCache);
                     rasterizer->OnCacheInvalidation(addr, size);
                     flushed = true;
                 });
@@ -292,7 +296,23 @@ struct GPU::Impl {
     }
 
     bool OnCPUWrite(DAddr addr, u64 size) {
-        return renderer->ReadRasterizer()->OnCPUWrite(addr, size);
+        VideoCore::RasterizerInterface* rasterizer = renderer->ReadRasterizer();
+        // The CPU may write part of an image the GPU wrote (NVN lets games write texels directly;
+        // FINAL FANTASY RESONANCE patches its GPU-built lightmap atlas this way). Guest memory has
+        // only the CPU's bytes, so the image must reach it before the write lands, or the image is
+        // later re-uploaded without the GPU's part. The whole page is covered because callers skip
+        // this check for further writes to a page once it reports true.
+        const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+        const u64 page_size = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE) - page_begin;
+        if (rasterizer->HasUnsavedImageWrites(page_begin, page_size)) {
+            const u64 fence = RequestSyncOperation([rasterizer, page_begin, page_size] {
+                rasterizer->FlushRegion(page_begin, page_size,
+                                        VideoCommon::CacheType::TextureCache);
+            });
+            gpu_thread.TickGPU(is_async);
+            WaitForSyncOperation(fence);
+        }
+        return rasterizer->OnCPUWrite(addr, size);
     }
 
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated

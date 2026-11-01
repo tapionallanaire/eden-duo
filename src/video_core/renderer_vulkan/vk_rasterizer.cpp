@@ -906,6 +906,11 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
     pipeline_cache.InvalidateRegion(addr, size);
 }
 
+bool RasterizerVulkan::HasUnsavedImageWrites(DAddr addr, u64 size) {
+    std::scoped_lock lock{texture_cache.mutex};
+    return texture_cache.HasUnsavedGpuWrites(addr, size);
+}
+
 bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) {
         return true;
@@ -916,7 +921,10 @@ bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size)
         guest_cache_waiters.fetch_add(1, std::memory_order_acq_rel);
         std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
         guest_cache_waiters.fetch_sub(1, std::memory_order_acq_rel);
-        if (buffer_cache.IsRegionGpuModified(addr, size)) {
+        // A GPU-written image in the page is downloaded first, like buffer data: handing the page
+        // to the CPU would otherwise re-upload the image from guest memory without the GPU's part.
+        if (buffer_cache.IsRegionGpuModified(addr, size) ||
+            texture_cache.HasUnsavedGpuWrites(addr, size)) {
             return false;
         }
         texture_cache.WriteMemory(addr, size);
