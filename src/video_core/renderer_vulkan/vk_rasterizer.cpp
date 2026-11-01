@@ -264,6 +264,10 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
+    buffer_cache.on_guest_memory_written = [this](DAddr addr, u64 size) {
+        std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.OnGuestMemoryWritten(addr, size);
+    };
 }
 
 RasterizerVulkan::~RasterizerVulkan() {

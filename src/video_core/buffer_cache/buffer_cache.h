@@ -296,6 +296,9 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
             tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
         tmp.SetAddressAndSize(*cpu_dest_address, amount);
     }
+    if (on_guest_memory_written) {
+        on_guest_memory_written(*cpu_dest_address, amount);
+    }
     return true;
 }
 
@@ -319,6 +322,9 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     const u32 offset = dest_buffer.Offset(*cpu_dst_address);
     runtime.ClearBuffer(dest_buffer, offset, size, value);
     dest_buffer.MarkUsage(offset, size);
+    if (on_guest_memory_written) {
+        on_guest_memory_written(*cpu_dst_address, size);
+    }
     return true;
 }
 
@@ -751,6 +757,9 @@ void BufferCache<P>::PopAsyncBuffers() {
         async_downloads.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end, s32) {
             device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
                                            end - start);
+            if (on_guest_memory_written) {
+                on_guest_memory_written(start, end - start);
+            }
         });
         async_downloads.Subtract(device_addr, copy.size, [&](DAddr start, DAddr end) {
             // Newer writes awaiting a snapshot still own their exact GPU ranges.

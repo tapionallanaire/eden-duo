@@ -280,6 +280,10 @@ public:
 
     std::recursive_mutex mutex;
 
+    /// Marks images uploaded from guest memory in [addr, addr + size) for re-upload after the GPU
+    /// side wrote that memory without CPU-write tracking (DMA, delayed downloads).
+    void OnGuestMemoryWritten(DAddr addr, size_t size, ImageId except = {});
+
 private:
     /// Iterate over all page indices in a range
     template <typename Func>

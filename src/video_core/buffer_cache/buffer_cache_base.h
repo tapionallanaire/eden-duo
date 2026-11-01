@@ -356,6 +356,10 @@ public:
 
     std::recursive_mutex mutex;
 
+    /// Called after the cache writes guest memory itself (DMA copies and clears, delayed
+    /// downloads), which no CPU-write tracking sees.
+    std::function<void(DAddr, u64)> on_guest_memory_written;
+
     /// Counts the GPU buffer writes recorded (MarkWrittenBuffer), so a barrier can tell whether any
     /// came after the previous one.
     u64 gpu_write_serial = 0;
