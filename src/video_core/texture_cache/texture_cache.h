@@ -173,6 +173,23 @@ void TextureCache<P>::RunGarbageCollector() {
 }
 
 template <class P>
+void TextureCache<P>::OnGuestMemoryWritten(DAddr addr, size_t size, ImageId except) {
+    // FINAL FANTASY RESONANCE fills its lightmap brick textures with DMA copies. Without this the
+    // bricks keep the zeros they were first uploaded with, and the lightmap atlas built from them
+    // draws battle party sprites black or glowing for the rest of the session.
+    ForEachImageInRegion(addr, size, [&](ImageId id, Image& image) {
+        if (id == except || True(image.flags & ImageFlagBits::CpuModified) ||
+            True(image.flags & ImageFlagBits::GpuModified)) {
+            return;
+        }
+        image.flags |= ImageFlagBits::CpuModified;
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, id);
+        }
+    });
+}
+
+template <class P>
 void TextureCache<P>::TickFrame() {
     // If we can obtain the memory info, use it instead of the estimate.
     if (runtime.CanReportMemoryUsage()) {
@@ -970,6 +987,8 @@ void TextureCache<P>::PopAsyncFlushes() {
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
                 SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+                OnGuestMemoryWritten(image.cpu_addr, image.guest_size_bytes,
+                                     download_info.object_id);
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
@@ -1065,6 +1084,20 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
     }
     const ImageBase& image = slot_images[image_view.image_id];
     return True(image.flags & ImageFlagBits::Rescaled);
+}
+
+template <class P>
+bool TextureCache<P>::HasUnsavedGpuWrites(DAddr addr, size_t size) {
+    bool unsaved = false;
+    ForEachImageInRegion(addr, size, [&unsaved](ImageId, ImageBase& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & ImageFlagBits::CpuModified)) {
+            return false;
+        }
+        unsaved = true;
+        return true;
+    });
+    return unsaved;
 }
 
 template <class P>
@@ -1203,6 +1236,8 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         return;
     }
 
+    // Guest memory under the image may hold buffer data the GPU wrote and not yet written back.
+    gpu_memory->FlushRegion(gpu_addr, image.guest_size_bytes, VideoCommon::CacheType::BufferCache);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     if (True(image.flags & ImageFlagBits::Converted)) {

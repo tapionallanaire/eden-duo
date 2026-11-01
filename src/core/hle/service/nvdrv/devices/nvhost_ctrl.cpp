@@ -149,7 +149,13 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
         return NvResult::BadParameter;
     }
 
-    if (event.IsBeingUsed()) {
+    // The host action wakes the guest before it marks the event Signalled, so a guest that
+    // re-arms the moment it wakes finds it still Signalling. Its wake has already happened, so
+    // the event is free to re-arm (the action won't overwrite the new wait, see below). Refused,
+    // the wait never armed and FINAL FANTASY RESONANCE's NVN aborted ("GPU interrupt wait
+    // returned TIMEOUT_EXPIRED") every few battles on the Retroid Pocket Flip 2.
+    if (const auto state = event.status.load(std::memory_order_acquire);
+        state == EventState::Waiting || state == EventState::Cancelling) {
         return NvResult::BadParameter;
     }
 
@@ -173,7 +179,10 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
                 EventState::Waiting) {
                 event_.kevent->Signal(system.Kernel());
             }
-            event_.status.store(EventState::Signalled, std::memory_order_release);
+            // The woken guest may already have re-armed this event; leave its wait alone.
+            auto signalling = EventState::Signalling;
+            event_.status.compare_exchange_strong(signalling, EventState::Signalled,
+                                                  std::memory_order_acq_rel);
         });
     return NvResult::Timeout;
 }

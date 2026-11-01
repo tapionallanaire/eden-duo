@@ -91,6 +91,9 @@ class Scheduler;
 using VideoCommon::ShaderInfo;
 
 struct ShaderPools {
+    ShaderPools() = default;
+    explicit ShaderPools(size_t inst_chunk) : inst{inst_chunk} {}
+
     void ReleaseContents() {
         flow_block.ReleaseContents();
         block.ReleaseContents();
@@ -129,7 +132,7 @@ private:
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-        bool build_in_parallel);
+        bool build_in_parallel, bool defer_emit = false);
 
     std::unique_ptr<ComputePipeline> CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                            const ShaderInfo* shader);
@@ -180,7 +183,16 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    /// GPU-thread time new pipelines that may be skipped get per window (see
+    /// CurrentGraphicsPipelineSlowPath).
+    static constexpr std::chrono::milliseconds CREATION_WINDOW{33};
+    static constexpr std::chrono::milliseconds CREATION_BUDGET{6};
+    std::chrono::steady_clock::time_point creation_window_start{};
+    std::chrono::steady_clock::duration creation_time_spent{};
+
     Common::ThreadWorker workers;
+    /// Builds a pipeline a draw or dispatch is about to wait for, ahead of the queue above.
+    mutable Common::ThreadWorker urgent_workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
 };

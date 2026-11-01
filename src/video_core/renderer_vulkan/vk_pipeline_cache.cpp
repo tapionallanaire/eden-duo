@@ -356,6 +356,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue()},
       workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
+      urgent_workers(1, "VkPipelineUrgent"),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background) {
     const auto& float_control{device.FloatControlProperties()};
@@ -596,10 +597,13 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& pipeline{pair->second};
-    if (!is_new) {
-        return pipeline.get();
+    if (is_new) {
+        pipeline = CreateComputePipeline(key, shader);
     }
-    pipeline = CreateComputePipeline(key, shader);
+    // Dispatches always wait for their pipeline (see BuiltPipeline).
+    if (pipeline && !pipeline->IsBuilt()) {
+        pipeline->BuildUrgently(urgent_workers);
+    }
     return pipeline.get();
 }
 
@@ -767,11 +771,29 @@ void PipelineCache::QueueVulkanPipelineCacheFlush() {
 }
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
-    const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
-    auto& pipeline{pair->second};
-    if (is_new) {
-        pipeline = CreateGraphicsPipeline();
+    auto found{graphics_cache.find(graphics_key)};
+    if (found == graphics_cache.end()) {
+        // Translating a new pipeline's shaders costs this thread ~5 ms (Retroid Pocket Flip 2),
+        // and FINAL FANTASY RESONANCE's attacks bring 15-25 new ones at once: the frame stalled
+        // for 100+ ms. A draw that may be skipped until its pipeline builds loses nothing by
+        // waiting a frame for the translation too (the driver build after it takes ~100 ms per
+        // pipeline anyway), so past this frame's budget such draws are skipped and come back.
+        const auto now{std::chrono::steady_clock::now()};
+        if (now - creation_window_start >= CREATION_WINDOW) {
+            creation_window_start = now;
+            creation_time_spent = {};
+        }
+        const auto& draw_state{maxwell3d->draw_manager.draw_state};
+        const bool may_skip{use_asynchronous_shaders && draw_state.index_buffer.count > 6 &&
+                            draw_state.vertex_buffer.count > 6};
+        if (may_skip && creation_time_spent >= CREATION_BUDGET) {
+            return nullptr;
+        }
+        auto created{CreateGraphicsPipeline()};
+        creation_time_spent += std::chrono::steady_clock::now() - now;
+        found = graphics_cache.emplace(graphics_key, std::move(created)).first;
     }
+    auto& pipeline{found->second};
     if (!pipeline) {
         return nullptr;
     }
@@ -786,7 +808,11 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
+    // The draw will wait for this pipeline. Queued behind the asynchronous builds, it waited for
+    // all of them: FINAL FANTASY RESONANCE's first attacks, with a dozen new effects each, fell to
+    // 9-12 FPS. Built at once instead, the draw waits for this one only.
     if (!use_asynchronous_shaders) {
+        pipeline->BuildUrgently(urgent_workers);
         return pipeline;
     }
     // If games are using a small index count, we can assume these are full screen quads.
@@ -794,19 +820,43 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     // can't be built async
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     if (draw_state.index_buffer.count <= 6 || draw_state.vertex_buffer.count <= 6) {
+        pipeline->BuildUrgently(urgent_workers);
         return pipeline;
     }
     return nullptr;
 }
 
+namespace {
+/// Programs translated on the GPU thread; their SPIR-V is emitted when the pipeline builds.
+struct DeferredGraphicsStages {
+    ShaderPools pools{1024};
+    std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
+    std::array<Shader::RuntimeInfo, Maxwell::MaxShaderProgram> runtime_infos{};
+};
+} // Anonymous namespace
+
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
-    ShaderPools& pools, const GraphicsPipelineCacheKey& key,
+    ShaderPools& given_pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-    bool build_in_parallel) try {
+    bool build_in_parallel, bool defer_emit) try {
+    // No vertex program: Vulkan has no pipeline for that and Turnip (Mesa 27, V38 and v27 R1)
+    // dereferences the missing stage. FINAL FANTASY RESONANCE issues such a draw under the macro
+    // interpreter; once cached, every boot crashed loading it. Draw nothing, as nothing valid can.
+    if (key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] == 0) {
+        return nullptr;
+    }
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
-    std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
+    // Translation reads the game's state as it is at this draw, so it stays on this thread.
+    // Deferred, SPIR-V emission (which only reads the translated programs) runs when the pipeline
+    // builds, on a worker; the programs and their IR are kept until then.
+    const auto deferred = defer_emit ? std::make_shared<DeferredGraphicsStages>() : nullptr;
+    std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> local_programs;
+    std::array<Shader::RuntimeInfo, Maxwell::MaxShaderProgram> local_runtime_infos{};
+    auto& programs{deferred ? deferred->programs : local_programs};
+    auto& runtime_infos{deferred ? deferred->runtime_infos : local_runtime_infos};
+    ShaderPools& pools{deferred ? deferred->pools : given_pools};
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
     const bool uses_vertex_b{key.unique_hashes[1] != 0};
 
@@ -854,58 +904,79 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
-    std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
+    const bool emulates_layer{layer_source_program != nullptr};
+    const size_t first_stage{uses_vertex_a && uses_vertex_b ? 1U : 0U};
+    const auto is_present = [unique_hashes = key.unique_hashes, emulates_layer](size_t index) {
+        const bool is_emulated_stage =
+            emulates_layer && index == static_cast<u32>(Maxwell::ShaderType::Geometry);
+        return unique_hashes[index] != 0 || is_emulated_stage;
+    };
 
     const Shader::IR::Program* previous_stage{};
-    Shader::Backend::Bindings binding;
-    for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0; index < Maxwell::MaxShaderProgram;
-         ++index) {
-        const bool is_emulated_stage = layer_source_program != nullptr &&
-                                       index == static_cast<u32>(Maxwell::ShaderType::Geometry);
-        if (key.unique_hashes[index] == 0 && !is_emulated_stage) {
+    for (size_t index = first_stage; index < Maxwell::MaxShaderProgram; ++index) {
+        if (!is_present(index)) {
             continue;
         }
         UNIMPLEMENTED_IF(index == 0);
 
         Shader::IR::Program& program{programs[index]};
-        const size_t stage_index{index - 1};
-        infos[stage_index] = &program.info;
-
-        const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
-        ConvertLegacyToGeneric(program, runtime_info);
-        const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
-        device.SaveShader(code);
-        modules[stage_index] = BuildShader(device, code);
-
-        // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
-        // is independent and gated only by gpu_log_shader_dumps.
-        const bool should_log = GPU::Logging::IsActive();
-        const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
-        if (should_log || should_dump) {
-            static constexpr std::array stage_names{"vertex", "tess_control", "tess_eval", "geometry", "fragment"};
-            const std::string shader_name = fmt::format("shader_{:016x}_{}", key.unique_hashes[index], stage_names[stage_index]);
-            if (should_log) {
-                const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
-                    code.size() * sizeof(u32), key.unique_hashes[index]);
-                GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
-            }
-            if (should_dump) {
-                GPU::Logging::DumpSpirvShader(key.unique_hashes[index],
-                                              std::span<const u32>(code.data(), code.size()));
-            }
-        }
-
-        if (device.HasDebuggingToolAttached()) {
-            const std::string name{fmt::format("Shader {:016x}", key.unique_hashes[index])};
-            modules[stage_index].SetObjectNameEXT(name.c_str());
-        }
+        infos[index - 1] = &program.info;
+        runtime_infos[index] = MakeRuntimeInfo(programs, key, program, previous_stage, device);
+        ConvertLegacyToGeneric(program, runtime_infos[index]);
         previous_stage = &program;
+    }
+
+    const auto emit = [this, unique_hashes = key.unique_hashes, first_stage, is_present, &programs,
+                       &runtime_infos](std::array<vk::ShaderModule, Maxwell::MaxShaderStage>& modules) {
+        Shader::Backend::Bindings binding;
+        for (size_t index = first_stage; index < Maxwell::MaxShaderProgram; ++index) {
+            if (!is_present(index)) {
+                continue;
+            }
+            const size_t stage_index{index - 1};
+            const std::vector<u32> code{
+                EmitSPIRV(profile, runtime_infos[index], programs[index], binding)};
+            device.SaveShader(code);
+            modules[stage_index] = BuildShader(device, code);
+
+            // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
+            // is independent and gated only by gpu_log_shader_dumps.
+            const bool should_log = GPU::Logging::IsActive();
+            const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
+            if (should_log || should_dump) {
+                static constexpr std::array stage_names{"vertex", "tess_control", "tess_eval", "geometry", "fragment"};
+                const std::string shader_name = fmt::format("shader_{:016x}_{}", unique_hashes[index], stage_names[stage_index]);
+                if (should_log) {
+                    const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
+                        code.size() * sizeof(u32), unique_hashes[index]);
+                    GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
+                }
+                if (should_dump) {
+                    GPU::Logging::DumpSpirvShader(unique_hashes[index],
+                                                  std::span<const u32>(code.data(), code.size()));
+                }
+            }
+
+            if (device.HasDebuggingToolAttached()) {
+                const std::string name{fmt::format("Shader {:016x}", unique_hashes[index])};
+                modules[stage_index].SetObjectNameEXT(name.c_str());
+            }
+        }
+    };
+    std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
+    GraphicsPipeline::EmitModules deferred_emit;
+    if (deferred) {
+        deferred_emit = [emit, deferred](std::array<vk::ShaderModule, Maxwell::MaxShaderStage>& m) {
+            emit(m);
+        };
+    } else {
+        emit(modules);
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
         descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
-        render_pass_cache, key, std::move(modules), infos);
+        render_pass_cache, key, std::move(modules), infos, std::move(deferred_emit));
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();
@@ -918,7 +989,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         ++env_index;
 
         const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
-        Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
+        Shader::Maxwell::Flow::CFG cfg(env, given_pools.flow_block, cfg_offset, index == 0);
         env.Dump(hash, key.unique_hashes[index]);
     }
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
@@ -930,8 +1001,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
 
     main_pools.ReleaseContents();
-    auto pipeline{
-        CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr, true)};
+    auto pipeline{CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr,
+                                         true, true)};
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }

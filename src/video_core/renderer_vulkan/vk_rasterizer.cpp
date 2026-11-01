@@ -264,6 +264,10 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       wfi_event(device.GetLogical().CreateEvent()) {
     scheduler.SetQueryCache(query_cache);
+    buffer_cache.on_guest_memory_written = [this](DAddr addr, u64 size) {
+        std::scoped_lock lock{texture_cache.mutex};
+        texture_cache.OnGuestMemoryWritten(addr, size);
+    };
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -906,6 +910,11 @@ void RasterizerVulkan::OnCacheInvalidation(DAddr addr, u64 size) {
     pipeline_cache.InvalidateRegion(addr, size);
 }
 
+bool RasterizerVulkan::HasUnsavedImageWrites(DAddr addr, u64 size) {
+    std::scoped_lock lock{texture_cache.mutex};
+    return texture_cache.HasUnsavedGpuWrites(addr, size);
+}
+
 bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size) {
     if (addr == 0 || size == 0) {
         return true;
@@ -916,7 +925,10 @@ bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size)
         guest_cache_waiters.fetch_add(1, std::memory_order_acq_rel);
         std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
         guest_cache_waiters.fetch_sub(1, std::memory_order_acq_rel);
-        if (buffer_cache.IsRegionGpuModified(addr, size)) {
+        // A GPU-written image in the page is downloaded first, like buffer data: handing the page
+        // to the CPU would otherwise re-upload the image from guest memory without the GPU's part.
+        if (buffer_cache.IsRegionGpuModified(addr, size) ||
+            texture_cache.HasUnsavedGpuWrites(addr, size)) {
             return false;
         }
         texture_cache.WriteMemory(addr, size);

@@ -265,6 +265,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Return true when an image in the region holds GPU writes guest memory does not have
+    [[nodiscard]] bool HasUnsavedGpuWrites(DAddr addr, size_t size);
+
     [[nodiscard]] bool IsRescaling() const noexcept;
 
     [[nodiscard]] bool IsRescaling(const ImageViewBase& image_view) const noexcept;
@@ -276,6 +279,10 @@ public:
     void PrepareImage(ImageId image_id, bool is_modification, bool invalidate);
 
     std::recursive_mutex mutex;
+
+    /// Marks images uploaded from guest memory in [addr, addr + size) for re-upload after the GPU
+    /// side wrote that memory without CPU-write tracking (DMA, delayed downloads).
+    void OnGuestMemoryWritten(DAddr addr, size_t size, ImageId except = {});
 
 private:
     /// Iterate over all page indices in a range

@@ -284,17 +284,20 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     dest_buffer.MarkUsage(copy.dst_offset, copy.size);
     runtime.CopyBuffer(dest_buffer, src_buffer, copies, true);
     if (has_new_downloads) {
+        // The copy runs on the GPU in order with the work around it, and its destination is now
+        // GPU-modified, so a CPU or command-stream read downloads it. Waiting for the GPU here
+        // drained the queue at each copy: 42% of the GPU thread in FINAL FANTASY RESONANCE's
+        // battles, which copy GPU-written data every frame.
         memory_tracker.MarkRegionAsGpuModified(*cpu_dest_address, amount);
-        const bool should_sync = Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
-        if (should_sync) {
-            runtime.Finish();
-        }
     }
 
     {
         Tegra::Memory::DeviceGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::UnsafeReadWrite>
             tmp(device_memory, *cpu_src_address, amount, &tmp_buffer);
         tmp.SetAddressAndSize(*cpu_dest_address, amount);
+    }
+    if (on_guest_memory_written) {
+        on_guest_memory_written(*cpu_dest_address, amount);
     }
     return true;
 }
@@ -319,6 +322,9 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     const u32 offset = dest_buffer.Offset(*cpu_dst_address);
     runtime.ClearBuffer(dest_buffer, offset, size, value);
     dest_buffer.MarkUsage(offset, size);
+    if (on_guest_memory_written) {
+        on_guest_memory_written(*cpu_dst_address, size);
+    }
     return true;
 }
 
@@ -704,6 +710,14 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         normalized_copies.push_back(second_copy);
     }
     runtime.PostDownloadBarrier();
+    // Guest bytes as of this download, so the writeback can leave anything the CPU changes later.
+    std::vector<u8> snapshot(total_size_bytes);
+    for (const BufferCopy& copy : normalized_copies) {
+        device_memory.ReadBlockUnsafe(static_cast<DAddr>(copy.src_offset),
+                                      snapshot.data() + (copy.dst_offset - download_staging.offset),
+                                      copy.size);
+    }
+    async_snapshots.emplace_back(std::move(snapshot), download_staging.offset);
     pending_downloads.emplace_back(std::move(normalized_copies));
     async_buffers.emplace_back(download_staging);
 }
@@ -741,6 +755,7 @@ void BufferCache<P>::PopAsyncBuffers() {
     }
     u8* base = async_buffer->mapped_span.data();
     const size_t base_offset = async_buffer->offset;
+    const std::vector<u8> snapshot = std::move(async_snapshots.front().first);
     for (const auto& copy : downloads) {
         if (copy.size == 0) {
             continue;
@@ -749,8 +764,41 @@ void BufferCache<P>::PopAsyncBuffers() {
         const u64 dst_offset = copy.dst_offset - base_offset;
         const u8* read_mapped_memory = base + dst_offset;
         async_downloads.ForEachInRange(device_addr, copy.size, [&](DAddr start, DAddr end, s32) {
-            device_memory.WriteBlockUnsafe(start, &read_mapped_memory[start - device_addr],
-                                           end - start);
+            // A bound range is marked GPU-written as a whole, but the shader may write only part
+            // of it while the CPU fills the rest. Bytes the guest changed after the snapshot are
+            // newer than this download, so they stay and are re-uploaded before the GPU reads them.
+            const size_t size = end - start;
+            const u8* was = snapshot.data() + dst_offset + (start - device_addr);
+            const u8* gpu = &read_mapped_memory[start - device_addr];
+            async_guest_now.resize(size);
+            device_memory.ReadBlockUnsafe(start, async_guest_now.data(), size);
+            const u8* now = async_guest_now.data();
+            const auto write_back = [&](size_t offset, size_t count) {
+                device_memory.WriteBlockUnsafe(start + offset, gpu + offset, count);
+                for (size_t later = 1; later < pending_downloads.size(); ++later) {
+                    PatchAsyncSnapshot(later, start + offset, gpu + offset, count);
+                }
+            };
+            if (std::memcmp(now, was, size) == 0) {
+                write_back(0, size);
+            } else {
+                for (size_t i = 0; i < size;) {
+                    const bool cpu_wrote = now[i] != was[i];
+                    size_t j = i + 1;
+                    while (j < size && (now[j] != was[j]) == cpu_wrote) {
+                        ++j;
+                    }
+                    if (cpu_wrote) {
+                        memory_tracker.MarkRegionAsCpuModified(start + i, j - i);
+                    } else {
+                        write_back(i, j - i);
+                    }
+                    i = j;
+                }
+            }
+            if (on_guest_memory_written) {
+                on_guest_memory_written(start, end - start);
+            }
         });
         async_downloads.Subtract(device_addr, copy.size, [&](DAddr start, DAddr end) {
             // Newer writes awaiting a snapshot still own their exact GPU ranges.
@@ -780,6 +828,21 @@ void BufferCache<P>::PopAsyncBuffers() {
     async_buffers_death_ring.emplace_back(*async_buffer);
     async_buffers.pop_front();
     pending_downloads.pop_front();
+    async_snapshots.pop_front();
+}
+
+template <class P>
+void BufferCache<P>::PatchAsyncSnapshot(size_t index, DAddr addr, const u8* data, u64 size) {
+    auto& [bytes, base] = async_snapshots[index];
+    for (const BufferCopy& copy : pending_downloads[index]) {
+        const DAddr copy_start = static_cast<DAddr>(copy.src_offset);
+        const DAddr lo = (std::max)(copy_start, addr);
+        const DAddr hi = (std::min)(copy_start + copy.size, addr + size);
+        if (lo < hi) {
+            std::memcpy(bytes.data() + (copy.dst_offset - base) + (lo - copy_start),
+                        data + (lo - addr), hi - lo);
+        }
+    }
 }
 
 template <class P>
@@ -1649,10 +1712,9 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
         if (buffer.IsInBounds(device_addr, size)) {
-            const bool should_sync = Settings::IsGPUFenceBehaviorAccurate();
-            if (should_sync) {
-                SynchronizeBufferWrites(buffer);
-            }
+            // No wait for the buffer's last GPU write: every caller binds it for GPU use, which
+            // the rasterizer's barriers order, and CPU reads download it. Waiting here stalled
+            // the GPU thread on the host GPU at each draw (FINAL FANTASY RESONANCE: 40% of it).
             bool usable = true;
             if constexpr (requires { buffer.IsSparseCompatible(); }) {
                 if (sparse_compatible && !buffer.IsSparseCompatible()) {
@@ -1665,16 +1727,6 @@ BufferId BufferCache<P>::FindBuffer(DAddr device_addr, u32 size, bool sparse_com
         }
     }
     return CreateBuffer(device_addr, size, sparse_compatible);
-}
-
-template <class P>
-void BufferCache<P>::SynchronizeBufferWrites(Buffer& buffer) {
-    if constexpr (!IS_OPENGL) {
-        const u64 buffer_tick = buffer.getWriteTick();
-        if (!runtime.IsFree(buffer_tick)) {
-            runtime.Wait(buffer_tick);
-        }
-    }
 }
 
 template <class P>
