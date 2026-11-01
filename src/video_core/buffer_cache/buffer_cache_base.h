@@ -313,6 +313,10 @@ public:
     void PopAsyncFlushes();
     void PopAsyncBuffers();
 
+    /// Applies a writeback to the snapshot of the pending download at index, which still expects
+    /// the bytes it saw before
+    void PatchAsyncSnapshot(size_t index, DAddr addr, const u8* data, u64 size);
+
     /// True when every GPU write in the region is in an async download already recorded, and none
     /// came after it: popping that download (PopAsyncFlushes) gives the region to the guest.
     [[nodiscard]] bool IsRegionAwaitingAsyncDownload(DAddr addr, size_t size);
@@ -546,6 +550,9 @@ private:
     Common::OverlapRangeSet<DAddr> async_downloads;
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
+    /// Guest bytes at each pending download's commit, laid out like its staging buffer
+    std::deque<std::pair<std::vector<u8>, size_t>> async_snapshots;
+    std::vector<u8> async_guest_now;
     std::optional<Async_Buffer> current_buffer;
 
     std::deque<Async_Buffer> async_buffers_death_ring;
