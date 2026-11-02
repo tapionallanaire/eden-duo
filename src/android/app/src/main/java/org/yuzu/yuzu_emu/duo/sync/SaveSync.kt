@@ -217,6 +217,7 @@ class SaveSync(
 
     fun disconnect() {
         val id = hub ?: return
+        context.getSystemService(JobScheduler::class.java).cancel(PERIODIC_JOB_ID)
         runCatching {
             api("DELETE", "/rest/config/folders/$FOLDER")
             api("DELETE", "/rest/config/devices/$id")
@@ -349,12 +350,33 @@ class SaveSync(
         context.getSystemService(JobScheduler::class.java).schedule(info)
     }
 
-    /** One exit upload of [consoleId]: true once the PC holds everything this device has. Blocking. */
+    /**
+     * One upload of [consoleId] ([EVERY] for all consoles): true once the PC holds everything this device has.
+     * Blocking.
+     */
     fun upload(consoleId: String): Boolean {
-        val console = consoles.find { it.id == consoleId } ?: return true
-        if (hub == null || !available) return true
-        sync(listOf(console), 15_000) ?: return false
+        val which = if (consoleId == EVERY) consoles else consoles.filter { it.id == consoleId }
+        if (which.isEmpty() || hub == null || !available) return true
+        sync(which, 15_000) ?: return false
         return waitUploaded(120_000)
+    }
+
+    /**
+     * Every console every 15 minutes (Android's shortest period) while there is a network, so saves also follow the
+     * user between games, not only at launch and exit. Scheduled once a hub is set; idempotent.
+     */
+    fun schedulePeriodic() {
+        val job = exitJob ?: return
+        if (hub == null || !available) return
+        val scheduler = context.getSystemService(JobScheduler::class.java)
+        if (scheduler.getPendingJob(PERIODIC_JOB_ID) != null) return
+        scheduler.schedule(
+            JobInfo.Builder(PERIODIC_JOB_ID, ComponentName(context, job))
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setPeriodic(15 * 60_000L)
+                .setExtras(PersistableBundle().apply { putString("console", EVERY) })
+                .build()
+        )
     }
 
     /** Waits until the hub reports it has all of this device's files in the saves folder. */
@@ -374,6 +396,7 @@ class SaveSync(
      */
     fun syncAllInBackground(activity: Activity? = null) {
         if (hub == null || !available) return
+        schedulePeriodic()
         val now = System.currentTimeMillis()
         if (now - lastAll >= 5 * 60_000) {
             lastAll = now
@@ -712,13 +735,17 @@ class SaveSync(
         private const val TAG = "SaveSync"
         const val FOLDER = "calamansi-saves"
         private const val EXIT_JOB_ID = 0x5a5e0000
+        private const val PERIODIC_JOB_ID = 0x5a5effff
+        /** The "console" extra of the periodic job: every console. */
+        const val EVERY = "*"
         private val worker = Executors.newSingleThreadExecutor()
         private val main = Handler(Looper.getMainLooper())
     }
 }
 
 /**
- * Uploads one console's saves after a game, retried by JobScheduler until the PC has them. Each app declares a subclass
+ * Uploads one console's saves after a game, retried by JobScheduler until the PC has them, and runs the periodic
+ * all-console sync. Each app declares a subclass
  * in its manifest (android:permission="android.permission.BIND_JOB_SERVICE") that returns its [SaveSync].
  */
 abstract class SaveSyncJob : JobService() {
@@ -729,7 +756,8 @@ abstract class SaveSyncJob : JobService() {
         Thread {
             val done = runCatching { saveSync(applicationContext).upload(console) }
                 .onFailure { Log.w("SaveSync", "exit upload $console", it) }.getOrDefault(false)
-            Log.i("SaveSync", "exit upload $console: ${if (done) "on the PC" else "not yet, will retry"}")
+            val what = if (console == SaveSync.EVERY) "periodic sync" else "exit upload $console"
+            Log.i("SaveSync", "$what: ${if (done) "on the PC" else "not yet, will retry"}")
             jobFinished(params, !done)
         }.start()
         return true
