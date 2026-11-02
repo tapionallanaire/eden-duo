@@ -151,8 +151,12 @@ class SaveSync(
         for (id in pending.keys()) found[id] = pending.getJSONObject(id).optString("name").ifEmpty { id.take(7) }
         val seen = JSONObject(api("GET", "/rest/system/discovery"))
         for (id in seen.keys()) {
-            val address = seen.getJSONObject(id).optJSONArray("addresses")?.optString(0).orEmpty()
-            found.putIfAbsent(id, "${id.take(7)} at ${address.substringAfter("://").substringBeforeLast(':')}")
+            val addresses = seen.getJSONObject(id).optJSONArray("addresses")
+            val hosts = (0 until (addresses?.length() ?: 0))
+                .map { addresses!!.getString(it).substringAfter("://").substringBeforeLast(':') }
+            // The LAN IPv4 address is the one people recognise; link-local IPv6 ones are noise.
+            val host = hosts.firstOrNull { it.matches(Regex("""\d+\.\d+\.\d+\.\d+""")) } ?: hosts.firstOrNull().orEmpty()
+            found.putIfAbsent(id, "${id.take(7)} at $host")
         }
         found.remove(me)
         return found.toList()
