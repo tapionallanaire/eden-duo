@@ -12,7 +12,6 @@
 package org.yuzu.yuzu_emu.duo.sync
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
@@ -22,7 +21,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.View
+import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.snackbar.Snackbar
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -42,7 +47,9 @@ class SyncConsole(
     val id: String,
     val label: String,
     val depth: Int,
-    val units: (synced: List<String>) -> Map<String, File>
+    val units: (synced: List<String>) -> Map<String, File>,
+    /** The game's name for a unit, when this app knows it (shown in the conflict dialog). */
+    val name: (unit: String) -> String? = { null }
 )
 
 class Conflict(val console: SyncConsole, val unit: String, val local: File, val remote: File)
@@ -69,7 +76,7 @@ class SaveSync(
 
     /** Device ID of the hub (the PC), once the user has picked it. */
     val hub: String? get() = prefs.getString("hub", null)
-    val hubName: String get() = prefs.getString("hub_name", null) ?: "your PC"
+    val hubName: String get() = prefs.getString("hub_name", null)?.takeIf { it.isNotEmpty() } ?: "your PC"
     val deviceName get() = "$appName (${Build.MODEL})"
 
     // ---- Syncthing process and REST API ----
@@ -150,16 +157,33 @@ class SaveSync(
         val pending = JSONObject(api("GET", "/rest/cluster/pending/devices"))
         for (id in pending.keys()) found[id] = pending.getJSONObject(id).optString("name").ifEmpty { id.take(7) }
         val seen = JSONObject(api("GET", "/rest/system/discovery"))
+        val own = ownAddresses()
         for (id in seen.keys()) {
             val addresses = seen.getJSONObject(id).optJSONArray("addresses")
-            val hosts = (0 until (addresses?.length() ?: 0))
-                .map { addresses!!.getString(it).substringAfter("://").substringBeforeLast(':') }
+            val hosts = (0 until (addresses?.length() ?: 0)).map {
+                addresses!!.getString(it).substringAfter("://").substringBeforeLast(':')
+                    .removePrefix("[").removeSuffix("]").substringBefore('%')
+            }
+            // The other save-sync app on this same handheld (Calamansi next to Duet Plus) is not a PC.
+            if (hosts.any { it in own }) continue
             // The LAN IPv4 address is the one people recognise; link-local IPv6 ones are noise.
             val host = hosts.firstOrNull { it.matches(Regex("""\d+\.\d+\.\d+\.\d+""")) } ?: hosts.firstOrNull().orEmpty()
-            found.putIfAbsent(id, "${id.take(7)} at $host")
+            found.putIfAbsent(id, "Syncthing at $host")
         }
         found.remove(me)
         return found.toList()
+    }
+
+    private fun ownAddresses(): Set<String> = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .flatMap { it.inetAddresses.toList() }.mapNotNull { it.hostAddress?.substringBefore('%') }.toSet()
+    }.getOrDefault(emptySet())
+
+    /** The PC's own device name, once it has connected (Syncthing fills in a blank name from the PC's hello). */
+    fun refreshHubName() {
+        val id = hub ?: return
+        runCatching { JSONObject(api("GET", "/rest/config/devices/$id")).optString("name") }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }?.let { prefs.edit().putString("hub_name", it).apply() }
     }
 
     /** Adds the hub and offers it the saves folder; the user accepts both on the PC. */
@@ -210,10 +234,14 @@ class SaveSync(
      */
     fun waitInSync(timeoutMs: Long, skip: () -> Boolean = { false }): Boolean {
         rescan()
-        val end = System.currentTimeMillis() + timeoutMs
+        val begin = System.currentTimeMillis()
+        val end = begin + timeoutMs
         var quiet = 0
         while (System.currentTimeMillis() < end && !skip()) {
-            val idle = hubOnline() && runCatching {
+            val online = hubOnline()
+            // An unreachable PC shouldn't hold a game back: Syncthing reconnects within a second or two when it's up.
+            if (!online && System.currentTimeMillis() - begin > 3000) return false
+            val idle = online && runCatching {
                 val s = JSONObject(api("GET", "/rest/db/status?folder=$FOLDER"))
                 s.optString("state") == "idle" && s.optLong("needTotalItems") == 0L
             }.getOrDefault(false)
@@ -240,6 +268,7 @@ class SaveSync(
 
     fun resolve(c: Conflict, keepLocal: Boolean) {
         resolveConflict(c.unit, c.local, c.remote, File(backups, c.console.id), keepLocal, db.of(c.console.id))
+        forget(c)
         if (keepLocal) rescan()
     }
 
@@ -248,12 +277,11 @@ class SaveSync(
     /** Start, wait for the hub, reconcile. Null when the hub couldn't be reached (or [skip] said so). Blocking. */
     fun sync(consoles: List<SyncConsole>, timeoutMs: Long, skip: () -> Boolean = { false }): List<Conflict>? {
         if (hub == null || !start() || !waitInSync(timeoutMs, skip) || skip()) return null
-        return consoles.flatMap { reconcile(it) }
+        return consoles.flatMap { reconcile(it) }.also(::remember)
     }
 
-    fun summary(): List<String> = db.rows()
 
-    // ---- UI ----
+    // ---- UI: Material dialogs only for decisions and waits the user sits through; snackbars for feedback ----
 
     /** Syncs [consoleId]'s saves, asks about conflicts, then runs [launch]. Always launches, like Steam. */
     fun beforeLaunch(activity: Activity, consoleId: String, launch: () -> Unit) {
@@ -261,59 +289,84 @@ class SaveSync(
         if (hub == null || console == null || !available) return launch()
         // "Play now" only stops the wait for the PC; a copy already under way finishes before the game starts.
         val skipped = java.util.concurrent.atomic.AtomicBoolean()
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("Syncing saves")
-            .setMessage("Checking $hubName for newer ${console.label} saves…")
-            .setCancelable(false)
-            .setNegativeButton("Play now") { _, _ -> skipped.set(true) }
-            .show()
+        val finished = java.util.concurrent.atomic.AtomicBoolean()
+        val dialog = progress(activity, "Syncing saves", "Checking $hubName for newer ${console.label} saves…")
+            .setNegativeButton("Play now") { _, _ -> skipped.set(true) }.create()
+        // A quick sync (PC up, nothing new) launches without a dialog flashing past.
+        main.postDelayed({ if (!finished.get() && !activity.isFinishing) dialog.show() }, 600)
         worker.execute {
             val conflicts = runCatching { sync(listOf(console), 10_000) { skipped.get() } }
                 .onFailure { Log.w(TAG, "sync before launch", it) }.getOrNull()
             main.post {
+                finished.set(true)
                 if (dialog.isShowing) dialog.dismiss()
                 if (activity.isFinishing || activity.isDestroyed) return@post
                 if (skipped.get()) return@post launch()
                 if (conflicts == null) {
-                    Toast.makeText(activity, "Couldn't reach $hubName: playing with this device's saves", Toast.LENGTH_LONG).show()
+                    // ponytail: a toast, not a snackbar: the game's window covers this one at once.
+                    Toast.makeText(activity, "Couldn't reach $hubName. Playing with this device's saves.", Toast.LENGTH_LONG).show()
                 }
                 askConflicts(activity, conflicts.orEmpty(), launch)
             }
         }
     }
 
-    /** Pushes the saves a session just wrote. Conflicts wait for the next launch or the settings screen. */
+    /** Pushes the saves a session just wrote. Conflicts are asked about when an app screen is next in front. */
     fun afterExit(consoleId: String) {
         val console = consoles.find { it.id == consoleId } ?: return
         if (hub == null || !available) return
         worker.execute { runCatching { sync(listOf(console), 15_000) }.onFailure { Log.w(TAG, "sync after exit", it) } }
     }
 
-    /** Every console, at most every few minutes (HOME resume). */
-    fun syncAllInBackground() {
+    /**
+     * Every console, at most every few minutes (HOME resume). Mismatched saves found by this or an earlier background
+     * sync (after a game, say) are put to the user on [activity] straight away, like Steam's cloud conflict prompt.
+     */
+    fun syncAllInBackground(activity: Activity? = null) {
         if (hub == null || !available) return
         val now = System.currentTimeMillis()
-        if (now - lastAll < 5 * 60_000) return
-        lastAll = now
-        worker.execute { runCatching { sync(consoles, 10_000) }.onFailure { Log.w(TAG, "sync all", it) } }
+        if (now - lastAll >= 5 * 60_000) {
+            lastAll = now
+            worker.execute { runCatching { sync(consoles, 10_000) }.onFailure { Log.w(TAG, "sync all", it) } }
+        }
+        // Queued behind that sync, so it asks about what it found too.
+        if (activity != null) worker.execute { main.post { askPending(activity) } }
+    }
+
+    private fun askPending(activity: Activity) {
+        if (asking || activity.isFinishing || activity.isDestroyed) return
+        val conflicts = synchronized(pending) { pending.values.toList() }
+        if (conflicts.isEmpty()) return
+        asking = true
+        askConflicts(activity, conflicts) { asking = false }
     }
 
     private fun askConflicts(activity: Activity, conflicts: List<Conflict>, then: () -> Unit) {
         val c = conflicts.firstOrNull() ?: return then()
+        val next = { askConflicts(activity, conflicts.drop(1), then) }
         val fmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-        fun modified(f: File) = f.walkTopDown().filter { it.isFile }.maxOfOrNull { it.lastModified() }
-            ?.let { fmt.format(Date(it)) } ?: "unknown"
-        AlertDialog.Builder(activity)
-            .setTitle("Save conflict")
+        fun files(f: File) = f.walkTopDown().filter { it.isFile && !isSyncthingFile(it.name) }.toList()
+        fun newest(f: File) = files(f).maxOfOrNull { it.lastModified() } ?: 0L
+        fun size(f: File) = files(f).sumOf { it.length() }
+            .let { if (it < 1024 * 1024) "${(it + 1023) / 1024} KB" else "%.1f MB".format(it / 1048576.0) }
+        val here = newest(c.local)
+        val there = newest(c.remote)
+        fun side(name: String, at: Long, f: File, newer: Boolean) =
+            "$name${if (newer) " (newer)" else ""}\n${if (at > 0) fmt.format(Date(at)) else "Date unknown"} · ${size(f)}"
+        val game = c.console.name(c.unit) ?: "${c.console.label} ${c.unit}"
+        val left = if (conflicts.size > 1) " (${conflicts.size} to choose)" else ""
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Which save do you want to keep?$left")
             .setMessage(
-                "${c.console.label} ${c.unit} changed here and on another device since the last sync.\n\n" +
-                    "This device: ${modified(c.local)}\nSynced copy: ${modified(c.remote)}\n\n" +
+                "$game changed on this device and on $hubName since they last matched.\n\n" +
+                    side("This device", here, c.local, here > there) + "\n\n" +
+                    side("Synced save", there, c.remote, there > here) + "\n\n" +
                     "The save you replace is kept as a backup."
             )
             .setCancelable(false)
-            .setPositiveButton("Use synced copy") { _, _ -> resolveThen(activity, c, false) { askConflicts(activity, conflicts.drop(1), then) } }
-            .setNegativeButton("Keep this device's") { _, _ -> resolveThen(activity, c, true) { askConflicts(activity, conflicts.drop(1), then) } }
-            .setNeutralButton("Decide later") { _, _ -> askConflicts(activity, conflicts.drop(1), then) }
+            .setPositiveButton("Use synced save") { _, _ -> resolveThen(activity, c, false, next) }
+            .setNegativeButton("Use this device's") { _, _ -> resolveThen(activity, c, true, next) }
+            .setNeutralButton("Decide later") { _, _ -> forget(c); next() }
             .show()
     }
 
@@ -321,16 +374,16 @@ class SaveSync(
         worker.execute {
             val error = runCatching { resolve(c, keepLocal) }.exceptionOrNull()
             main.post {
-                if (error != null) Toast.makeText(activity, "Couldn't copy the save: ${error.message}", Toast.LENGTH_LONG).show()
+                if (error != null) note(activity, "Couldn't copy the save: ${error.message}")
                 then()
             }
         }
     }
 
-    /** The settings entry: connect to the hub, or show sync state, sync now, resolve conflicts, disconnect. */
+    /** The settings entry: connect to the hub, or show sync state and its one next action. */
     fun showSettings(activity: Activity) {
         if (!available) {
-            AlertDialog.Builder(activity).setTitle("Save sync")
+            MaterialAlertDialogBuilder(activity).setTitle("Save sync")
                 .setMessage("Save sync isn't included in this build (no Syncthing for this CPU).")
                 .setPositiveButton(android.R.string.ok, null).show()
             return
@@ -339,23 +392,23 @@ class SaveSync(
     }
 
     private fun askConnect(activity: Activity) {
-        AlertDialog.Builder(activity)
-            .setTitle("Connect to Syncthing")
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Connect to Syncthing?")
             .setMessage(
-                "Sync your saves with Syncthing on your PC over the network. $appName runs its own Syncthing; " +
-                    "you accept this device on the PC once, then saves sync before and after every game."
+                "Your saves sync with Syncthing on your PC over Wi-Fi, before and after every game. " +
+                    "$appName finds the PC; you approve this device there once."
             )
             .setPositiveButton("Connect") { _, _ ->
                 if (Build.VERSION.SDK_INT >= 37) activity.requestPermissions(arrayOf("android.permission.ACCESS_LOCAL_NETWORK"), 0)
                 scan(activity)
             }
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton("Not now", null)
             .show()
     }
 
     private fun scan(activity: Activity) {
-        val dialog = AlertDialog.Builder(activity).setTitle("Looking for your PC")
-            .setMessage("Starting Syncthing and searching the network…").setCancelable(false).show()
+        val dialog = progress(activity, "Looking for your PC", "Searching your Wi-Fi network…")
+            .setNegativeButton(android.R.string.cancel, null).show()
         worker.execute {
             val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             // Syncthing finds the PC from its local-discovery broadcasts, which Android drops without this lock.
@@ -365,9 +418,11 @@ class SaveSync(
             try {
                 if (start()) {
                     me = myId()
-                    repeat(15) {
+                    for (second in 0 until 15) {
+                        if (!dialog.isShowing) return@execute
                         found = runCatching { nearby() }.getOrDefault(found)
-                        if (found.isNotEmpty() && it >= 4) return@repeat
+                        // A moment more after the first hit, in case there are two PCs.
+                        if (found.isNotEmpty() && second >= 2) break
                         Thread.sleep(1000)
                     }
                 }
@@ -375,10 +430,13 @@ class SaveSync(
                 lock.release()
             }
             main.post {
+                if (!dialog.isShowing) return@post
                 dialog.dismiss()
                 if (me == null) {
-                    AlertDialog.Builder(activity).setTitle("Save sync")
-                        .setMessage("Syncthing didn't start on this device.").setPositiveButton(android.R.string.ok, null).show()
+                    MaterialAlertDialogBuilder(activity).setTitle("Save sync couldn't start")
+                        .setMessage("Syncthing didn't start on this device. Try again, or restart $appName.")
+                        .setPositiveButton("Try again") { _, _ -> scan(activity) }
+                        .setNegativeButton(android.R.string.cancel, null).show()
                     return@post
                 }
                 pick(activity, me!!, found)
@@ -387,44 +445,56 @@ class SaveSync(
     }
 
     private fun pick(activity: Activity, me: String, found: List<Pair<String, String>>) {
-        val b = AlertDialog.Builder(activity).setTitle(if (found.isEmpty()) "No PC found" else "Pick your PC")
-        if (found.isEmpty()) {
-            b.setMessage(
-                "Make sure Syncthing is running on your PC and both are on the same network. You can also add " +
-                    "this device on the PC (Add Remote Device) with its ID:\n\n$me"
-            )
-        } else {
-            b.setItems(found.map { it.second }.toTypedArray()) { _, i ->
-                val (id, name) = found[i]
-                worker.execute {
-                    val error = runCatching { connect(id, name.takeUnless { it.startsWith(id.take(7)) } ?: "PC") }.exceptionOrNull()
-                    main.post { if (error != null) toast(activity, "Couldn't add the PC: ${error.message}") else waitAccept(activity) }
-                }
-            }
+        val b = MaterialAlertDialogBuilder(activity)
+        when {
+            found.isEmpty() -> b.setTitle("No PC found")
+                .setMessage(
+                    "Check that Syncthing is running on your PC and that both are on the same Wi-Fi. Or add this " +
+                        "device on the PC (Add Remote Device) with its ID:\n\n$me"
+                )
+                .setPositiveButton("Search again") { _, _ -> scan(activity) }
+            found.size == 1 -> b.setTitle("Connect to this PC?")
+                .setMessage("${found[0].second}\n\nYou'll approve $deviceName on the PC next.")
+                .setPositiveButton("Connect") { _, _ -> choose(activity, found[0]) }
+                .setNeutralButton("Search again") { _, _ -> scan(activity) }
+            else -> b.setTitle("Choose your PC")
+                .setItems(found.map { it.second }.toTypedArray()) { _, i -> choose(activity, found[i]) }
+                .setNeutralButton("Search again") { _, _ -> scan(activity) }
         }
-        b.setPositiveButton("Scan again") { _, _ -> scan(activity) }.setNegativeButton(android.R.string.cancel, null).show()
+        b.setNegativeButton(android.R.string.cancel, null).show()
+    }
+
+    private fun choose(activity: Activity, device: Pair<String, String>) {
+        val (id, label) = device
+        worker.execute {
+            // A pending device carries the PC's name; otherwise leave it blank for the PC's hello to fill in.
+            val error = runCatching { connect(id, label.takeUnless { it.startsWith("Syncthing at ") }.orEmpty()) }.exceptionOrNull()
+            main.post { if (error != null) note(activity, "Couldn't add the PC: ${error.message}") else waitAccept(activity) }
+        }
     }
 
     private fun waitAccept(activity: Activity) {
-        val dialog = AlertDialog.Builder(activity).setTitle("Accept on your PC")
-            .setMessage(
-                "Open Syncthing on $hubName (http://127.0.0.1:8384). Accept the device \"$deviceName\", then add " +
-                    "the \"Calamansi saves\" folder it offers (keep the folder ID; any path works)."
-            )
-            .setCancelable(false).setNegativeButton("Later", null).show()
+        val ask = "On your PC, open Syncthing (http://127.0.0.1:8384) and click Add device for \"$deviceName\"."
+        val dialog = progress(activity, "Approve on your PC", ask)
+            .setNegativeButton("Later", null).show()
         worker.execute {
             repeat(300) {
                 if (!dialog.isShowing) return@execute
                 val online = hubOnline()
+                if (online) refreshHubName()
                 if (online && folderAccepted()) {
-                    main.post { dialog.dismiss(); toast(activity, "Connected to $hubName. Saves will sync before and after every game.") }
-                    syncAllInBackground()
+                    main.post { dialog.setTitle("Connected to $hubName"); dialog.setMessage("Comparing saves…") }
+                    val conflicts = runCatching { sync(consoles, 20_000) }.getOrNull()
+                    main.post {
+                        dialog.dismiss()
+                        note(activity, "Connected to $hubName. Saves sync before and after every game.")
+                        askConflicts(activity, conflicts.orEmpty()) {}
+                    }
                     return@execute
                 }
                 main.post {
                     dialog.setMessage(
-                        if (!online) "Open Syncthing on $hubName and accept the device \"$deviceName\"."
-                        else "Device accepted. Now add the \"Calamansi saves\" folder it offers on the PC."
+                        if (!online) ask else "Approved. If your PC also asks about the \"Calamansi saves\" folder, click Add."
                     )
                 }
                 Thread.sleep(2000)
@@ -433,44 +503,85 @@ class SaveSync(
     }
 
     private fun showStatus(activity: Activity) {
-        val dialog = AlertDialog.Builder(activity).setTitle("Save sync")
-            .setMessage("Checking…")
+        val dialog = MaterialAlertDialogBuilder(activity).setTitle("Save sync")
+            .setMessage("Checking $hubName…")
             .setPositiveButton("Sync now", null)
             .setNeutralButton("Disconnect") { _, _ ->
-                AlertDialog.Builder(activity).setTitle("Disconnect from $hubName?")
-                    .setMessage("Saves stay on this device and on the PC; they just stop syncing.")
-                    .setPositiveButton("Disconnect") { _, _ -> worker.execute { disconnect() } }
+                MaterialAlertDialogBuilder(activity).setTitle("Stop syncing with $hubName?")
+                    .setMessage("Saves stay on this device and on the PC. You can connect again later.")
+                    .setPositiveButton("Disconnect") { _, _ ->
+                        worker.execute { disconnect(); main.post { note(activity, "Save sync is off.") } }
+                    }
                     .setNegativeButton(android.R.string.cancel, null).show()
             }
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton("Close", null)
             .show()
-        fun refresh() = worker.execute {
+        val primary = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+        fun refresh(): Unit = worker.execute {
             val online = start() && hubOnline()
+            if (online) refreshHubName()
             val waiting = online && !folderAccepted()
+            val choices = synchronized(pending) { pending.size }
+            val rows = db.perConsole()
             val text = buildString {
-                append(if (online) "Connected to $hubName." else "$hubName is offline; saves sync when it's back.")
-                if (waiting) append("\nOn the PC, add the \"Calamansi saves\" folder this device offers.")
-                append("\n\nThis device: $deviceName\n${runCatching { myId() }.getOrDefault("")}\n\n")
-                val rows = summary()
-                append(if (rows.isEmpty()) "No saves synced yet." else rows.joinToString("\n"))
+                append(
+                    when {
+                        !online -> "$hubName is offline. Saves sync when it's back."
+                        waiting -> "Connected. On $hubName, add the \"Calamansi saves\" folder this device offers."
+                        else -> "Connected to $hubName."
+                    }
+                )
+                rows.values.maxOfOrNull { it.last }?.takeIf { it > 0 }?.let {
+                    append("\nLast synced ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it))}.")
+                }
+                append("\n\n")
+                if (rows.isEmpty()) append("No saves synced yet.")
+                for (c in consoles) {
+                    val r = rows[c.id] ?: continue
+                    append("${c.label}: ${r.synced} ${if (r.synced == 1) "save" else "saves"}")
+                    if (r.conflicts > 0) append(", ${r.conflicts} to choose")
+                    append('\n')
+                }
+                append("\nThis device: $deviceName")
             }
-            main.post { if (dialog.isShowing) dialog.setMessage(text) }
+            main.post {
+                if (!dialog.isShowing) return@post
+                dialog.setMessage(text.trimEnd())
+                primary.text = if (choices > 0) "Choose saves ($choices)" else "Sync now"
+            }
         }
         refresh()
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+        primary.setOnClickListener {
+            if (synchronized(pending) { pending.isNotEmpty() }) {
+                askConflicts(activity, synchronized(pending) { pending.values.toList() }) { refresh() }
+                return@setOnClickListener
+            }
             dialog.setMessage("Syncing…")
             worker.execute {
                 val conflicts = runCatching { sync(consoles, 15_000) }.getOrNull()
                 main.post {
                     if (!dialog.isShowing) return@post
-                    if (conflicts == null) toast(activity, "Couldn't reach $hubName.")
+                    if (conflicts == null) note(activity, "Couldn't reach $hubName.")
+                    else if (conflicts.isEmpty()) note(activity, "Saves are in sync.")
                     askConflicts(activity, conflicts.orEmpty()) { refresh() }
                 }
             }
         }
     }
 
-    private fun toast(activity: Activity, text: String) = Toast.makeText(activity, text, Toast.LENGTH_LONG).show()
+    /** A Material dialog with an indeterminate progress bar under its message, for waits the user sits through. */
+    private fun progress(activity: Activity, title: String, message: String): MaterialAlertDialogBuilder {
+        val pad = (24 * activity.resources.displayMetrics.density).toInt()
+        val bar = LinearProgressIndicator(activity).apply { isIndeterminate = true }
+        val box = FrameLayout(activity).apply { setPadding(pad, pad / 3, pad, 0); addView(bar) }
+        return MaterialAlertDialogBuilder(activity).setTitle(title).setMessage(message).setView(box).setCancelable(false)
+    }
+
+    /** Transient feedback, as a snackbar on the activity's content. */
+    private fun note(activity: Activity, text: String) {
+        val root = activity.findViewById<View>(android.R.id.content) ?: return
+        Snackbar.make(root, text, Snackbar.LENGTH_LONG).show()
+    }
 
     // ---- SQLite: one row per save, the hash both sides agreed on at the last sync plus cached hashes ----
 
@@ -522,21 +633,30 @@ class SaveSync(
             override fun conflict(unit: String) = state(console, unit, "conflict")
         }
 
-        fun rows(): List<String> {
-            val fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
-            return readableDatabase.rawQuery(
-                "SELECT console, unit, state, synced_at FROM saves WHERE state IS NOT NULL ORDER BY synced_at DESC LIMIT 30",
-                null
-            ).use { c ->
-                generateSequence { if (c.moveToNext()) c else null }.map {
-                    val at = if (it.isNull(3)) "" else fmt.format(Date(it.getLong(3)))
-                    "${it.getString(0)} ${it.getString(1)}: ${it.getString(2)} $at"
-                }.toList()
-            }
+        class Counts(val synced: Int, val conflicts: Int, val last: Long)
+
+        /** Per console: saves in sync, saves waiting for the user's choice, and the latest sync time. */
+        fun perConsole(): Map<String, Counts> = readableDatabase.rawQuery(
+            "SELECT console, SUM(state != 'conflict'), SUM(state = 'conflict'), MAX(synced_at) FROM saves" +
+                " WHERE state IS NOT NULL GROUP BY console",
+            null
+        ).use { c ->
+            generateSequence { if (c.moveToNext()) c else null }
+                .associate { it.getString(0) to Counts(it.getInt(1), it.getInt(2), if (it.isNull(3)) 0 else it.getLong(3)) }
         }
     }
 
     private var lastAll = 0L
+
+    /** Conflicts a background sync found, asked about as soon as an app screen is in front. */
+    private val pending = linkedMapOf<String, Conflict>()
+    private var asking = false
+
+    private fun remember(conflicts: List<Conflict>) = synchronized(pending) {
+        for (c in conflicts) pending["${c.console.id}/${c.unit}"] = c
+    }
+
+    private fun forget(c: Conflict) = synchronized(pending) { pending.remove("${c.console.id}/${c.unit}") }
 
     companion object {
         private const val TAG = "SaveSync"

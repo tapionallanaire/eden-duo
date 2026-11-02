@@ -131,7 +131,7 @@ interface SyncState {
 fun reconcileUnits(units: Map<String, File>, remoteRoot: File, backups: File, state: SyncState): Pair<List<String>, Boolean> {
     val conflicts = mutableListOf<String>()
     var pushed = false
-    for ((unit, local) in units) {
+    for ((unit, local) in units) try {
         val remote = File(remoteRoot, unit)
         val l = state.hash(unit, "local", local)
         val r = state.hash(unit, "remote", remote)
@@ -152,6 +152,9 @@ fun reconcileUnits(units: Map<String, File>, remoteRoot: File, backups: File, st
                 conflicts += unit
             }
         }
+    } catch (e: Exception) {
+        // One unreadable or unwritable save must not stop the others; it is retried at the next sync.
+        System.err.println("save sync: $unit: $e")
     }
     return conflicts to pushed
 }
