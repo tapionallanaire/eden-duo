@@ -156,12 +156,13 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
         case TitleID::FinalFantasyResonance:
             // The bloom hack scales sampled RGBA values and corrupts this game's sprite colours.
             DefaultForTitle(Settings::values.fix_bloom_effects, false);
-            // Async GPU still produces HUD dropouts and guest panics on Adreno, so keep guest
-            // command submission synchronous until that path is verified through gameplay.
-            // Accurate fences are what keeps its GPU readbacks in order; safe DMA and reactive
-            // flushing keep the rest of the pipeline in order, and dynamic vertex input keeps the
-            // vertex formats from its GPU-built commands valid.
-            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, false);
+            // Synchronous GPU emulation ran the game's render thread and the GPU thread in
+            // series (each under half a core on the Odin 2), so a frame cost their sum:
+            // 23 FPS on the Chapter 1 overworld in handheld. Asynchronous GPU overlaps them:
+            // 29-30 FPS there and in battle on the same capped clocks, with the HUD present in
+            // every recorded frame and the party drawn in its own colours. The dropouts and
+            // panics once seen with it were the composite and lightmap bugs fixed since 1.1.3.
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
             DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Docked);
             DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::Mailbox);
