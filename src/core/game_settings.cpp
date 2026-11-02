@@ -163,7 +163,8 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // every recorded frame and the party drawn in its own colours. The dropouts and
             // panics once seen with it were the composite and lightmap bugs fixed since 1.1.3.
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
-            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Docked);
+            // Handheld or docked is the user's choice: the game holds 30 FPS in both on the Odin 2
+            // (Adreno 740), so no console mode is forced here or by "Apply optimal settings".
             DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::Mailbox);
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
