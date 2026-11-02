@@ -1896,6 +1896,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="percent">%1$d%%</string>
 
 
+    <!-- Duet Plus: save sync with Syncthing on the PC (Calamansi shares the same folder) -->
+    <string name="save_sync">Save sync</string>
+    <string name="save_sync_description">Sync Switch saves with Syncthing on your PC, before and after every game</string>
+
     <!-- Eden Duo: save transfer (copy Switch saves from other Eden apps into this one) -->
     <string name="save_transfer">Save transfer</string>
     <string name="save_transfer_description">Copy game saves from your other Eden apps into this app</string>

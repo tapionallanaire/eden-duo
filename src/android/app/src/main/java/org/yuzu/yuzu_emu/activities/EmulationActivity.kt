@@ -287,6 +287,11 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         super.onDestroy()
         if (launchRedirected) return // nothing was set up (see ScreenSwap)
         if (isFinishing) CompanionApp.endSession() // Eden Duo: No Companion App
+        // Duet Plus: push the saves this session wrote.
+        if (isFinishing) {
+            org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this)
+                .afterExit(org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH)
+        }
         inputManager.unregisterInputDeviceListener(this)
         stopForegroundService(this)
         NativeLibrary.playTimeManagerStop()

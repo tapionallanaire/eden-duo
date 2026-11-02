@@ -247,6 +247,17 @@ class HomeSettingsFragment : Fragment() {
             )
             add(
                 HomeSetting(
+                    R.string.save_sync,
+                    R.string.save_sync_description,
+                    R.drawable.ic_save,
+                    {
+                        org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(requireContext())
+                            .showSettings(requireActivity())
+                    }
+                )
+            )
+            add(
+                HomeSetting(
                     R.string.save_transfer,
                     R.string.save_transfer_description,
                     R.drawable.ic_save,
