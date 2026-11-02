@@ -295,8 +295,13 @@ class SaveSync(
         // A quick sync (PC up, nothing new) launches without a dialog flashing past.
         main.postDelayed({ if (!finished.get() && !activity.isFinishing) dialog.show() }, 600)
         worker.execute {
+            val began = System.currentTimeMillis()
             val conflicts = runCatching { sync(listOf(console), 10_000) { skipped.get() } }
                 .onFailure { Log.w(TAG, "sync before launch", it) }.getOrNull()
+            Log.i(
+                TAG, "before launch ${console.id}: " + (conflicts?.let { "${it.size} conflicts" } ?: "hub unreachable") +
+                    ", ${System.currentTimeMillis() - began} ms${if (skipped.get()) ", skipped" else ""}"
+            )
             main.post {
                 finished.set(true)
                 if (dialog.isShowing) dialog.dismiss()
