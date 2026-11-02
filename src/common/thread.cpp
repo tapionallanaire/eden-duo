@@ -595,20 +595,19 @@ void SetCurrentThreadName(const char* name) {
 
 void SetCurrentThreadToPerformanceCores() {
 #if defined(__ANDROID__)
-    if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
-        SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
-        return;
-    }
+    // The core group applies with or without a performance hint session. Left unrestricted
+    // under ADPF, the scheduler put a guest thread and the GPU thread on the one prime core
+    // and did not preempt between them for 20-27 ms at a time: one frame in ~150 of FINAL
+    // FANTASY RESONANCE shown a refresh late on the Odin 2. Guest threads on the shared
+    // performance cores and the GPU thread on all of them gave 0 late frames in 3 minutes.
+    ADPF::AddCurrentThread(ADPF::Session::Render);
     SetCurrentThreadCoreGroup(CoreGroup::Performance);
 #endif
 }
 
 void SetCurrentThreadToCriticalCores() {
 #if defined(__ANDROID__)
-    if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
-        SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
-        return;
-    }
+    ADPF::AddCurrentThread(ADPF::Session::Render);
     SetCurrentThreadCoreGroup(CoreGroup::Critical);
 #endif
 }
