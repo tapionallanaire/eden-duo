@@ -114,6 +114,60 @@ fun saveKey(romFileName: String, extension: String): String =
     romFileName.substringBeforeLast('.').replace(Regex("[<>:\"/\\\\|?*\\x00-\\x1f]"), "_").trimEnd('.', ' ') +
         ".$extension"
 
+/** What reconciling reads and records per unit of one console; SaveSync keeps it in SQLite. */
+interface SyncState {
+    /** Hash of a save; `side` is "local" or "remote", so each side's hash can be cached. */
+    fun hash(unit: String, side: String, file: File): String?
+    fun base(unit: String): String?
+    fun synced(unit: String, hash: String, state: String)
+    fun conflict(unit: String)
+}
+
+/**
+ * Reconciles one console: [units] maps each unit to where it lives on this device, [remoteRoot] is the console's
+ * part of the synced folder, pulls back up the replaced save under [backups]/<unit>. Returns the units both sides
+ * changed (left for the user) and whether anything was pushed.
+ */
+fun reconcileUnits(units: Map<String, File>, remoteRoot: File, backups: File, state: SyncState): Pair<List<String>, Boolean> {
+    val conflicts = mutableListOf<String>()
+    var pushed = false
+    for ((unit, local) in units) {
+        val remote = File(remoteRoot, unit)
+        val l = state.hash(unit, "local", local)
+        val r = state.hash(unit, "remote", remote)
+        when (decide(l, r, state.base(unit))) {
+            Action.NONE -> if (l != null) state.synced(unit, l, "synced")
+            Action.PULL -> {
+                backupSave(local, File(backups, unit))
+                replaceSave(remote, local)
+                state.synced(unit, r!!, "pulled")
+            }
+            Action.PUSH -> {
+                replaceSave(local, remote)
+                state.synced(unit, l!!, "pushed")
+                pushed = true
+            }
+            Action.CONFLICT -> {
+                state.conflict(unit)
+                conflicts += unit
+            }
+        }
+    }
+    return conflicts to pushed
+}
+
+/** The user's answer to a conflict: keep this device's save (push it) or take the synced one (pull it). */
+fun resolveConflict(unit: String, local: File, remote: File, backups: File, keepLocal: Boolean, state: SyncState) {
+    if (keepLocal) {
+        replaceSave(local, remote)
+        state.synced(unit, hash(local)!!, "pushed")
+    } else {
+        backupSave(local, File(backups, unit))
+        replaceSave(remote, local)
+        state.synced(unit, hash(remote)!!, "pulled")
+    }
+}
+
 /** Keeps the newest [keep] copies of [save] under [dir] before it is overwritten by a pull. */
 fun backupSave(save: File, dir: File, keep: Int = 3) {
     if (!save.exists()) return

@@ -228,45 +228,15 @@ class SaveSync(
     fun reconcile(console: SyncConsole): List<Conflict> {
         if (playing() == console.id) return emptyList()
         val remoteRoot = File(synced, console.id)
-        val conflicts = mutableListOf<Conflict>()
-        var pushed = false
-        for ((unit, local) in console.units(listUnits(remoteRoot, console.depth))) {
-            val remote = File(remoteRoot, unit)
-            val l = db.hash(console.id, unit, "local", local)
-            val r = db.hash(console.id, unit, "remote", remote)
-            when (decide(l, r, db.base(console.id, unit))) {
-                Action.NONE -> if (l != null) db.synced(console.id, unit, l, "synced")
-                Action.PULL -> {
-                    backupSave(local, File(backups, "${console.id}/$unit"))
-                    replaceSave(remote, local)
-                    db.synced(console.id, unit, r!!, "pulled")
-                }
-                Action.PUSH -> {
-                    replaceSave(local, remote)
-                    db.synced(console.id, unit, l!!, "pushed")
-                    pushed = true
-                }
-                Action.CONFLICT -> {
-                    db.state(console.id, unit, "conflict")
-                    conflicts += Conflict(console, unit, local, remote)
-                }
-            }
-        }
+        val units = console.units(listUnits(remoteRoot, console.depth))
+        val (conflicts, pushed) = reconcileUnits(units, remoteRoot, File(backups, console.id), db.of(console.id))
         if (pushed) rescan()
-        return conflicts
+        return conflicts.map { Conflict(console, it, units.getValue(it), File(remoteRoot, it)) }
     }
 
-    fun resolve(conflict: Conflict, keepLocal: Boolean) {
-        val c = conflict
-        if (keepLocal) {
-            replaceSave(c.local, c.remote)
-            db.synced(c.console.id, c.unit, hash(c.local)!!, "pushed")
-            rescan()
-        } else {
-            backupSave(c.local, File(backups, "${c.console.id}/${c.unit}"))
-            replaceSave(c.remote, c.local)
-            db.synced(c.console.id, c.unit, hash(c.remote)!!, "pulled")
-        }
+    fun resolve(c: Conflict, keepLocal: Boolean) {
+        resolveConflict(c.unit, c.local, c.remote, File(backups, c.console.id), keepLocal, db.of(c.console.id))
+        if (keepLocal) rescan()
     }
 
     private fun rescan() = runCatching { api("POST", "/rest/db/scan?folder=$FOLDER") }
@@ -540,6 +510,13 @@ class SaveSync(
 
         fun state(console: String, unit: String, state: String) =
             update(console, unit, ContentValues().apply { put("state", state) })
+
+        fun of(console: String) = object : SyncState {
+            override fun hash(unit: String, side: String, file: File) = hash(console, unit, side, file)
+            override fun base(unit: String) = base(console, unit)
+            override fun synced(unit: String, hash: String, state: String) = synced(console, unit, hash, state)
+            override fun conflict(unit: String) = state(console, unit, "conflict")
+        }
 
         fun rows(): List<String> {
             val fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
