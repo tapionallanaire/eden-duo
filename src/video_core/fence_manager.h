@@ -198,7 +198,11 @@ private:
 
     void ReleaseThreadFunc(std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPUFencingThread");
-        Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+        // Same priority as the guest and GPU threads. At High (Android nice -4 against their -16)
+        // the scheduler left this thread runnable for 20-24 ms whenever a guest thread held its
+        // core, and the GPU thread slept on the fence meanwhile: one frame in fifty landed a
+        // refresh late in FINAL FANTASY RESONANCE on the Odin 2 (perfetto, 2026-11-02).
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
 
         TFence current_fence;

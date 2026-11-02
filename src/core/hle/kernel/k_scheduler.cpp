@@ -8,6 +8,8 @@
 
 #include "common/assert.h"
 #include "common/bit_util.h"
+#include <thread>
+
 #include "common/fiber.h"
 #include "common/logging.h"
 #include "core/arm/arm_interface.h"
@@ -456,6 +458,11 @@ void KScheduler::ScheduleImplFiber(KernelCore& kernel) {
                 // If we do, another core is interfering, and we must start again.
                 goto retry;
             }
+            // Give the core up while we wait: the holder may need this very core (or a
+            // thread it waits on, such as the GPU thread, may). Spinning here held the Odin
+            // 2's prime core for 20-35 ms per occurrence in FINAL FANTASY RESONANCE, with the
+            // GPU thread runnable behind it, and each occurrence was a frame shown late.
+            std::this_thread::yield();
         }
 
         // It's time to switch the thread.
