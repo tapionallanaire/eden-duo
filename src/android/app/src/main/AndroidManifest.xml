@@ -50,6 +50,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
     </queries>
 
     <application
+
+        android:networkSecurityConfig="@xml/save_sync_network"
         android:name="org.yuzu.yuzu_emu.YuzuApplication"
         android:label="${appNameBase}${appNameSuffix}"
         android:icon="@mipmap/ic_launcher"
