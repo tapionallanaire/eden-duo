@@ -368,6 +368,7 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         ThemeHelper.setCorrectTheme(this)
         super.onResume()
         applyFullscreenPreference()
+        org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this).syncAllInBackground() // Duet Plus: save sync
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
