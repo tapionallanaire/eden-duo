@@ -4,8 +4,11 @@
 package org.yuzu.yuzu_emu.duo.sync
 
 import android.content.Context
+import androidx.preference.PreferenceManager
 import java.io.File
+import kotlinx.serialization.json.Json
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.GameHelper
 import org.yuzu.yuzu_emu.utils.NativeConfig
 
@@ -18,6 +21,15 @@ object DuetSaveSync {
 
     @Volatile
     private var instance: SaveSync? = null
+
+    /**
+     * The game list, for names in the conflict prompt: the live one, or the copy the last scan saved (as Save transfer
+     * reads it) when the prompt comes before this launch's scan finishes.
+     */
+    private fun games(context: Context): List<Game> = GameHelper.cachedGameList.takeIf { it.isNotEmpty() }
+        ?: PreferenceManager.getDefaultSharedPreferences(context.applicationContext)
+            .getStringSet(GameHelper.KEY_GAMES, emptySet()).orEmpty()
+            .mapNotNull { runCatching { Json.decodeFromString<Game>(it) }.getOrNull() }
 
     fun get(context: Context): SaveSync = instance ?: synchronized(this) {
         instance ?: SaveSync(
@@ -34,7 +46,7 @@ object DuetSaveSync {
                         }.getOrNull()
                         savesUnder(root, 1)(it)
                     },
-                    name = { unit -> GameHelper.cachedGameList.find { it.programIdHex.equals(unit, true) }?.title }
+                    name = { unit -> games(context).find { it.programIdHex.equals(unit, true) }?.title }
                 )
             ),
             playing = { SWITCH.takeIf { runCatching { NativeLibrary.isRunning() }.getOrDefault(false) } },
