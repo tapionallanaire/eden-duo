@@ -12,6 +12,11 @@
 package org.yuzu.yuzu_emu.duo.sync
 
 import android.app.Activity
+import android.app.job.JobInfo
+import android.app.job.JobParameters
+import android.app.job.JobScheduler
+import android.app.job.JobService
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
@@ -20,6 +25,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PersistableBundle
 import android.util.Log
 import android.view.View
 import android.widget.FrameLayout
@@ -61,7 +67,9 @@ class SaveSync(
     private val listenPort: Int,
     val consoles: List<SyncConsole>,
     /** The console whose game is running now, if any; its saves are never touched mid-game. */
-    private val playing: () -> String? = { null }
+    private val playing: () -> String? = { null },
+    /** This app's [SaveSyncJob] subclass (declared in its manifest), which uploads a game's saves when it ends. */
+    private val exitJob: Class<out SaveSyncJob>? = null
 ) {
     private val prefs = context.getSharedPreferences("save_sync", Context.MODE_PRIVATE)
     private val home = File(context.filesDir, "syncthing")
@@ -261,11 +269,14 @@ class SaveSync(
         if (playing() == console.id) return emptyList()
         val remoteRoot = File(synced, console.id)
         val units = console.units(listUnits(remoteRoot, console.depth))
-        val (conflicts, pushed) = reconcileUnits(units, remoteRoot, File(backups, console.id), db.of(console.id))
+        val (conflicts, pushed) = reconcileUnits(units, remoteRoot, File(backups, console.id), db.of(console.id)) {
+            Log.i(TAG, "${console.id} $it")
+        }
         if (pushed) rescan()
         return conflicts.map { Conflict(console, it, units.getValue(it), File(remoteRoot, it)) }
     }
 
+    @Synchronized
     fun resolve(c: Conflict, keepLocal: Boolean) {
         resolveConflict(c.unit, c.local, c.remote, File(backups, c.console.id), keepLocal, db.of(c.console.id))
         forget(c)
@@ -274,7 +285,11 @@ class SaveSync(
 
     private fun rescan() = runCatching { api("POST", "/rest/db/scan?folder=$FOLDER") }
 
-    /** Start, wait for the hub, reconcile. Null when the hub couldn't be reached (or [skip] said so). Blocking. */
+    /**
+     * Start, wait for the hub, reconcile. Null when the hub couldn't be reached (or [skip] said so). Blocking; one sync
+     * at a time, so the exit job never reconciles alongside a launch or background sync.
+     */
+    @Synchronized
     fun sync(consoles: List<SyncConsole>, timeoutMs: Long, skip: () -> Boolean = { false }): List<Conflict>? {
         if (hub == null || !start() || !waitInSync(timeoutMs, skip) || skip()) return null
         return consoles.flatMap { reconcile(it) }.also(::remember)
@@ -292,8 +307,8 @@ class SaveSync(
         val finished = java.util.concurrent.atomic.AtomicBoolean()
         val dialog = progress(activity, "Syncing saves", "Checking $hubName for newer ${console.label} saves…")
             .setNegativeButton("Play now") { _, _ -> skipped.set(true) }.create()
-        // A quick sync (PC up, nothing new) launches without a dialog flashing past.
-        main.postDelayed({ if (!finished.get() && !activity.isFinishing) dialog.show() }, 600)
+        // A quick sync (PC up, nothing new: about 0.8 s on the Thor) launches without a dialog flashing past.
+        main.postDelayed({ if (!finished.get() && !activity.isFinishing) dialog.show() }, 1500)
         worker.execute {
             val began = System.currentTimeMillis()
             val conflicts = runCatching { sync(listOf(console), 10_000) { skipped.get() } }
@@ -316,11 +331,41 @@ class SaveSync(
         }
     }
 
-    /** Pushes the saves a session just wrote. Conflicts are asked about when an app screen is next in front. */
+    /**
+     * Uploads the saves a session just wrote, like Steam on exit, through a JobScheduler job: it keeps network access
+     * with the app in the background, survives the app's process going away, and retries until the PC has them.
+     * Conflicts are asked about when an app screen is next in front.
+     */
     fun afterExit(consoleId: String) {
-        val console = consoles.find { it.id == consoleId } ?: return
-        if (hub == null || !available) return
-        worker.execute { runCatching { sync(listOf(console), 15_000) }.onFailure { Log.w(TAG, "sync after exit", it) } }
+        val index = consoles.indexOfFirst { it.id == consoleId }
+        if (index < 0 || hub == null || !available) return
+        val job = exitJob ?: return worker.execute { runCatching { upload(consoleId) } }
+        val info = JobInfo.Builder(EXIT_JOB_ID + index, ComponentName(context, job))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            .setBackoffCriteria(30_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
+            .setExtras(PersistableBundle().apply { putString("console", consoleId) })
+            .apply { if (Build.VERSION.SDK_INT >= 31) setExpedited(true) }
+            .build()
+        context.getSystemService(JobScheduler::class.java).schedule(info)
+    }
+
+    /** One exit upload of [consoleId]: true once the PC holds everything this device has. Blocking. */
+    fun upload(consoleId: String): Boolean {
+        val console = consoles.find { it.id == consoleId } ?: return true
+        if (hub == null || !available) return true
+        sync(listOf(console), 15_000) ?: return false
+        return waitUploaded(120_000)
+    }
+
+    /** Waits until the hub reports it has all of this device's files in the saves folder. */
+    private fun waitUploaded(timeoutMs: Long): Boolean {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val c = runCatching { JSONObject(api("GET", "/rest/db/completion?folder=$FOLDER&device=$hub")) }.getOrNull()
+            if (c != null && c.optDouble("completion") >= 100.0 && c.optLong("needItems") == 0L) return true
+            Thread.sleep(1000)
+        }
+        return false
     }
 
     /**
@@ -666,7 +711,30 @@ class SaveSync(
     companion object {
         private const val TAG = "SaveSync"
         const val FOLDER = "calamansi-saves"
+        private const val EXIT_JOB_ID = 0x5a5e0000
         private val worker = Executors.newSingleThreadExecutor()
         private val main = Handler(Looper.getMainLooper())
     }
+}
+
+/**
+ * Uploads one console's saves after a game, retried by JobScheduler until the PC has them. Each app declares a subclass
+ * in its manifest (android:permission="android.permission.BIND_JOB_SERVICE") that returns its [SaveSync].
+ */
+abstract class SaveSyncJob : JobService() {
+    abstract fun saveSync(context: Context): SaveSync
+
+    override fun onStartJob(params: JobParameters): Boolean {
+        val console = params.extras.getString("console") ?: return false
+        Thread {
+            val done = runCatching { saveSync(applicationContext).upload(console) }
+                .onFailure { Log.w("SaveSync", "exit upload $console", it) }.getOrDefault(false)
+            Log.i("SaveSync", "exit upload $console: ${if (done) "on the PC" else "not yet, will retry"}")
+            jobFinished(params, !done)
+        }.start()
+        return true
+    }
+
+    /** Android stopped the job early (network gone, say): run it again later. */
+    override fun onStopJob(params: JobParameters) = true
 }

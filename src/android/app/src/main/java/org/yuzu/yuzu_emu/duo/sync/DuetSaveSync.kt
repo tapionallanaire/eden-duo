@@ -37,7 +37,13 @@ object DuetSaveSync {
                     name = { unit -> GameHelper.cachedGameList.find { it.programIdHex.equals(unit, true) }?.title }
                 )
             ),
-            playing = { SWITCH.takeIf { runCatching { NativeLibrary.isRunning() }.getOrDefault(false) } }
+            playing = { SWITCH.takeIf { runCatching { NativeLibrary.isRunning() }.getOrDefault(false) } },
+            exitJob = DuetSaveSyncJob::class.java
         ).also { instance = it }
     }
+}
+
+/** Uploads a game's saves when it ends, retried until the PC has them (declared in the manifest). */
+class DuetSaveSyncJob : SaveSyncJob() {
+    override fun saveSync(context: Context) = DuetSaveSync.get(context)
 }

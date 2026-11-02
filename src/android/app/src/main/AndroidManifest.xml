@@ -173,5 +173,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 android:resource="@xml/file_paths" />
         </provider>
 
+            <!-- Save sync: uploads a game's saves when it ends, retried until the PC has them. -->
+        <service
+            android:name="org.yuzu.yuzu_emu.duo.sync.DuetSaveSyncJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
     </application>
 </manifest>

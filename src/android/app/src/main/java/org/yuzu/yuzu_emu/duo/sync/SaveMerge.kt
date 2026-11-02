@@ -128,7 +128,13 @@ interface SyncState {
  * part of the synced folder, pulls back up the replaced save under [backups]/<unit>. Returns the units both sides
  * changed (left for the user) and whether anything was pushed.
  */
-fun reconcileUnits(units: Map<String, File>, remoteRoot: File, backups: File, state: SyncState): Pair<List<String>, Boolean> {
+fun reconcileUnits(
+    units: Map<String, File>,
+    remoteRoot: File,
+    backups: File,
+    state: SyncState,
+    log: (String) -> Unit = {}
+): Pair<List<String>, Boolean> {
     val conflicts = mutableListOf<String>()
     var pushed = false
     for ((unit, local) in units) try {
@@ -141,20 +147,23 @@ fun reconcileUnits(units: Map<String, File>, remoteRoot: File, backups: File, st
                 backupSave(local, File(backups, unit))
                 replaceSave(remote, local)
                 state.synced(unit, r!!, "pulled")
+                log("pulled $unit")
             }
             Action.PUSH -> {
                 replaceSave(local, remote)
                 state.synced(unit, l!!, "pushed")
                 pushed = true
+                log("pushed $unit")
             }
             Action.CONFLICT -> {
                 state.conflict(unit)
                 conflicts += unit
+                log("conflict $unit")
             }
         }
     } catch (e: Exception) {
         // One unreadable or unwritable save must not stop the others; it is retried at the next sync.
-        System.err.println("save sync: $unit: $e")
+        log("failed $unit: $e")
     }
     return conflicts to pushed
 }
