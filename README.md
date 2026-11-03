@@ -26,6 +26,7 @@ It also hardens the GPU emulation against bad command data, accepts newer audio 
 - **Second-screen companion.** The game on the main screen, and a touch companion page on the second display, reading the running game's memory every frame.
 - **Installable companions.** Add a companion from the game's *Add-ons* menu with its `.dsmod.zip`; packages are validated before they are installed.
 - **Second screen your way.** Swap the screens, stretch the companion, or open another app on the second screen for games without a companion.
+- **Save sync with your PC.** Options > Save sync keeps Switch saves in sync with Syncthing on your PC, before and after every game. Set up the PC once with [save-sync-hub](https://github.com/tapionallanaire/save-sync-hub) (double-click `install.cmd`; it starts with Windows). Calamansi shares the same folder.
 - **Per-game fixes built in.** Games that need special settings get them automatically; your own per-game settings always win.
 
 ## Requirements
