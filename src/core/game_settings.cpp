@@ -209,6 +209,23 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // Boosted GPU timing looked the same and was slower in the overworld.
             DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
             return true;
+        case TitleID::TrailsInTheSky2ndChapter:
+            // Its towns build new pipelines as NPCs, effects and streets come into view; compiled
+            // synchronously each one held the frame (Rolent on the AYN Thor, 1x handheld: a 59 ms
+            // frame for 2 new shaders, dozens per second on entering the town) with the GPU under
+            // half busy. Asynchronous shaders keep the frame going while they build.
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            DefaultForTitle(Settings::values.use_disk_shader_cache, true);
+            // Its frames go to Eden's GPU thread and the guest waits on it, so the thread's cost
+            // sets the frame rate (it asks for 60 and gets 30 in Rolent, 45 on the roads). Extended
+            // dynamic state makes that thread set every state on every draw: EDS3 took the same
+            // square from 30 to 20 FPS (GPU thread 16 -> 30 ms a frame).
+            DefaultForTitle(Settings::values.dyna_state, Settings::ExtendedDynamicState::Disabled);
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // Low accuracy releases its fences when the GPU thread reaches them; nothing in its
+            // picture needs more.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            return true;
         default:
             return false;
     }
@@ -241,6 +258,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::FinalFantasyResonance:
         case TitleID::PokemonScarlet:
         case TitleID::PokemonViolet:
+        case TitleID::TrailsInTheSky2ndChapter:
             return true;
         default:
             return false;
@@ -257,6 +275,7 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.delay_fence_reports_by_title = false;
     Settings::values.fix_fp16_denormals_by_title = false;
     Settings::values.disable_macro_hle_by_title = false;
+    Settings::values.skip_buffer_downloads_by_title = false;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -282,6 +301,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // title the interpreter.
             Settings::values.fix_fp16_denormals_by_title = true;
             Settings::values.disable_macro_hle_by_title = true;
+            break;
+        case TitleID::TrailsInTheSky2ndChapter:
+            // It marks large buffers GPU-written every frame (about 150 MB/s docked on the Odin 2) and
+            // never reads them back on the CPU. Copying them to guest memory took the GPU thread to
+            // 30 ms and the fencing thread to 23 ms a frame: 19 FPS in Rolent docked, 49 without.
+            Settings::values.skip_buffer_downloads_by_title = true;
             break;
         default:
             break;

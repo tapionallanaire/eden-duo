@@ -551,7 +551,7 @@ private:
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
     /// Guest bytes at each pending download's commit, laid out like its staging buffer
-    std::deque<std::pair<std::vector<u8>, size_t>> async_snapshots;
+    std::deque<std::pair<std::unique_ptr<u8[]>, size_t>> async_snapshots;
     std::vector<u8> async_guest_now;
     std::optional<Async_Buffer> current_buffer;
 
