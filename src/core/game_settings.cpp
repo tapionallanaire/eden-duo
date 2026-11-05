@@ -203,6 +203,7 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // Boosted GPU timing looked the same and was slower in the overworld.
             DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
             return true;
+        case TitleID::TrailsInTheSky1stChapter:
         case TitleID::TrailsInTheSky2ndChapter:
             // Its towns build new pipelines as NPCs, effects and streets come into view; compiled
             // synchronously each one held the frame (Rolent on the AYN Thor, 1x handheld: a 59 ms
@@ -252,6 +253,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::FinalFantasyResonance:
         case TitleID::PokemonScarlet:
         case TitleID::PokemonViolet:
+        case TitleID::TrailsInTheSky1stChapter:
         case TitleID::TrailsInTheSky2ndChapter:
             return true;
         default:
@@ -296,6 +298,9 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             Settings::values.fix_fp16_denormals_by_title = true;
             Settings::values.disable_macro_hle_by_title = true;
             break;
+        case TitleID::TrailsInTheSky1stChapter:
+            // The same engine as 2nd Chapter, the same cost: about 1 GB/s of buffer downloads
+            // docked outside the Bright house on the AYN Thor, 36 FPS with them.
         case TitleID::TrailsInTheSky2ndChapter:
             // It marks large buffers GPU-written every frame (about 150 MB/s docked on the Odin 2) and
             // never reads them back on the CPU. Copying them to guest memory took the GPU thread to
