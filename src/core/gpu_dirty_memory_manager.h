@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <functional>
@@ -24,6 +25,18 @@ public:
     ~GPUDirtyMemoryManager() = default;
 
     void Collect(PAddr address, size_t size) {
+        // A transform covers one page_size (2 KiB) page, a write can span several (HLE writes
+        // come in up to 4 KiB per guest page): an unsplit one lost every block past the first
+        // page, and the GPU kept stale data there (Hogwarts Legacy: half-updated textures).
+        while (size != 0) {
+            const size_t chunk = (std::min)(size, page_size - (address & page_mask));
+            CollectPage(address, chunk);
+            address += chunk;
+            size -= chunk;
+        }
+    }
+
+    void CollectPage(PAddr address, size_t size) {
         TransformAddress t = BuildTransform(address, size);
         TransformAddress tmp, original;
         do {
