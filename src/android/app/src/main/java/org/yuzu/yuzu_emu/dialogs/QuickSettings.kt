@@ -796,6 +796,8 @@ class QuickSettings(val emulationFragment: EmulationFragment) {
                 BooleanSetting.RENDERER_FRAME_GEN.setBoolean(true)
             }
             saveSettings()
+            (emulationFragment.activity as? org.yuzu.yuzu_emu.activities.EmulationActivity)
+                ?.applyEmulationDisplayMode()
             refresh()
         }
 

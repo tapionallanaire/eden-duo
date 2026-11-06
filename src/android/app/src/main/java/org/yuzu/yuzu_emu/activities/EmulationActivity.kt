@@ -274,6 +274,33 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         notifyPhysicalControllerState()
 
         buildPictureInPictureParams()
+        applyEmulationDisplayMode()
+    }
+
+    /**
+     * Duet Plus: Switch games present at most 60 fps. On a 120 Hz panel a 30 fps game's frames
+     * land 3, 4 or 5 refreshes apart (AYN Thor: 55-77 % at 4 in Hogwarts Legacy); the panel's
+     * 60 Hz mode holds them at 2 (97 %). Frame generation needs the panel's top rate.
+     */
+    fun applyEmulationDisplayMode() {
+        val display = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay
+        }) ?: return
+        val current = display.mode
+        val modes = display.supportedModes.filter {
+            it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight
+        }
+        val wanted = if (BooleanSetting.RENDERER_FRAME_GEN.getBoolean(needsGlobal = false)) {
+            modes.maxByOrNull { it.refreshRate }
+        } else {
+            modes.filter { it.refreshRate > 59f }.minByOrNull { it.refreshRate }
+        } ?: return
+        if (window.attributes.preferredDisplayModeId != wanted.modeId) {
+            window.attributes = window.attributes.also { it.preferredDisplayModeId = wanted.modeId }
+        }
     }
 
     override fun onPause() {
