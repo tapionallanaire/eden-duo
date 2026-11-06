@@ -205,6 +205,7 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             return true;
         case TitleID::TrailsInTheSky1stChapter:
         case TitleID::TrailsInTheSky2ndChapter:
+        case TitleID::YsXNordics:
             // Its towns build new pipelines as NPCs, effects and streets come into view; compiled
             // synchronously each one held the frame (Rolent on the AYN Thor, 1x handheld: a 59 ms
             // frame for 2 new shaders, dozens per second on entering the town) with the GPU under
@@ -255,6 +256,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::PokemonViolet:
         case TitleID::TrailsInTheSky1stChapter:
         case TitleID::TrailsInTheSky2ndChapter:
+        case TitleID::YsXNordics:
             return true;
         default:
             return false;
@@ -301,6 +303,9 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
         case TitleID::TrailsInTheSky1stChapter:
             // The same engine as 2nd Chapter, the same cost: about 1 GB/s of buffer downloads
             // docked outside the Bright house on the AYN Thor, 36 FPS with them.
+        case TitleID::YsXNordics:
+            // Falcom's engine again: the fencing thread spent 30 ms a frame copying GPU-written
+            // buffers back on its title screen (AYN Thor, docked).
         case TitleID::TrailsInTheSky2ndChapter:
             // It marks large buffers GPU-written every frame (about 150 MB/s docked on the Odin 2) and
             // never reads them back on the CPU. Copying them to guest memory took the GPU thread to

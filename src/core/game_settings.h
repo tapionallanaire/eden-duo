@@ -53,6 +53,7 @@ enum class TitleID : std::uint64_t {
     PokemonViolet = 0x01008F6008C5E000ULL,
     TrailsInTheSky1stChapter = 0x01002C9022770000ULL,
     TrailsInTheSky2ndChapter = 0x01007A2027548000ULL,
+    YsXNordics = 0x0100BAC01E57E000ULL,
 };
 
 struct EnvironmentInfo {
