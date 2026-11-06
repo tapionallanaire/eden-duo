@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -965,6 +966,11 @@ struct Values {
 };
 
 extern Values values;
+
+// Guest vblank length relative to 1/60 s, set by the presenter so a game's frame period is a whole
+// number of the host panel's real refreshes (the AYN Thor's "120 Hz" panel runs at 117.9 Hz).
+// 1 when the host refresh is unknown or too far from a 60 Hz multiple. Never saved.
+inline std::atomic<float> host_vsync_scale{1.f};
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;

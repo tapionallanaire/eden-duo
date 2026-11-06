@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -239,14 +240,70 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     std::scoped_lock lock{scheduler.submit_mutex};
     VkPresentTimeGOOGLE present_time{};
     VkPresentTimesInfoGOOGLE present_times{};
-    const bool stamp = explicit_present_time && device.IsGoogleDisplayTimingEnabled();
+#ifdef __ANDROID__
+    const bool stamp = device.IsGoogleDisplayTimingEnabled();
+#else
+    const bool stamp = false;
+#endif
     if (stamp) {
+        using namespace std::chrono;
+        const auto now = steady_clock::now();
+        auto target = now + milliseconds{1};
+        if (!explicit_present_time) {
+            // Main screen: the guest finishes frames a few ms early or late (sd ~3 ms in Hogwarts
+            // Legacy), so a 30 fps game showed frames 3, 4 or 5 refreshes apart. Each present is
+            // stamped on an even grid of whole refreshes of the panel's real refresh (measured,
+            // see UpdateRefreshEstimate; the guest vblank follows it through host_vsync_scale),
+            // so every frame is shown for the same number of refreshes.
+            UpdateRefreshEstimate();
+            const double refresh_ns = refresh_ms * 1e6;
+            const auto refresh =
+                duration_cast<steady_clock::duration>(duration<double, std::nano>(refresh_ns));
+            // The frame period: the median spacing of recent presents in whole refreshes. Not the
+            // guest swap interval: UE4 games present at interval 1 and cap themselves at 30.
+            if (last_present_call.time_since_epoch().count() != 0) {
+                call_intervals_ms[call_interval_index++ % call_intervals_ms.size()] =
+                    duration<double, std::milli>(now - last_present_call).count();
+            }
+            last_present_call = now;
+            auto sorted = call_intervals_ms;
+            std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+            const auto period =
+                refresh * static_cast<int>((std::max)(1.0, std::round(sorted[sorted.size() / 2] /
+                                                                      refresh_ms)));
+            // The GPU finishes a frame a few ms after it is queued and SurfaceFlinger latches it
+            // about a refresh before showing it, so a slot needs `min_lead`. A late frame moves
+            // the grid by whole refreshes (keeping its phase); a pause restarts it.
+            constexpr auto min_lead = milliseconds{9};
+            target = paced_target + period;
+            if (target < now - seconds{1} || target > now + period + milliseconds{40}) {
+                target = now + min_lead;
+            }
+            const auto push_past_lead = [&] {
+                if (target < now + min_lead) {
+                    target += refresh * static_cast<int>(std::ceil(
+                                            duration<double, std::nano>(now + min_lead - target)
+                                                .count() /
+                                            refresh_ns));
+                }
+            };
+            push_past_lead();
+            // On the panel's vsync grid, at grid_phase of a refresh after a vsync (see
+            // UpdateRefreshEstimate: SurfaceFlinger decides by its own vsync prediction, which
+            // runs an unknown offset ahead of the present times we see).
+            if (last_actual_present != 0) {
+                const auto anchor = steady_clock::time_point{nanoseconds{last_actual_present}};
+                const double j = std::round(
+                    duration<double, std::nano>(target - anchor).count() / refresh_ns - grid_phase);
+                target = anchor + duration_cast<steady_clock::duration>(
+                                      duration<double, std::nano>((j + grid_phase) * refresh_ns));
+                push_past_lead();
+            }
+            paced_target = target;
+        }
         present_time.presentID = ++present_id;
         present_time.desiredPresentTime = static_cast<u64>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                (std::chrono::steady_clock::now() + std::chrono::milliseconds{1})
-                    .time_since_epoch())
-                .count());
+            duration_cast<nanoseconds>(target.time_since_epoch()).count());
         present_times = VkPresentTimesInfoGOOGLE{
             .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
             .pNext = nullptr,
@@ -284,6 +341,50 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     if (frame_index >= image_count) {
         frame_index = 0;
     }
+}
+
+void Swapchain::UpdateRefreshEstimate() {
+    // Android reports the mode's nominal refresh; the AYN Thor's "120 Hz" panel really shows a
+    // frame every 8.4835 ms. Consecutive actual present times are whole multiples of the real
+    // refresh, so their sum over the sum of those multiples converges on it.
+    constexpr double nominal_ms = 1000.0 / 120.0;
+    for (const auto& t : swapchain.GetPastPresentationTiming()) {
+        if (last_actual_present != 0 && t.presentID == last_actual_id + 1 &&
+            t.actualPresentTime > last_actual_present) {
+            const double dt_ms = static_cast<double>(t.actualPresentTime - last_actual_present) / 1e6;
+            const double n = std::round(dt_ms / nominal_ms);
+            if (n >= 1.0 && n <= 8.0) {
+                refresh_ms += (dt_ms / n - refresh_ms) * 0.05;
+            }
+        }
+        last_actual_present = t.actualPresentTime;
+        last_actual_id = t.presentID;
+        // A timestamp near SurfaceFlinger's decision point is shown at one of two vsyncs, so the
+        // delay from timestamp to present jumps by a refresh: move the grid half a refresh away.
+        if (t.desiredPresentTime != 0 && t.actualPresentTime > t.desiredPresentTime - 40'000'000 &&
+            t.actualPresentTime < t.desiredPresentTime + 40'000'000) {
+            const double d_ms = (static_cast<double>(t.actualPresentTime) -
+                                 static_cast<double>(t.desiredPresentTime)) / 1e6;
+            shown_min_ms = (std::min)(shown_min_ms, d_ms);
+            shown_max_ms = (std::max)(shown_max_ms, d_ms);
+            if (++shown_count >= 6 && shown_max_ms - shown_min_ms > refresh_ms * 0.5) {
+                grid_phase = std::fmod(grid_phase + 0.5, 1.0);
+                LOG_INFO(Render_Vulkan, "Present pacing: grid phase -> {:.2f} refresh", grid_phase);
+            }
+            if (shown_count >= 30 || shown_max_ms - shown_min_ms > refresh_ms * 0.5) {
+                shown_min_ms = 1e9;
+                shown_max_ms = -1e9;
+                shown_count = 0;
+            }
+        }
+    }
+    // The guest vblank (1/60 s) becomes the nearest whole number of real refreshes, unless that
+    // is more than 3 % off: a 144 Hz panel must not speed games up.
+    constexpr double guest_vblank_ms = 1000.0 / 60.0;
+    const double scale = (std::max)(1.0, std::round(guest_vblank_ms / refresh_ms)) * refresh_ms /
+                         guest_vblank_ms;
+    Settings::host_vsync_scale.store(std::abs(scale - 1.0) < 0.03 ? static_cast<float>(scale) : 1.f,
+                                     std::memory_order_relaxed);
 }
 
 void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
