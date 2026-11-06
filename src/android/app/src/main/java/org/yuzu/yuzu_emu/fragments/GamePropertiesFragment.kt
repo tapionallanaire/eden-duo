@@ -282,7 +282,10 @@ class GamePropertiesFragment : Fragment() {
                 SettingsFile.loadCustomConfig(game)
                 try {
                     if (NativeConfig.applyOptimalSettings(game.programId)) {
-                        driver?.let { StringSetting.DRIVER_PATH.setString(it) }
+                        if (driver != null && driver != StringSetting.DRIVER_PATH.getString(false)) {
+                            StringSetting.DRIVER_PATH.setString(driver)
+                            OptimalDriver.wipeShaders(game.settingsName)
+                        }
                         NativeConfig.savePerGameConfig()
                         if (wanted != null && driver == null) {
                             R.string.apply_optimal_settings_no_driver
