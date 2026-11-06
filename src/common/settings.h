@@ -958,6 +958,9 @@ struct Values {
     // Run the running title's GPU macros through the microcode interpreter instead of their HLE
     // versions (set at load, never saved).
     bool disable_macro_hle_by_title{};
+    // Don't copy GPU-written buffers back to guest memory for the running title: it never
+    // reads them on the CPU (set at load, never saved).
+    bool skip_buffer_downloads_by_title{};
 
 };
 

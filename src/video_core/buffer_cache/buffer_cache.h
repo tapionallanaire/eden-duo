@@ -690,6 +690,11 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         });
     }
     committed_gpu_modified_ranges.clear();
+    if (Settings::values.skip_buffer_downloads_by_title) {
+        // The GPU's copy stays authoritative: the ranges stay GPU-modified, so guest uploads
+        // don't overwrite them, and nothing is copied back.
+        downloads.clear();
+    }
     if (downloads.empty()) {
         async_buffers.emplace_back(std::optional<Async_Buffer>{});
         return;
@@ -711,10 +716,11 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     }
     runtime.PostDownloadBarrier();
     // Guest bytes as of this download, so the writeback can leave anything the CPU changes later.
-    std::vector<u8> snapshot(total_size_bytes);
+    // Filled below; zeroing it first doubled the cost of large downloads.
+    auto snapshot = std::make_unique_for_overwrite<u8[]>(total_size_bytes);
     for (const BufferCopy& copy : normalized_copies) {
         device_memory.ReadBlockUnsafe(static_cast<DAddr>(copy.src_offset),
-                                      snapshot.data() + (copy.dst_offset - download_staging.offset),
+                                      snapshot.get() + (copy.dst_offset - download_staging.offset),
                                       copy.size);
     }
     async_snapshots.emplace_back(std::move(snapshot), download_staging.offset);
@@ -755,7 +761,7 @@ void BufferCache<P>::PopAsyncBuffers() {
     }
     u8* base = async_buffer->mapped_span.data();
     const size_t base_offset = async_buffer->offset;
-    const std::vector<u8> snapshot = std::move(async_snapshots.front().first);
+    const std::unique_ptr<u8[]> snapshot = std::move(async_snapshots.front().first);
     for (const auto& copy : downloads) {
         if (copy.size == 0) {
             continue;
@@ -768,7 +774,7 @@ void BufferCache<P>::PopAsyncBuffers() {
             // of it while the CPU fills the rest. Bytes the guest changed after the snapshot are
             // newer than this download, so they stay and are re-uploaded before the GPU reads them.
             const size_t size = end - start;
-            const u8* was = snapshot.data() + dst_offset + (start - device_addr);
+            const u8* was = snapshot.get() + dst_offset + (start - device_addr);
             const u8* gpu = &read_mapped_memory[start - device_addr];
             async_guest_now.resize(size);
             device_memory.ReadBlockUnsafe(start, async_guest_now.data(), size);
@@ -839,7 +845,7 @@ void BufferCache<P>::PatchAsyncSnapshot(size_t index, DAddr addr, const u8* data
         const DAddr lo = (std::max)(copy_start, addr);
         const DAddr hi = (std::min)(copy_start + copy.size, addr + size);
         if (lo < hi) {
-            std::memcpy(bytes.data() + (copy.dst_offset - base) + (lo - copy_start),
+            std::memcpy(bytes.get() + (copy.dst_offset - base) + (lo - copy_start),
                         data + (lo - addr), hi - lo);
         }
     }

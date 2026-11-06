@@ -51,6 +51,11 @@ enum class TitleID : std::uint64_t {
     FinalFantasyResonance = 0x0100606026F12000ULL,
     PokemonScarlet = 0x0100A3D008C5C000ULL,
     PokemonViolet = 0x01008F6008C5E000ULL,
+    TrailsInTheSky1stChapter = 0x01002C9022770000ULL,
+    TrailsInTheSky2ndChapter = 0x01007A2027548000ULL,
+    YsXNordics = 0x0100BAC01E57E000ULL,
+    XenobladeChronicles2 = 0x0100E95004038000ULL,
+    XenobladeChronicles3 = 0x010074F013262000ULL,
 };
 
 struct EnvironmentInfo {
