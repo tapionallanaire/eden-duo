@@ -3,6 +3,7 @@
 package org.yuzu.yuzu_emu.utils
 
 import android.content.Context
+import java.io.File
 
 /**
  * The GPU driver a title's optimal settings pick, by title ID. Apply optimal settings writes it as the game's
@@ -21,4 +22,11 @@ object OptimalDriver {
     /** The installed driver zip's path for [fileName], downloaded first if missing; null when that failed. */
     suspend fun ensure(fileName: String, context: Context): String? =
         DriverResolver.ensureDriverAvailable(fileName, context)?.path
+
+    /** Drops the game's shader cache, as the driver pickers do when a game's driver changes. */
+    fun wipeShaders(settingsName: String) {
+        val user = DirectoryInitialization.userDirectory ?: return
+        if (settingsName.isBlank() || '/' in settingsName) return // a blank name is the whole cache
+        File(user, "cache/shader/" + settingsName.lowercase()).deleteRecursively()
+    }
 }
