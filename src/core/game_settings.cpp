@@ -222,6 +222,12 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // picture needs more.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
             return true;
+        case TitleID::FireEmblemEngage:
+        case TitleID::DragonQuestVIIReimagined:
+            // Their effect shaders divide by fp16 subnormals (see LoadOverrides). The load-time
+            // default yields to a value set for the game; applied, the fix is the game's own value.
+            DefaultForTitle(Settings::values.fix_fp16_denormals, true);
+            return true;
         default:
             return false;
     }
@@ -257,6 +263,8 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::TrailsInTheSky1stChapter:
         case TitleID::TrailsInTheSky2ndChapter:
         case TitleID::YsXNordics:
+        case TitleID::FireEmblemEngage:
+        case TitleID::DragonQuestVIIReimagined:
             return true;
         default:
             return false;
