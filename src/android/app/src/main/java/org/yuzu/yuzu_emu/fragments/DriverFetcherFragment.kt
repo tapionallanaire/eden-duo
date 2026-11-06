@@ -78,6 +78,7 @@ class DriverFetcherFragment : Fragment() {
             "Balemuni/Balemunis-Aurora",
             5,
             sortMode = SortMode.PublishTime),
+        DriverRepo("StevenMXZ Turnip", "StevenMXZ/Adreno-Tools-Drivers", 6, true, SortMode.PublishTime),
     )
 
     private val driverMap = listOf(
