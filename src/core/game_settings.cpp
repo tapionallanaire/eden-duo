@@ -228,6 +228,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // default yields to a value set for the game; applied, the fix is the game's own value.
             DefaultForTitle(Settings::values.fix_fp16_denormals, true);
             return true;
+        case TitleID::XenobladeChronicles2:
+        case TitleID::XenobladeChronicles3:
+            // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
+            // (OptimalDriver), which owns driver_path.
+            return true;
         default:
             return false;
     }
@@ -265,6 +270,8 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::YsXNordics:
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
+        case TitleID::XenobladeChronicles2:
+        case TitleID::XenobladeChronicles3:
             return true;
         default:
             return false;

@@ -54,7 +54,8 @@ object DriverResolver {
         "crueter/GameHub-8Elite-Drivers",
         "K11MCH1/AdrenoToolsDrivers",
         "Weab-chan/freedreno_turnip-CI",
-        "Balemuni/Balemunis-Aurora"
+        "Balemuni/Balemunis-Aurora",
+        "StevenMXZ/Adreno-Tools-Drivers"
     )
 
     private val urlCache = ConcurrentHashMap<String, ResolvedDriver>()

@@ -36,6 +36,7 @@ import org.yuzu.yuzu_emu.databinding.FragmentGamePropertiesBinding
 import org.yuzu.yuzu_emu.duo.SaveZipImport
 import org.yuzu.yuzu_emu.features.DocumentProvider
 import org.yuzu.yuzu_emu.features.settings.model.Settings
+import org.yuzu.yuzu_emu.features.settings.model.StringSetting
 import org.yuzu.yuzu_emu.features.settings.ui.SettingsSubscreen
 import org.yuzu.yuzu_emu.features.settings.utils.SettingsFile
 import org.yuzu.yuzu_emu.model.AddonViewModel
@@ -55,6 +56,7 @@ import org.yuzu.yuzu_emu.utils.GpuDriverHelper
 import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.MemoryUtil
 import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.OptimalDriver
 import org.yuzu.yuzu_emu.utils.ViewUtils.marquee
 import org.yuzu.yuzu_emu.utils.ViewUtils.updateMargins
 import org.yuzu.yuzu_emu.utils.collect
@@ -266,24 +268,37 @@ class GamePropertiesFragment : Fragment() {
 
     /** Writes the game's tuned settings into its own config, replacing what was set for them. */
     private fun applyOptimalSettings() {
-        val message = if (NativeLibrary.isRunning()) {
-            // Loading another per-game config here would replace the running game's settings.
-            R.string.apply_optimal_settings_running
-        } else {
-            SettingsFile.loadCustomConfig(args.game)
-            try {
-                if (NativeConfig.applyOptimalSettings(args.game.programId)) {
-                    NativeConfig.savePerGameConfig()
-                    R.string.apply_optimal_settings_done
-                } else {
-                    R.string.apply_optimal_settings_failed
-                }
-            } finally {
-                NativeConfig.unloadPerGameConfig()
+        val game = args.game
+        viewLifecycleOwner.lifecycleScope.launch {
+            // A tuned GPU driver this device lacks is fetched first.
+            val wanted = OptimalDriver.forTitle(game.programIdHex)
+            val driver = wanted?.let {
+                withContext(Dispatchers.IO) { OptimalDriver.ensure(it, YuzuApplication.appContext) }
             }
+            val message = if (NativeLibrary.isRunning()) {
+                // Loading another per-game config here would replace the running game's settings.
+                R.string.apply_optimal_settings_running
+            } else {
+                SettingsFile.loadCustomConfig(game)
+                try {
+                    if (NativeConfig.applyOptimalSettings(game.programId)) {
+                        driver?.let { StringSetting.DRIVER_PATH.setString(it) }
+                        NativeConfig.savePerGameConfig()
+                        if (wanted != null && driver == null) {
+                            R.string.apply_optimal_settings_no_driver
+                        } else {
+                            R.string.apply_optimal_settings_done
+                        }
+                    } else {
+                        R.string.apply_optimal_settings_failed
+                    }
+                } finally {
+                    NativeConfig.unloadPerGameConfig()
+                }
+            }
+            Toast.makeText(YuzuApplication.appContext, message, Toast.LENGTH_LONG).show()
+            homeViewModel.reloadPropertiesList(true)
         }
-        Toast.makeText(YuzuApplication.appContext, message, Toast.LENGTH_LONG).show()
-        homeViewModel.reloadPropertiesList(true)
     }
 
     private fun reloadList() {
