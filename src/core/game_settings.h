@@ -56,6 +56,7 @@ enum class TitleID : std::uint64_t {
     YsXNordics = 0x0100BAC01E57E000ULL,
     XenobladeChronicles2 = 0x0100E95004038000ULL,
     XenobladeChronicles3 = 0x010074F013262000ULL,
+    HogwartsLegacy = 0x0100F7E00C70E000ULL,
 };
 
 struct EnvironmentInfo {

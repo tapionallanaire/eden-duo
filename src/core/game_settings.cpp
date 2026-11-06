@@ -222,6 +222,13 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // picture needs more.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
             return true;
+        case TitleID::HogwartsLegacy:
+            // At low accuracy its fences release before the GPU work behind them, and its scenes
+            // render washed out to white (the London street, the cave; AYN Thor, docked 1x).
+            // High keeps the picture and still holds 30.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
             // Their effect shaders divide by fp16 subnormals (see LoadOverrides). The load-time
@@ -272,6 +279,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::DragonQuestVIIReimagined:
         case TitleID::XenobladeChronicles2:
         case TitleID::XenobladeChronicles3:
+        case TitleID::HogwartsLegacy:
             return true;
         default:
             return false;
