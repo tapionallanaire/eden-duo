@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -323,6 +324,10 @@ private:
     std::mutex reserve_mutex;
     std::mutex queue_mutex;
     std::condition_variable_any event_cv;
+    // True while the worker sleeps on event_cv. DispatchWork runs once per draw; waking a worker
+    // that is busy anyway cost a futex syscall each time, and the GPU thread was descheduled in
+    // it 6 % of its time (Hogwarts Legacy, AYN Thor, 25k draws a second).
+    std::atomic<bool> worker_idle{false};
     std::jthread worker_thread;
 
     std::chrono::steady_clock::duration frame_interval{};
