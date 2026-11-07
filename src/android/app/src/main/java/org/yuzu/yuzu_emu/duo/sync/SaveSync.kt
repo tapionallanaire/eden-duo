@@ -19,8 +19,10 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -475,8 +477,15 @@ class SaveSync(
                 if (Build.VERSION.SDK_INT >= 37) activity.requestPermissions(arrayOf("android.permission.ACCESS_LOCAL_NETWORK"), 0)
                 scan(activity)
             }
+            .setNeutralButton("Set up your PC") { _, _ -> openHubGuide(activity) }
             .setNegativeButton("Not now", null)
             .show()
+    }
+
+    /** The PC side: a script that installs Syncthing as the hub and starts it at sign-in. */
+    private fun openHubGuide(activity: Activity) {
+        runCatching { activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(HUB_GUIDE))) }
+            .onFailure { note(activity, "Open $HUB_GUIDE on your PC to set it up.") }
     }
 
     private fun scan(activity: Activity) {
@@ -526,6 +535,7 @@ class SaveSync(
                         "device on the PC (Add Remote Device) with its ID:\n\n$me"
                 )
                 .setPositiveButton("Search again") { _, _ -> scan(activity) }
+                .setNeutralButton("Set up your PC") { _, _ -> openHubGuide(activity) }
             found.size == 1 -> b.setTitle("Connect to this PC?")
                 .setMessage("${found[0].second}\n\nYou'll approve $deviceName on the PC next.")
                 .setPositiveButton("Connect") { _, _ -> choose(activity, found[0]) }
@@ -733,6 +743,7 @@ class SaveSync(
 
     companion object {
         private const val TAG = "SaveSync"
+        private const val HUB_GUIDE = "https://github.com/tapionallanaire/save-sync-hub"
         const val FOLDER = "calamansi-saves"
         private const val EXIT_JOB_ID = 0x5a5e0000
         private const val PERIODIC_JOB_ID = 0x5a5effff
