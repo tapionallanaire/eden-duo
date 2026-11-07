@@ -570,6 +570,7 @@ private:
     f32 default_anisotropy{1.0f};
 
     bool has_added_anisotropy{};
+    bool has_image_view_variants{};
     bool has_linear_filtering{};
     bool has_depth_comparison{};
     bool has_minmax_reduction{};
