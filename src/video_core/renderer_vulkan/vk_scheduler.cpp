@@ -88,7 +88,12 @@ void Scheduler::DispatchWork() {
             std::scoped_lock ql{queue_mutex};
             work_queue.push(std::move(chunk));
         }
-        event_cv.notify_all();
+        // A worker that is executing a chunk finds this one when it next takes the queue lock;
+        // one that went to sleep set worker_idle before releasing that lock, so a push that
+        // found the queue mutex free after that sees the flag.
+        if (worker_idle.load(std::memory_order_seq_cst)) {
+            event_cv.notify_all();
+        }
         AcquireNewChunk();
     }
 }
@@ -289,7 +294,9 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
+            worker_idle.store(true, std::memory_order_seq_cst);
             event_cv.wait(lk, stop_token, [&] { return TryPopQueue(work); });
+            worker_idle.store(false, std::memory_order_seq_cst);
 
             // If we've been asked to stop, we're done.
             if (stop_token.stop_requested()) {
