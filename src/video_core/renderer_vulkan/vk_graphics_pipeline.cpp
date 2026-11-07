@@ -420,11 +420,27 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
             return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
         }};
+        // A handle table can't reach past the end of its bound constant buffer: elements beyond it
+        // get an out-of-range index, which the texture cache turns into a null view without a
+        // lookup. Hogwarts Legacy indexes per-instance tables of a few hundred bytes, and resolving
+        // all 1024 possible elements per draw held the GPU thread at 86 % (30 -> 20 FPS, Thor).
+        const auto bound_count{[&](const auto& desc) -> u32 {
+            if (desc.count <= 1) {
+                return desc.count;
+            }
+            const u32 size{cbufs[desc.cbuf_index].size};
+            if (desc.cbuf_offset + sizeof(u32) > size) {
+                return 0;
+            }
+            return (std::min)(desc.count, ((size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1);
+        }};
+        constexpr u32 OUT_OF_RANGE{~0u};
         const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
+            const u32 bound{bound_count(desc)};
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
+                const u32 view_index{index < bound ? read_handle(desc, index).first : OUT_OF_RANGE};
                 views.push_back({
-                    .index = handle.first,
+                    .index = view_index,
                     .blacklist = blacklist,
                     .id = {}
                 });
@@ -441,8 +457,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            const u32 bound{bound_count(desc)};
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
+                const auto handle{index < bound ? read_handle(desc, index)
+                                                : std::pair<u32, u32>{OUT_OF_RANGE, OUT_OF_RANGE}};
                 views.push_back({handle.first});
 
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
