@@ -61,4 +61,10 @@ void RenderdocAPI::ToggleCapture() {
     is_capturing = !is_capturing;
 }
 
+void RenderdocAPI::TriggerCapture(u32 frames) {
+    if (rdoc_api) {
+        static_cast<RENDERDOC_API_1_6_0*>(rdoc_api)->TriggerMultiFrameCapture(frames);
+    }
+}
+
 } // namespace Tools
