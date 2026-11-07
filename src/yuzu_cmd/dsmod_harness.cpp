@@ -32,6 +32,7 @@
 #include "common/stb.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/tools/renderdoc.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/registered_cache.h"
@@ -449,6 +450,15 @@ static void ServiceButtonRequests(Core::System& system,
         if (std::filesystem::exists(shot, shot_ec)) {
             std::filesystem::remove(shot, shot_ec);
             g_screenshot_requested.store(true);
+        }
+        // <prefix>.rdc: RenderDoc captures the next 3 presents, so a 30 fps game's own frame is in
+        // (run under renderdoccmd with renderdoc_hotkey on, which creates the API).
+        const std::filesystem::path rdc{g_screenshot_prefix + ".rdc"};
+        if (std::filesystem::exists(rdc, shot_ec)) {
+            std::filesystem::remove(rdc, shot_ec);
+            if (Settings::values.enable_renderdoc_hotkey.GetValue()) {
+                system.GetRenderdocAPI().TriggerCapture(3);
+            }
         }
     }
 

@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
+
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/settings.h"
@@ -133,14 +135,33 @@ void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
     }
     u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
     const auto value = regs.semaphore_acquire;
+    const auto start = std::chrono::steady_clock::now();
+    bool flushed = false;
     while (word != value) {
         regs.acquire_active = true;
         regs.acquire_value = value;
         dma_pusher.rasterizer->ReleaseFences();
         word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
-        // TODO(kemathe73) figure out how to do the acquire_timeout
         regs.acquire_mode = false;
         regs.acquire_source = false;
+        if (word == value) {
+            break;
+        }
+        // The release may sit in work not yet submitted to the host GPU: submit it once.
+        const auto waited = std::chrono::steady_clock::now() - start;
+        if (!flushed && waited > std::chrono::milliseconds(100)) {
+            dma_pusher.rasterizer->FlushCommands();
+            flushed = true;
+        }
+        // Stands in for the hardware acquire timeout. Without one, a release that never comes
+        // spun the GPU thread forever: FINAL FANTASY RESONANCE froze in battle, one core busy
+        // and the host GPU idle.
+        // ponytail: fixed 2 s; read acquire_timeout if a game needs its own.
+        if (waited > std::chrono::seconds(2)) {
+            LOG_ERROR(HW_GPU, "Semaphore acquire at {:#x} gave up after 2 s: waiting for {:#x}, word is {:#x}",
+                      semaphore_address, value, word);
+            return;
+        }
     }
 }
 

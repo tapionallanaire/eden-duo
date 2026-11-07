@@ -173,6 +173,23 @@ void TextureCache<P>::RunGarbageCollector() {
 }
 
 template <class P>
+void TextureCache<P>::OnGuestMemoryWritten(DAddr addr, size_t size, ImageId except) {
+    // FINAL FANTASY RESONANCE fills its lightmap brick textures with DMA copies. Without this the
+    // bricks keep the zeros they were first uploaded with, and the lightmap atlas built from them
+    // draws battle party sprites black or glowing for the rest of the session.
+    ForEachImageInRegion(addr, size, [&](ImageId id, Image& image) {
+        if (id == except || True(image.flags & ImageFlagBits::CpuModified) ||
+            True(image.flags & ImageFlagBits::GpuModified)) {
+            return;
+        }
+        image.flags |= ImageFlagBits::CpuModified;
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, id);
+        }
+    });
+}
+
+template <class P>
 void TextureCache<P>::TickFrame() {
     // If we can obtain the memory info, use it instead of the estimate.
     if (runtime.CanReportMemoryUsage()) {
@@ -229,8 +246,19 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         if (blacklist) {
             has_blacklisted = false;
         }
+        // Handle tables repeat an index in runs: look each run up once.
+        u32 prev_index{};
+        ImageViewId prev_id{};
+        bool have_prev{false};
         for (ImageViewInOut& view : views) {
+            if (have_prev && !view.blacklist && view.index == prev_index) {
+                view.id = prev_id;
+                continue;
+            }
             view.id = VisitImageView(view.index, compute);
+            prev_index = view.index;
+            prev_id = view.id;
+            have_prev = !view.blacklist;
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
@@ -564,8 +592,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         const ImageId image_id = slot_image_views[view_id].image_id;
         return image_id && True(slot_images[image_id].flags & ImageFlagBits::Remapped);
     };
-    const auto it = channel_state->image_view_ids.find(map_index);
-    if (is_new || is_remapped(it->second)) {
+    if (is_new) {
         if (!compute) {
             ++texture_bindings_serial;
         }
@@ -584,6 +611,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         channel_state->image_view_ids.insert_or_assign(map_index, NULL_IMAGE_VIEW_ID);
         return NULL_IMAGE_VIEW_ID;
     }
+    auto const it = channel_state->image_view_ids.find(map_index);
     if (it->second != NULL_IMAGE_VIEW_ID)
         PrepareImageView(it->second, false, false);
     return it->second;
@@ -706,6 +734,7 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
     boost::container::small_vector<ImageId, 16> deleted_images;
     ForEachImageInRegionGPU(as_id, gpu_addr, size,
                             [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    bool any_remapped = false;
     for (const ImageId id : deleted_images) {
         Image& image = slot_images[id];
         if (False(image.flags & ImageFlagBits::CpuModified)) {
@@ -718,6 +747,14 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
             continue;
         }
         image.flags |= ImageFlagBits::Remapped;
+        any_remapped = true;
+    }
+    if (any_remapped) {
+        // Bound views of a remapped image are recreated on their next visit (VisitImageView).
+        for (size_t c : active_channel_ids) {
+            channel_storage[c].graphics_image_table.Invalidate();
+            channel_storage[c].compute_image_table.Invalidate();
+        }
     }
 }
 
@@ -961,6 +998,8 @@ void TextureCache<P>::PopAsyncFlushes() {
                 std::span<u8> download_span =
                     download_buffer.mapped_span.subspan(download_buffer.offset);
                 SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, download_span, swizzle_data_buffer);
+                OnGuestMemoryWritten(image.cpu_addr, image.guest_size_bytes,
+                                     download_info.object_id);
             } else {
                 const BufferDownload& buffer_info = slot_buffer_downloads[download_info.object_id];
                 std::span<u8> download_span =
@@ -1056,6 +1095,20 @@ bool TextureCache<P>::IsRescaling(const ImageViewBase& image_view) const noexcep
     }
     const ImageBase& image = slot_images[image_view.image_id];
     return True(image.flags & ImageFlagBits::Rescaled);
+}
+
+template <class P>
+bool TextureCache<P>::HasUnsavedGpuWrites(DAddr addr, size_t size) {
+    bool unsaved = false;
+    ForEachImageInRegion(addr, size, [&unsaved](ImageId, ImageBase& image) {
+        if (False(image.flags & ImageFlagBits::GpuModified) ||
+            True(image.flags & ImageFlagBits::CpuModified)) {
+            return false;
+        }
+        unsaved = true;
+        return true;
+    });
+    return unsaved;
 }
 
 template <class P>
@@ -1194,6 +1247,8 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         return;
     }
 
+    // Guest memory under the image may hold buffer data the GPU wrote and not yet written back.
+    gpu_memory->FlushRegion(gpu_addr, image.guest_size_bytes, VideoCommon::CacheType::BufferCache);
     Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead> swizzle_data(
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     if (True(image.flags & ImageFlagBits::Converted)) {

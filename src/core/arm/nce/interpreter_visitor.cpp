@@ -151,6 +151,11 @@ u128 InterpreterVisitor::GetVec(Vec v) {
 }
 
 u64 InterpreterVisitor::GetReg(Reg r) {
+    // Register 31 is the zero register here; callers handle SP explicitly. The saved context has
+    // only x0-x30, so indexing it would read the stack pointer that follows them.
+    if (r == Reg::ZR) {
+        return 0;
+    }
     return m_regs[static_cast<u32>(r)];
 }
 
@@ -167,6 +172,9 @@ void InterpreterVisitor::SetVec(Vec v, u128 value) {
 }
 
 void InterpreterVisitor::SetReg(Reg r, u64 value) {
+    if (r == Reg::ZR) {
+        return;
+    }
     m_regs[static_cast<u32>(r)] = value;
 }
 

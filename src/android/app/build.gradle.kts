@@ -88,6 +88,10 @@ android {
                         "-DBUILD_TESTING=OFF",
                         "-DYUZU_TESTS=OFF",
                         "-DDYNARMIC_TESTS=OFF",
+                        // Bundled zlib's tests write CMAKE_C_FLAGS back into the cache, so every
+                        // reconfigure appended the flags again until its test links passed the
+                        // Windows command-line limit.
+                        "-DZLIB_BUILD_TESTING=OFF",
                         *extraCMakeArgs.toTypedArray()
                     )
                 )

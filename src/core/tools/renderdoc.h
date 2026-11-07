@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "common/common_types.h"
+
 namespace Tools {
 
 class RenderdocAPI {
@@ -14,6 +16,8 @@ public:
     ~RenderdocAPI();
 
     void ToggleCapture();
+    /// Captures the next `frames` presented frames (when running under RenderDoc).
+    void TriggerCapture(u32 frames);
 
 private:
     void* rdoc_api{};

@@ -155,7 +155,7 @@ size_t NumAttachments(const FixedPipelineState& state) {
 }
 
 template <typename Spec>
-bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+bool Passes(const std::array<bool, NUM_STAGES>& modules,
             const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!Spec::enabled_stages[stage] && modules[stage]) {
@@ -189,7 +189,7 @@ bool Passes(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
 using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
 
 template <typename Spec, typename... Specs>
-ConfigureFuncPtr FindSpec(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+ConfigureFuncPtr FindSpec(const std::array<bool, NUM_STAGES>& modules,
                           const std::array<Shader::Info, NUM_STAGES>& stage_infos) {
     if constexpr (sizeof...(Specs) > 0) {
         if (!Passes<Spec>(modules, stage_infos)) {
@@ -239,7 +239,7 @@ struct DefaultSpec {
     static constexpr bool has_images = true;
 };
 
-ConfigureFuncPtr ConfigureFunc(const std::array<vk::ShaderModule, NUM_STAGES>& modules,
+ConfigureFuncPtr ConfigureFunc(const std::array<bool, NUM_STAGES>& modules,
                                const std::array<Shader::Info, NUM_STAGES>& infos) {
     return FindSpec<SimpleVertexSpec, SimpleVertexFragmentSpec, SimpleStorageSpec, SimpleImageSpec,
                     DefaultSpec>(modules, infos);
@@ -255,11 +255,12 @@ GraphicsPipeline::GraphicsPipeline(
     Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
-    const std::array<const Shader::Info*, NUM_STAGES>& infos)
+    const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitModules emit_modules_)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      emit_modules{std::move(emit_modules_)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -313,8 +314,13 @@ GraphicsPipeline::GraphicsPipeline(
         const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
         Validate();
         try {
+            if (emit_modules) {
+                emit_modules(spv_modules);
+                emit_modules = nullptr;
+            }
             MakePipeline(render_pass);
-        } catch (const vk::Exception& exception) {
+        } catch (const std::exception& exception) {
+            // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             std::scoped_lock lock{build_mutex};
             is_built = true;
@@ -335,12 +341,31 @@ GraphicsPipeline::GraphicsPipeline(
             shader_notify->MarkShaderComplete();
         }
     }};
+    build_func = std::move(func);
     if (worker_thread) {
-        worker_thread->QueueWork(std::move(func));
+        worker_thread->QueueWork([this] { RunBuild(); });
     } else {
-        func();
+        RunBuild();
     }
-    configure_func = ConfigureFunc(spv_modules, stage_infos);
+    std::array<bool, NUM_STAGES> present_stages{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        present_stages[stage] = infos[stage] != nullptr;
+    }
+    configure_func = ConfigureFunc(present_stages, stage_infos);
+}
+
+void GraphicsPipeline::RunBuild() {
+    if (build_claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    build_func();
+    build_func = nullptr;
+}
+
+void GraphicsPipeline::BuildUrgently(Common::ThreadWorker& worker) {
+    if (!build_claimed.load(std::memory_order_acquire)) {
+        worker.QueueWork([this] { RunBuild(); });
+    }
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -383,7 +408,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                           std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
                 if (desc.has_secondary) {
                     ASSERT(cbufs[desc.secondary_cbuf_index].enabled);
-                    const u32 second_offset{desc.secondary_cbuf_offset + index_offset};
+                    const u32 second_offset{desc.secondary_cbuf_offset};
                     const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
                                                  second_offset};
                     const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
@@ -395,11 +420,27 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
             return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
         }};
+        // A handle table can't reach past the end of its bound constant buffer: elements beyond it
+        // get an out-of-range index, which the texture cache turns into a null view without a
+        // lookup. Hogwarts Legacy indexes per-instance tables of a few hundred bytes, and resolving
+        // all 1024 possible elements per draw held the GPU thread at 86 % (30 -> 20 FPS, Thor).
+        const auto bound_count{[&](const auto& desc) -> u32 {
+            if (desc.count <= 1) {
+                return desc.count;
+            }
+            const u32 size{cbufs[desc.cbuf_index].size};
+            if (desc.cbuf_offset + sizeof(u32) > size) {
+                return 0;
+            }
+            return (std::min)(desc.count, ((size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1);
+        }};
+        constexpr u32 OUT_OF_RANGE{~0u};
         const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
+            const u32 bound{bound_count(desc)};
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
+                const u32 view_index{index < bound ? read_handle(desc, index).first : OUT_OF_RANGE};
                 views.push_back({
-                    .index = handle.first,
+                    .index = view_index,
                     .blacklist = blacklist,
                     .id = {}
                 });
@@ -416,8 +457,55 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            const u32 bound{bound_count(desc)};
+            if (desc.count > 1 && bound > 0) {
+                // A handle table: read it in one block, skip the elements the shader's offset
+                // arithmetic can't reach (Hogwarts Legacy: a handle every 72 bytes in some tables),
+                // and give a slot holding the same handle as the one before it that slot's result.
+                static thread_local std::vector<u32> table;
+                const u32 stride_words{(1u << desc.size_shift) / static_cast<u32>(sizeof(u32))};
+                table.resize(static_cast<size_t>(bound) * stride_words);
+                gpu_memory->ReadBlockUnsafe(cbufs[desc.cbuf_index].address + desc.cbuf_offset,
+                                            table.data(), table.size() * sizeof(u32));
+                u32 secondary{};
+                if (desc.has_secondary) {
+                    secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
+                                                      desc.secondary_cbuf_offset)
+                                << desc.secondary_shift_left;
+                }
+                u32 prev_raw{};
+                u32 prev_view{};
+                VideoCommon::SamplerId prev_sampler{};
+                bool have_prev{false};
+                for (u32 index = 0; index < desc.count; ++index) {
+                    const bool live{index < bound &&
+                                    (desc.live_stride == 0 ||
+                                     ((index << desc.size_shift) + desc.live_stride -
+                                      desc.live_phase) % desc.live_stride == 0)};
+                    if (!live) {
+                        views.push_back({OUT_OF_RANGE});
+                        samplers.push_back(VideoCommon::NULL_SAMPLER_ID);
+                        continue;
+                    }
+                    const u32 raw{(table[index * stride_words] << desc.shift_left) | secondary};
+                    if (have_prev && raw == prev_raw) {
+                        views.push_back({prev_view});
+                        samplers.push_back(prev_sampler);
+                        continue;
+                    }
+                    const auto handle{TexturePair(raw, via_header_index)};
+                    views.push_back({handle.first});
+                    prev_view = handle.first;
+                    prev_sampler = texture_cache.GetSamplerId(handle.second, false);
+                    samplers.push_back(prev_sampler);
+                    prev_raw = raw;
+                    have_prev = true;
+                }
+                continue;
+            }
             for (u32 index = 0; index < desc.count; ++index) {
-                const auto handle{read_handle(desc, index)};
+                const auto handle{index < bound ? read_handle(desc, index)
+                                                : std::pair<u32, u32>{OUT_OF_RANGE, OUT_OF_RANGE}};
                 views.push_back({handle.first});
 
                 VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};

@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <bit>
+#include <numeric>
 #include <optional>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <limits>
 #include <boost/container/small_vector.hpp>
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
@@ -35,6 +37,11 @@ constexpr u32 DESCRIPTOR_SIZE = 8;
 constexpr u32 DESCRIPTOR_SIZE_SHIFT = u32(std::countr_zero(DESCRIPTOR_SIZE));
 constexpr u32 DESCRIPTOR_MAX_COUNT = 1024;
 
+u32 MaxTableDescriptors() {
+    const u32 by_title = Settings::values.bindless_table_max_by_title;
+    return by_title != 0 ? (std::min)(by_title, DESCRIPTOR_MAX_COUNT) : DESCRIPTOR_MAX_COUNT;
+}
+
 u32 DynamicDescriptorSizeShift(const IR::U32& dynamic_offset) {
     const IR::Inst* const inst = dynamic_offset.InstRecursive();
     if (!inst || inst->GetOpcode() != IR::Opcode::ShiftLeftLogical32)
@@ -57,6 +64,52 @@ u32 DynamicDescriptorCount(u32 base_offset, u32 size_shift, u32 max_descriptors)
         return 1;
     auto const available_count = 1U + (available - DESCRIPTOR_SIZE) / stride;
     return std::min(descriptor_limit, available_count);
+}
+
+// The values an offset expression can take, as stride * k + phase for integers k: run-time inputs
+// count as any integer, immediates as themselves (signed), adds, multiplies and left shifts by
+// immediates combine them. Hogwarts Legacy indexes handle tables as attr * 0x48 + field (or the
+// XMAD form ((hi * 0x48) << 16) + (lo * 0x48 + field)): only one 8-byte element in nine is reached.
+struct OffsetLattice {
+    u64 stride; // 0: constant
+    s64 phase;
+};
+
+OffsetLattice AnalyzeOffset(const IR::Value& value, int depth = 0) {
+    if (value.IsImmediate()) {
+        return {0, static_cast<s64>(static_cast<s32>(value.U32()))};
+    }
+    const IR::Inst* const inst{value.TryInstRecursive()};
+    if (inst == nullptr || depth > 8) {
+        return {1, 0};
+    }
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::IAdd32: {
+        const OffsetLattice a{AnalyzeOffset(inst->Arg(0), depth + 1)};
+        const OffsetLattice b{AnalyzeOffset(inst->Arg(1), depth + 1)};
+        return {std::gcd(a.stride, b.stride), a.phase + b.phase};
+    }
+    case IR::Opcode::IMul32: {
+        const IR::Value lhs{inst->Arg(0)};
+        const IR::Value rhs{inst->Arg(1)};
+        if (!lhs.IsImmediate() && !rhs.IsImmediate()) {
+            return {1, 0};
+        }
+        const u64 m{lhs.IsImmediate() ? lhs.U32() : rhs.U32()};
+        const OffsetLattice a{AnalyzeOffset(lhs.IsImmediate() ? rhs : lhs, depth + 1)};
+        return {a.stride * m, a.phase * static_cast<s64>(m)};
+    }
+    case IR::Opcode::ShiftLeftLogical32: {
+        if (!inst->Arg(1).IsImmediate() || inst->Arg(1).U32() >= 32) {
+            return {1, 0};
+        }
+        const u32 shift{inst->Arg(1).U32()};
+        const OffsetLattice a{AnalyzeOffset(inst->Arg(0), depth + 1)};
+        return {a.stride << shift, a.phase * (s64{1} << shift)};
+    }
+    default:
+        return {1, 0};
+    }
 }
 
 u32 SaturatingSub(u32 lhs, u32 rhs) {
@@ -87,7 +140,7 @@ u32 DynamicSampledTextureCap(const Info& info, const HostTranslateInfo& host_inf
         auto const resource_cap = resource_budget / dynamic_arrays;
         return (std::max)(1U, (std::min)(sampled_cap, resource_cap));
     }
-    return (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, resource_limit});
+    return (std::min)({MaxTableDescriptors(), sampled_limit, resource_limit});
 }
 
 IR::Opcode IndexedInstruction(const IR::Inst& inst) {
@@ -350,12 +403,35 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             return std::nullopt;
         }
         if (lhs->has_secondary || rhs->has_secondary) {
+            // handle = Phi(table | word, ...) | word: ORing a word the tracked side already
+            // includes changes nothing (Hogwarts Legacy, sampler word cbuf2 + 0x590..0x5b8).
+            const auto includes = [](const ConstBufferAddr& with, const ConstBufferAddr& word) {
+                const bool scalar = word.count == 1 && !word.has_secondary;
+                const bool is_primary = with.index == word.index && with.offset == word.offset &&
+                                        with.shift_left == word.shift_left;
+                const bool is_secondary = with.secondary_index == word.index &&
+                                          with.secondary_offset == word.offset &&
+                                          with.secondary_shift_left == word.shift_left;
+                return with.has_secondary && scalar && (is_primary || is_secondary);
+            };
+            if (includes(*lhs, *rhs)) {
+                return lhs;
+            }
+            if (includes(*rhs, *lhs)) {
+                return rhs;
+            }
             return std::nullopt;
         }
-        if (lhs->count > 1 || rhs->count > 1) {
+        if (lhs->count > 1 && rhs->count > 1) {
             return std::nullopt;
         }
-        if (lhs->shift_left > 0 || lhs->index > rhs->index || lhs->offset > rhs->offset) {
+        // One side may be a handle table indexed at run time, ORed with one fixed word: Hogwarts
+        // Legacy reads a per-instance texture handle (cbuf[attr * stride + field]) and ORs in a
+        // separate sampler handle. The table is the primary array; the fixed word is the secondary
+        // of every element. Bailing here let the search below settle on the sampler word alone:
+        // texture 0, a null descriptor, zeros, and NaN normals drawn black.
+        if (rhs->count > 1 || (lhs->count == 1 && (lhs->shift_left > 0 || lhs->index > rhs->index ||
+                                                   lhs->offset > rhs->offset))) {
             std::swap(lhs, rhs);
         }
         return ConstBufferAddr{
@@ -365,8 +441,8 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .secondary_index = rhs->index,
             .secondary_offset = rhs->offset,
             .secondary_shift_left = rhs->shift_left,
-            .dynamic_offset = {},
-            .count = 1,
+            .dynamic_offset = lhs->dynamic_offset,
+            .count = lhs->count,
             .has_secondary = true,
         };
     }
@@ -435,19 +511,23 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         };
     }
     IR::Inst* const offset_inst{offset.InstRecursive()};
-    if (offset_inst->GetOpcode() != IR::Opcode::IAdd32) {
-        return std::nullopt;
-    }
     u32 base_offset{};
     IR::U32 dynamic_offset;
-    if (offset_inst->Arg(0).IsImmediate()) {
+    // A constant part is a base only when it lies inside a constant buffer (64 KiB): Hogwarts
+    // Legacy reads c7[index * stride - 8], and taking -8 as the base made a one-element table
+    // read at c7 - 8 (zero, texture 0, rocks drawn black).
+    const auto is_base = [](const IR::Value& v) { return v.IsImmediate() && v.U32() < 0x10000; };
+    if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && is_base(offset_inst->Arg(0))) {
         base_offset = offset_inst->Arg(0).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(1)};
-    } else if (offset_inst->Arg(1).IsImmediate()) {
+    } else if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && is_base(offset_inst->Arg(1))) {
         base_offset = offset_inst->Arg(1).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(0)};
     } else {
-        return std::nullopt;
+        // A table read at a run-time offset with no top-level constant part: attr * stride, or
+        // attr * stride + field built from 16-bit multiplies (XMAD), where the constant sits
+        // inside. The whole offset indexes a table starting at 0.
+        dynamic_offset = IR::U32{offset};
     }
     auto const size_shift = DynamicDescriptorSizeShift(dynamic_offset);
     auto const sampled_limit = (std::max)(1U, (std::min)(host_info.max_per_stage_descriptor_sampled_images,
@@ -461,7 +541,7 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         .secondary_offset = 0,
         .secondary_shift_left = 0,
         .dynamic_offset = dynamic_offset,
-        .count = DynamicDescriptorCount(base_offset, size_shift, (std::min)({DESCRIPTOR_MAX_COUNT, sampled_limit, resource_limit})),
+        .count = DynamicDescriptorCount(base_offset, size_shift, (std::min)({MaxTableDescriptors(), sampled_limit, resource_limit})),
         .has_secondary = false,
     };
 }
@@ -562,7 +642,9 @@ public:
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
                    desc.secondary_shift_left == existing.secondary_shift_left &&
-                   desc.count == existing.count && desc.size_shift == existing.size_shift;
+                   desc.count == existing.count && desc.size_shift == existing.size_shift &&
+                   desc.live_stride == existing.live_stride &&
+                   desc.live_phase == existing.live_phase;
         })};
         // TODO: Read this from TIC
         texture_descriptors[index].is_multisample |= desc.is_multisample;
@@ -812,6 +894,23 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             } else {
                 count = std::min(count, sampled_dynamic_cap);
                 const bool is_integer{is_texture_pixel_format_integer(cbuf)};
+                u32 live_stride{};
+                u32 live_phase{};
+                if (count > 1) {
+                    const OffsetLattice lattice{AnalyzeOffset(IR::Value{cbuf.dynamic_offset})};
+                    const u64 element{u64{1} << size_shift};
+                    if (lattice.stride > element && lattice.stride % element == 0 &&
+                        lattice.stride <= 0x10000) {
+                        const s64 stride{static_cast<s64>(lattice.stride)};
+                        const s64 phase{((lattice.phase % stride) + stride) % stride};
+                        // The element index truncates offset >> size_shift: only an aligned phase
+                        // maps each reachable offset to exactly one element.
+                        if (phase % static_cast<s64>(element) == 0) {
+                            live_stride = static_cast<u32>(stride);
+                            live_phase = static_cast<u32>(phase);
+                        }
+                    }
+                }
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
@@ -826,6 +925,8 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .secondary_shift_left = cbuf.secondary_shift_left,
                     .count = count,
                     .size_shift = size_shift,
+                    .live_stride = live_stride,
+                    .live_phase = live_phase,
                 });
                 flags.is_integer.Assign(is_integer ? 1 : 0);
             }

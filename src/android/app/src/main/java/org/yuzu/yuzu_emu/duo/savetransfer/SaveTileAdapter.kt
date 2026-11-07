@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
+import coil.dispose
 import java.text.DateFormat
 import java.util.Date
 import org.yuzu.yuzu_emu.R
@@ -56,6 +57,8 @@ class SaveTileAdapter(
                 binding.icon.setPadding(0, 0, 0, 0)
                 GameIconUtils.loadGameIcon(tile.game, binding.icon)
             } else {
+                // A reused tile may still be loading the previous game's icon.
+                binding.icon.dispose()
                 val pad = context.resources.displayMetrics.density * 24
                 binding.icon.scaleType = ImageView.ScaleType.FIT_CENTER
                 binding.icon.setPadding(pad.toInt(), pad.toInt(), pad.toInt(), pad.toInt())

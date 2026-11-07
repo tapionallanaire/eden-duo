@@ -68,13 +68,14 @@ public:
 
 private:
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
-                   std::list<RegisteredAction>& action_storage);
+                   std::list<RegisteredAction>& action_storage, std::mutex& action_mutex);
 
     ActionHandle RegisterAction(std::atomic<u32>& syncpoint,
                                 std::list<RegisteredAction>& action_storage, u32 expected_value,
                                 std::function<void()>&& action);
 
-    void DeregisterAction(std::list<RegisteredAction>& action_storage, const ActionHandle& handle);
+    void DeregisterAction(std::list<RegisteredAction>& action_storage, const ActionHandle& handle,
+                          std::mutex& action_mutex);
 
     void Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, u32 expected_value);
 
@@ -87,6 +88,9 @@ private:
     std::array<std::list<RegisteredAction>, NUM_MAX_SYNCPOINTS> host_action_storage;
 
     std::mutex guard;
+    /// Held while due actions run, outside guard: a guest action composites a whole frame.
+    std::mutex guest_action_mutex;
+    std::mutex host_action_mutex;
     std::condition_variable wait_guest_cv;
     std::condition_variable wait_host_cv;
 };

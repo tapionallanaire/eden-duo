@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -120,6 +124,20 @@ EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer) {
 }
 
 namespace {
+#ifdef __ANDROID__
+/// The GPU's family from the kernel driver, readable before any Vulkan device exists.
+bool IsAdreno6xx() {
+    std::FILE* const file = std::fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
+    if (file == nullptr) {
+        return false;
+    }
+    char model[32]{};
+    const bool read = std::fgets(model, sizeof(model), file) != nullptr;
+    std::fclose(file);
+    return read && std::strncmp(model, "Adreno6", 7) == 0;
+}
+#endif
+
 /// At boot ([force] false) a title value only fills a setting the user left on global; applying
 /// the optimal settings ([force] true) replaces the game's own value too.
 template <typename T, typename Setting>
@@ -138,13 +156,15 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
         case TitleID::FinalFantasyResonance:
             // The bloom hack scales sampled RGBA values and corrupts this game's sprite colours.
             DefaultForTitle(Settings::values.fix_bloom_effects, false);
-            // Async GPU still produces HUD dropouts and guest panics on Adreno, so keep guest
-            // command submission synchronous until that path is verified through gameplay.
-            // Accurate fences are what keeps its GPU readbacks in order; safe DMA and reactive
-            // flushing keep the rest of the pipeline in order, and dynamic vertex input keeps the
-            // vertex formats from its GPU-built commands valid.
-            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, false);
-            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Docked);
+            // Synchronous GPU emulation ran the game's render thread and the GPU thread in
+            // series (each under half a core on the Odin 2), so a frame cost their sum:
+            // 23 FPS on the Chapter 1 overworld in handheld. Asynchronous GPU overlaps them:
+            // 29-30 FPS there and in battle on the same capped clocks, with the HUD present in
+            // every recorded frame and the party drawn in its own colours. The dropouts and
+            // panics once seen with it were the composite and lightmap bugs fixed since 1.1.3.
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // Handheld or docked is the user's choice: the game holds 30 FPS in both on the Odin 2
+            // (Adreno 740), so no console mode is forced here or by "Apply optimal settings".
             DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::Mailbox);
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
@@ -179,6 +199,63 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // game freezes on them (Scarlet's intro: 78 s from the enrollment form to Clavell on a
             // fresh cache, 63 s with asynchronous shaders, the photo still drawn).
             DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            // The set measured on the Retroid Pocket Flip 2 (Snapdragon 865, 1x): 29.5-30 FPS in
+            // the overworld. The GPU-write fixes it relies on are for async GPU at low accuracy.
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            DefaultForTitle(Settings::values.dma_accuracy, Settings::DmaAccuracy::Default);
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Default);
+            DefaultForTitle(Settings::values.cpu_clock, Settings::CpuClock::Boost);
+            // Boosted GPU timing looked the same and was slower in the overworld.
+            DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
+            return true;
+        case TitleID::TrailsInTheSky1stChapter:
+        case TitleID::TrailsInTheSky2ndChapter:
+        case TitleID::YsXNordics:
+            // Its towns build new pipelines as NPCs, effects and streets come into view; compiled
+            // synchronously each one held the frame (Rolent on the AYN Thor, 1x handheld: a 59 ms
+            // frame for 2 new shaders, dozens per second on entering the town) with the GPU under
+            // half busy. Asynchronous shaders keep the frame going while they build.
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            DefaultForTitle(Settings::values.use_disk_shader_cache, true);
+            // Its frames go to Eden's GPU thread and the guest waits on it, so the thread's cost
+            // sets the frame rate (it asks for 60 and gets 30 in Rolent, 45 on the roads). Extended
+            // dynamic state makes that thread set every state on every draw: EDS3 took the same
+            // square from 30 to 20 FPS (GPU thread 16 -> 30 ms a frame).
+            DefaultForTitle(Settings::values.dyna_state, Settings::ExtendedDynamicState::Disabled);
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // Low accuracy releases its fences when the GPU thread reaches them; nothing in its
+            // picture needs more.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            return true;
+        case TitleID::HogwartsLegacy:
+            // At low accuracy its fences release before the GPU work behind them, and its scenes
+            // render washed out to white (the London street, the cave; AYN Thor, docked 1x).
+            // High keeps the picture and still holds 30.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // High accuracy also delays fences until the host GPU is done, and the game waits on
+            // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
+            // 26-27 FPS on the cliff overlook with every thread under 60 % busy. Immediate fences
+            // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
+            // (AYN Thor, docked 1x).
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
+            // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
+            // (menus and bright scenes washed out white). Reactive flushing read-protects
+            // GPU-written pages, so that one read faults and downloads synchronously while the
+            // other 17 fences a frame stay free: picture correct, 27-29 FPS on the overlook.
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            return true;
+        case TitleID::FireEmblemEngage:
+        case TitleID::DragonQuestVIIReimagined:
+            // Their effect shaders divide by fp16 subnormals (see LoadOverrides). The load-time
+            // default yields to a value set for the game; applied, the fix is the game's own value.
+            DefaultForTitle(Settings::values.fix_fp16_denormals, true);
+            return true;
+        case TitleID::XenobladeChronicles2:
+        case TitleID::XenobladeChronicles3:
+            // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
+            // (OptimalDriver), which owns driver_path.
             return true;
         default:
             return false;
@@ -188,6 +265,23 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
 
 void LoadBootOverrides(std::uint64_t program_id) {
     TitleSettings(program_id, false);
+#ifdef __ANDROID__
+    if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && IsAdreno6xx()) {
+        // Turnip's binned (GMEM) rendering hangs the Adreno 6xx in this game's post-processing
+        // passes: the GPU sits in vertex fetch and visibility-stream decode until KGSL resets it
+        // (VK_ERROR_DEVICE_LOST within minutes on the Retroid Pocket Flip 2, Adreno 650).
+        // Rendering straight to memory draws the same image, at about the same frame rate there.
+        // Turnip reads TU_DEBUG when the GPU is created, which comes after this.
+        // ponytail: stays set for the rest of the process (a later game in it also renders to
+        // memory, a little slower); unset it per launch if that ever matters.
+        const std::string current = std::getenv("TU_DEBUG") ? std::getenv("TU_DEBUG") : "";
+        if (current.find("sysmem") == std::string::npos) {
+            const std::string value = current.empty() ? "sysmem" : current + ",sysmem";
+            setenv("TU_DEBUG", value.c_str(), 1);
+            LOG_INFO(Core, "Title defaults: TU_DEBUG={}", value);
+        }
+    }
+#endif
 }
 
 bool HasOptimalSettings(std::uint64_t program_id) {
@@ -195,6 +289,14 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::FinalFantasyResonance:
         case TitleID::PokemonScarlet:
         case TitleID::PokemonViolet:
+        case TitleID::TrailsInTheSky1stChapter:
+        case TitleID::TrailsInTheSky2ndChapter:
+        case TitleID::YsXNordics:
+        case TitleID::FireEmblemEngage:
+        case TitleID::DragonQuestVIIReimagined:
+        case TitleID::XenobladeChronicles2:
+        case TitleID::XenobladeChronicles3:
+        case TitleID::HogwartsLegacy:
             return true;
         default:
             return false;
@@ -211,6 +313,8 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.delay_fence_reports_by_title = false;
     Settings::values.fix_fp16_denormals_by_title = false;
     Settings::values.disable_macro_hle_by_title = false;
+    Settings::values.skip_buffer_downloads_by_title = false;
+    Settings::values.bindless_table_max_by_title = 0;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -236,6 +340,24 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // title the interpreter.
             Settings::values.fix_fp16_denormals_by_title = true;
             Settings::values.disable_macro_hle_by_title = true;
+            break;
+        case TitleID::TrailsInTheSky1stChapter:
+            // The same engine as 2nd Chapter, the same cost: about 1 GB/s of buffer downloads
+            // docked outside the Bright house on the AYN Thor, 36 FPS with them.
+        case TitleID::YsXNordics:
+            // Falcom's engine again: the fencing thread spent 30 ms a frame copying GPU-written
+            // buffers back on its title screen (AYN Thor, docked).
+        case TitleID::TrailsInTheSky2ndChapter:
+            // It marks large buffers GPU-written every frame (about 150 MB/s docked on the Odin 2) and
+            // never reads them back on the CPU. Copying them to guest memory took the GPU thread to
+            // 30 ms and the fencing thread to 23 ms a frame: 19 FPS in Rolent docked, 49 without.
+            Settings::values.skip_buffer_downloads_by_title = true;
+            break;
+        case TitleID::HogwartsLegacy:
+            // Its materials index texture handle tables in 256-384 byte constant buffers (at most
+            // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
+            // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
+            Settings::values.bindless_table_max_by_title = 64;
             break;
         default:
             break;

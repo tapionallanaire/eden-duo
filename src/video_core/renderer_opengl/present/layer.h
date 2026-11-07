@@ -76,6 +76,7 @@ private:
 
     /// OpenGL framebuffer data
     std::vector<u8> gl_framebuffer_data;
+    std::vector<u8> tiled_scratch;
 
     /// Display information for Switch screen
     TextureInfo framebuffer_texture;

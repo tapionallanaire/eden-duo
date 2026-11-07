@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
@@ -76,6 +77,10 @@ class GraphicsPipeline {
     static constexpr size_t NUM_STAGES = Tegra::Engines::Maxwell3D::Regs::MaxShaderStage;
 
 public:
+    /// Fills in the stages' shader modules when the pipeline builds (SPIR-V emitted off the
+    /// GPU thread); empty when they are passed in already.
+    using EmitModules = std::function<void(std::array<vk::ShaderModule, NUM_STAGES>&)>;
+
     explicit GraphicsPipeline(
         Scheduler& scheduler, BufferCache& buffer_cache, TextureCache& texture_cache,
         vk::PipelineCache& pipeline_cache, VideoCore::ShaderNotify* shader_notify,
@@ -84,7 +89,8 @@ public:
         DescriptorBufferRing& descriptor_buffer_ring, Common::ThreadWorker* worker_thread,
         PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
         const GraphicsPipelineCacheKey& key, std::array<vk::ShaderModule, NUM_STAGES> stages,
-        const std::array<const Shader::Info*, NUM_STAGES>& infos);
+        const std::array<const Shader::Info*, NUM_STAGES>& infos,
+                              EmitModules emit_modules = {});
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
     bool SupportsAlphaToCoverage() const noexcept {
@@ -122,6 +128,10 @@ public:
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
     }
+
+    /// A draw needs this pipeline now: build it on [worker] unless a build already started,
+    /// instead of behind every pipeline queued before it.
+    void BuildUrgently(Common::ThreadWorker& worker);
 
     template <typename Spec>
     static auto MakeConfigureSpecFunc() {
@@ -185,6 +195,11 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    /// The build runs once, on whichever thread claims it first.
+    std::function<void()> build_func;
+    std::atomic_bool build_claimed{false};
+    EmitModules emit_modules;
+    void RunBuild();
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
 };

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <limits>
+#include <unordered_map>
 
 #include <boost/container/small_vector.hpp>
 
@@ -74,17 +75,27 @@ public:
     }
 
 private:
-    struct BufferView {
+    struct BufferViewKey {
         u32 offset;
         u32 size;
         VideoCore::Surface::PixelFormat format;
-        vk::BufferView handle;
+
+        bool operator==(const BufferViewKey&) const noexcept = default;
+    };
+    struct BufferViewKeyHash {
+        size_t operator()(const BufferViewKey& key) const noexcept {
+            const u64 packed{(u64{key.offset} << 32) | key.size};
+            return static_cast<size_t>(packed * 0x9E3779B97F4A7C15ULL) ^
+                   (static_cast<size_t>(key.format) << 7);
+        }
     };
 
     const Device* device{};
     Scheduler* scheduler{};
     vk::Buffer buffer;
-    std::vector<BufferView> views;
+    // Streaming buffers accumulate thousands of (offset, size, format) views; a linear scan per
+    // bind was 1 ms a frame in Hogwarts Legacy.
+    std::unordered_map<BufferViewKey, vk::BufferView, BufferViewKeyHash> views;
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};

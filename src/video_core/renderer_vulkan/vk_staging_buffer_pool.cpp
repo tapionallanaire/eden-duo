@@ -101,10 +101,12 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
 StagingBufferPool::~StagingBufferPool() = default;
 
 StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
-    std::scoped_lock lock{mutex};
+    // The stream buffer is only used by the GPU thread, which requests it for nearly every draw:
+    // taking the lock there cost the GPU thread more than the rest of the pool put together.
     if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
         return GetStreamBuffer(size);
     }
+    std::scoped_lock lock{mutex};
     return GetStagingBuffer(size, usage, deferred);
 }
 
@@ -142,9 +144,18 @@ void StagingBufferPool::TickFrame() {
 }
 
 StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
-    if (AreRegionsActive(Region(free_iterator) + 1,
-                         (std::min)(Region(iterator + size) + 1, NUM_SYNCS))) {
+    const auto regions_active = [this](size_t region_begin, size_t region_end) {
+        // A stale GPU tick (see GetStagingBuffer) reports finished regions as in use.
+        if (!AreRegionsActive(region_begin, region_end)) {
+            return false;
+        }
+        scheduler.GetMasterSemaphore().Refresh();
+        return AreRegionsActive(region_begin, region_end);
+    };
+    if (regions_active(Region(free_iterator) + 1,
+                       (std::min)(Region(iterator + size) + 1, NUM_SYNCS))) {
         // Avoid waiting for the previous usages to be free
+        std::scoped_lock lock{mutex};
         return GetStagingBuffer(size, MemoryUsage::Upload);
     }
     const u64 current_tick = scheduler.CurrentTick();
@@ -154,8 +165,9 @@ StagingBufferRef StagingBufferPool::GetStreamBuffer(size_t size) {
     if (iterator + size >= stream_buffer_size) {
         std::fill(sync_ticks.begin() + Region(used_iterator), sync_ticks.begin() + NUM_SYNCS,
                   current_tick);
-        if (AreRegionsActive(0, Region(size) + 1)) {
+        if (regions_active(0, Region(size) + 1)) {
             // Avoid waiting for the previous usages to be free
+            std::scoped_lock lock{mutex};
             return GetStagingBuffer(size, MemoryUsage::Upload);
         }
         used_iterator = 0;
@@ -186,6 +198,12 @@ bool StagingBufferPool::AreRegionsActive(size_t region_begin, size_t region_end)
 
 StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage usage,
                                                      bool deferred) {
+    if (const std::optional<StagingBufferRef> ref = TryGetReservedBuffer(size, usage, deferred)) {
+        return *ref;
+    }
+    // Reuse goes by the GPU tick last read back, which only waits refresh. Read it before adding
+    // a buffer: without a wait in between, every upload allocated a new one until memory ran out.
+    scheduler.GetMasterSemaphore().Refresh();
     if (const std::optional<StagingBufferRef> ref = TryGetReservedBuffer(size, usage, deferred)) {
         return *ref;
     }

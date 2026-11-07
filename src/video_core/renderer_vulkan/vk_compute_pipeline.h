@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <mutex>
 
@@ -56,6 +57,14 @@ public:
         return static_cast<bool>(pipeline);
     }
 
+    [[nodiscard]] bool IsBuilt() const noexcept {
+        return is_built.load(std::memory_order::relaxed);
+    }
+
+    /// A dispatch needs this pipeline now: build it on [worker] unless a build already started,
+    /// instead of behind every pipeline queued before it.
+    void BuildUrgently(Common::ThreadWorker& worker);
+
 private:
     const Device& device;
     vk::PipelineCache& pipeline_cache;
@@ -79,6 +88,10 @@ private:
 
     std::condition_variable build_condvar;
     std::mutex build_mutex;
+    /// The build runs once, on whichever thread claims it first.
+    std::function<void()> build_func;
+    std::atomic_bool build_claimed{false};
+    void RunBuild();
     std::atomic_bool is_built{false};
 };
 

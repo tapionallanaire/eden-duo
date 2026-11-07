@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -958,10 +959,21 @@ struct Values {
     // Run the running title's GPU macros through the microcode interpreter instead of their HLE
     // versions (set at load, never saved).
     bool disable_macro_hle_by_title{};
+    // Don't copy GPU-written buffers back to guest memory for the running title: it never
+    // reads them on the CPU (set at load, never saved).
+    bool skip_buffer_downloads_by_title{};
+    // Most slots a texture handle table indexed at run time gets for the running title (0: the
+    // default, 1024). Every slot is written for every draw (set at load, never saved).
+    u32 bindless_table_max_by_title{};
 
 };
 
 extern Values values;
+
+// Guest vblank length relative to 1/60 s, set by the presenter so a game's frame period is a whole
+// number of the host panel's real refreshes (the AYN Thor's "120 Hz" panel runs at 117.9 Hz).
+// 1 when the host refresh is unknown or too far from a 60 Hz multiple. Never saved.
+inline std::atomic<float> host_vsync_scale{1.f};
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;
