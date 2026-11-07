@@ -92,6 +92,7 @@ private:
     vk::DescriptorSets descriptor_sets{};
 
     vk::Buffer buffer{};
+    std::vector<u8> tiled_scratch;
     std::vector<vk::Image> raw_images{};
     std::vector<vk::ImageView> raw_image_views{};
     u32 raw_width{};

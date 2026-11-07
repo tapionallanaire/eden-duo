@@ -140,7 +140,15 @@ FramebufferTextureInfo Layer::LoadFBToScreenInfo(const Tegra::FramebufferConfig&
     const u32 bytes_per_pixel{VideoCore::Surface::BytesPerBlock(pixel_format)};
     const u64 size_in_bytes{Tegra::Texture::CalculateSize(
         true, bytes_per_pixel, framebuffer.stride, framebuffer.height, 1, block_height_log2, 0)};
-    const u8* const host_ptr{device_memory.GetPointer<u8>(framebuffer_addr)};
+    // The framebuffer is contiguous only per page: a DMA-written one (Hogwarts Legacy's boot key
+    // art) read as one block from its first page's host pointer showed blocks of other memory
+    // from 0x1E0000 bytes in. Read it through the page table when the range isn't one span.
+    const u8* host_ptr{device_memory.GetSpan(framebuffer_addr, size_in_bytes)};
+    if (!host_ptr && device_memory.GetPointer<u8>(framebuffer_addr)) {
+        tiled_scratch.resize(size_in_bytes);
+        device_memory.ReadBlockUnsafe(framebuffer_addr, tiled_scratch.data(), size_in_bytes);
+        host_ptr = tiled_scratch.data();
+    }
     if (host_ptr) {
         const std::span<const u8> input_data(host_ptr, size_in_bytes);
         Tegra::Texture::UnswizzleTexture(gl_framebuffer_data, input_data, bytes_per_pixel,
