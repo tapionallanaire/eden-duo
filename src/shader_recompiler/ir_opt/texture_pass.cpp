@@ -460,10 +460,14 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     IR::Inst* const offset_inst{offset.InstRecursive()};
     u32 base_offset{};
     IR::U32 dynamic_offset;
-    if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && offset_inst->Arg(0).IsImmediate()) {
+    // A constant part is a base only when it lies inside a constant buffer (64 KiB): Hogwarts
+    // Legacy reads c7[index * stride - 8], and taking -8 as the base made a one-element table
+    // read at c7 - 8 (zero, texture 0, rocks drawn black).
+    const auto is_base = [](const IR::Value& v) { return v.IsImmediate() && v.U32() < 0x10000; };
+    if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && is_base(offset_inst->Arg(0))) {
         base_offset = offset_inst->Arg(0).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(1)};
-    } else if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && offset_inst->Arg(1).IsImmediate()) {
+    } else if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && is_base(offset_inst->Arg(1))) {
         base_offset = offset_inst->Arg(1).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(0)};
     } else {
