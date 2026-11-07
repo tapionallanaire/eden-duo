@@ -2872,6 +2872,8 @@ Sampler::Sampler(TextureCacheRuntime& runtime, const Tegra::Texture::TSCEntry& t
     };
     variants.reserve(1);
     Emplace(VariantKey{});
+    has_image_view_variants = has_added_anisotropy || has_linear_filtering || has_minmax_reduction ||
+                              has_custom_border_colors || has_srgb_border_color;
 }
 
 Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth) const noexcept {
@@ -2966,6 +2968,11 @@ VkSampler Sampler::Emplace(VariantKey key) {
 }
 
 VkSampler Sampler::HandleFor(const ImageView& image_view, bool is_depth) {
+    if (!has_image_view_variants) {
+        // Every key MakeKey could build is the empty one: the base variant. Hogwarts Legacy
+        // resolves ~70k sampler slots a frame.
+        return Handle();
+    }
     VariantKey key = MakeKey(image_view, is_depth);
     if (variants.size() >= MAX_VARIANTS) {
         key.srgb_border = false;
