@@ -223,6 +223,62 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         add_image(desc, false);
     }
     for (const auto& desc : info.texture_descriptors) {
+        if (desc.count > 1) {
+            // A handle table, as in GraphicsPipeline::ConfigureImpl: only the elements inside the
+            // bound constant buffer and reachable by the shader are looked up, read in one block,
+            // and a repeated handle reuses the previous slot's result.
+            constexpr u32 OUT_OF_RANGE{~0u};
+            const u32 size{cbufs[desc.cbuf_index].size.Value()};
+            const u32 bound{desc.cbuf_offset + sizeof(u32) > size
+                                ? 0u
+                                : (std::min)(desc.count,
+                                             ((size - desc.cbuf_offset - u32{sizeof(u32)}) >>
+                                              desc.size_shift) +
+                                                 1)};
+            static thread_local std::vector<u32> table;
+            const u32 stride_words{(1u << desc.size_shift) / static_cast<u32>(sizeof(u32))};
+            table.resize(static_cast<size_t>(bound) * stride_words);
+            if (bound > 0) {
+                gpu_memory.ReadBlockUnsafe(cbufs[desc.cbuf_index].Address() + desc.cbuf_offset,
+                                           table.data(), table.size() * sizeof(u32));
+            }
+            u32 secondary{};
+            if (desc.has_secondary) {
+                secondary = gpu_memory.Read<u32>(cbufs[desc.secondary_cbuf_index].Address() +
+                                                 desc.secondary_cbuf_offset)
+                            << desc.secondary_shift_left;
+            }
+            u32 prev_raw{};
+            u32 prev_view{};
+            VideoCommon::SamplerId prev_sampler{};
+            bool have_prev{false};
+            for (u32 index = 0; index < desc.count; ++index) {
+                const bool live{index < bound &&
+                                (desc.live_stride == 0 ||
+                                 ((index << desc.size_shift) + desc.live_stride - desc.live_phase) %
+                                         desc.live_stride ==
+                                     0)};
+                if (!live) {
+                    views.push_back({OUT_OF_RANGE});
+                    samplers.push_back(VideoCommon::NULL_SAMPLER_ID);
+                    continue;
+                }
+                const u32 raw{(table[index * stride_words] << desc.shift_left) | secondary};
+                if (have_prev && raw == prev_raw) {
+                    views.push_back({prev_view});
+                    samplers.push_back(prev_sampler);
+                    continue;
+                }
+                const auto handle{TexturePair(raw, via_header_index)};
+                views.push_back({handle.first});
+                prev_view = handle.first;
+                prev_sampler = texture_cache.GetSamplerId(handle.second, true);
+                samplers.push_back(prev_sampler);
+                prev_raw = raw;
+                have_prev = true;
+            }
+            continue;
+        }
         for (u32 index = 0; index < desc.count; ++index) {
             const auto handle{read_handle(desc, index)};
             views.push_back({handle.first});
