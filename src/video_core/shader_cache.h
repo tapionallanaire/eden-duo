@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -36,6 +37,8 @@ class GenericEnvironment;
 struct ShaderInfo {
     u64 unique_hash{};
     size_t size_bytes{};
+    /// Bytes from the shader's start that unique_hash covers; 0 when it covers another range.
+    size_t hashed_bytes{};
 };
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
@@ -43,6 +46,7 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
     static constexpr u64 YUZU_PAGESIZE = u64(1) << YUZU_PAGEBITS;
 
     static constexpr size_t NUM_PROGRAMS = 6;
+    static constexpr u32 HOT_INVALIDATIONS = 2;
 
     struct Entry {
         VAddr addr_start;
@@ -50,6 +54,13 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
         ShaderInfo* data;
 
         bool is_memory_marked = true;
+        /// CPU writes that overlapped this shader. Past HOT_INVALIDATIONS the entry is hot: its
+        /// page holds data the guest rewrites every frame beside the code (NCE invalidates whole
+        /// pages). A hot entry stays unprotected and lookups validate it by hash instead of
+        /// tearing it down, rebuilding it and protecting the page for the next write to fault on.
+        u32 invalidations = 0;
+        std::atomic<bool> needs_validation{false};
+        u64 last_validation_ns = 0;
 
         bool Overlaps(VAddr start, VAddr end) const noexcept {
             return start < addr_end && addr_start < end;
@@ -136,6 +147,15 @@ private:
     /// @param entry Entry to unmark from memory
     void UnmarkMemory(Entry* entry);
 
+    /// @brief Re-hashes a hot entry's code at most once per interval
+    /// @return False when the code changed: the entry is stale and must be replaced
+    /// @pre lookup_mutex is locked
+    bool ValidateHotEntry(Entry& entry) const;
+
+    /// @brief Removes an entry from every structure
+    /// @pre invalidation_mutex and lookup_mutex are locked
+    void RemoveEntry(Entry* entry);
+
     /// @brief Creates a new entry in the lookup cache and returns its pointer
     /// @pre lookup_mutex is locked
     Entry* NewEntry(VAddr addr, VAddr addr_end, ShaderInfo* data);
@@ -152,6 +172,9 @@ private:
     ::Common::unordered_map<u64, std::vector<Entry*>> invalidation_cache;
     std::vector<std::unique_ptr<ShaderInfo>> storage;
     std::vector<Entry*> marked_for_removal;
+    /// Invalidations seen by earlier entries at an address, so a rebuilt entry can reach
+    /// HOT_INVALIDATIONS (a removed entry's replacement would otherwise always start at zero).
+    ::Common::unordered_map<VAddr, u32> invalidation_history;
 };
 
 } // namespace VideoCommon

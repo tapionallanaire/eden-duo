@@ -197,6 +197,33 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
             (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
              device.IsPatchListPrimitiveRestartSupported()));
 }
+/// Takes the cache locks for a guest thread's write fault. The GPU thread holds them for every
+/// draw's setup (tens of microseconds). Sleeping on the mutex cost the GPU thread a futex wake on
+/// its unlock and the guest a reschedule before it ran, with the GPU thread stepping aside the whole
+/// time (Hogwarts Legacy: 4-6k faults a second on the AYN Thor). A guest on its own core spins
+/// instead: it takes the locks the moment the draw releases them, and the GPU thread's unlock stays
+/// a plain atomic. Blocks only past spin_limit (a long upload under the locks).
+template <typename... Mutexes>
+void LockCachesFromGuest(Mutexes&... mutexes) {
+    const auto try_lock = [&] { return std::try_lock(mutexes...) == -1; };
+    if (try_lock()) {
+        return;
+    }
+    constexpr auto spin_limit = std::chrono::microseconds{500};
+    const auto start = std::chrono::steady_clock::now();
+    do {
+        for (int i = 0; i < 32; ++i) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+            __asm__ __volatile__("yield");
+#endif
+            if (try_lock()) {
+                return;
+            }
+        }
+    } while (std::chrono::steady_clock::now() - start < spin_limit);
+    std::lock(mutexes...);
+}
+
 /// Takes the cache locks for the GPU thread, which takes them for every draw and pushbuffer
 /// segment. Guest threads hold them for microseconds on NCE write faults, but blocking on that put
 /// the GPU thread to sleep (a futex wakeup costs far more than the hold), and relocking right after
@@ -217,6 +244,16 @@ void LockCaches(const std::atomic<u32>& guest_waiters, Mutexes&... mutexes) {
     // Uncontended, which is nearly always: no clock read (a system call on some Android kernels).
     if (try_lock()) {
         return;
+    }
+    // A guest waiter spins for the locks and holds them for a few microseconds (see
+    // LockCachesFromGuest): spin on the CPU first, no syscall and no clock read per iteration.
+    for (int i = 0; i < 256; ++i) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+        __asm__ __volatile__("yield");
+#endif
+        if (try_lock()) {
+            return;
+        }
     }
     constexpr auto spin_limit = std::chrono::microseconds{200};
     const auto start = std::chrono::steady_clock::now();
@@ -923,7 +960,8 @@ bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size)
         // The GPU thread records GPU writes under these same locks, so none can land between the
         // check and the invalidation and be dropped without a download.
         guest_cache_waiters.fetch_add(1, std::memory_order_acq_rel);
-        std::scoped_lock lock{texture_cache.mutex, buffer_cache.mutex};
+        LockCachesFromGuest(texture_cache.mutex, buffer_cache.mutex);
+        std::scoped_lock lock{std::adopt_lock, texture_cache.mutex, buffer_cache.mutex};
         guest_cache_waiters.fetch_sub(1, std::memory_order_acq_rel);
         // A GPU-written image in the page is downloaded first, like buffer data: handing the page
         // to the CPU would otherwise re-upload the image from guest memory without the GPU's part.
@@ -1149,8 +1187,11 @@ void RasterizerVulkan::LoadDiskResources(u64 title_id, std::stop_token stop_load
 
 void RasterizerVulkan::FlushWork() {
 #ifdef __ANDROID__
+    // Every 16th draw: each dispatch wakes the worker (a futex syscall the GPU thread was
+    // descheduled in ~5 % of its time at 25k draws a second in Hogwarts Legacy); the worker
+    // keeps up with 16-draw batches at a quarter of its capacity.
     static constexpr u32 DRAWS_TO_DISPATCH = 512;
-    static constexpr u32 CHECK_MASK = 3;
+    static constexpr u32 CHECK_MASK = 15;
 #else
     static constexpr u32 DRAWS_TO_DISPATCH = 4096;
     static constexpr u32 CHECK_MASK = 7;

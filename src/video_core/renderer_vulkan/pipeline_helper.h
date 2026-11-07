@@ -361,9 +361,34 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
     views += num_image_buffers;
     for (const auto& desc : info.texture_descriptors) {
         bool is_rescaled{};
+        // Handle-table arrays are mostly empty slots past the end of their constant buffer
+        // (Hogwarts Legacy: up to 1024 per table, a few dozen used). Write those as one cached
+        // null pair instead of looking each one up.
+        VkImageView null_view{VK_NULL_HANDLE};
+        VkSampler null_sampler{VK_NULL_HANDLE};
+        VideoCommon::ImageViewId prev_view_id{};
+        VideoCommon::SamplerId prev_sampler_id{};
+        VkImageView prev_vk_view{VK_NULL_HANDLE};
+        VkSampler prev_vk_sampler{VK_NULL_HANDLE};
+        bool have_prev{false};
         for (u32 index = 0; index < desc.count; ++index) {
             const VideoCommon::ImageViewId image_view_id{(views++)->id};
             const VideoCommon::SamplerId sampler_id{*(samplers++)};
+            if (have_prev && image_view_id == prev_view_id && sampler_id == prev_sampler_id) {
+                guest_descriptor_queue.AddSampledImage(prev_vk_view, prev_vk_sampler);
+                continue;
+            }
+            if (desc.count > 1 && image_view_id == VideoCommon::NULL_IMAGE_VIEW_ID &&
+                sampler_id == VideoCommon::NULL_SAMPLER_ID) {
+                if (null_view == VK_NULL_HANDLE) {
+                    ImageView& null_image{texture_cache.GetImageView(image_view_id)};
+                    null_view = null_image.Handle(desc.type);
+                    null_sampler =
+                        texture_cache.GetSampler(sampler_id).HandleFor(null_image, desc.is_depth);
+                }
+                guest_descriptor_queue.AddSampledImage(null_view, null_sampler);
+                continue;
+            }
             ImageView& image_view{texture_cache.GetImageView(image_view_id)};
             VkImageView vk_image_view{image_view.Handle(desc.type)};
             if (vk_image_view == VK_NULL_HANDLE) {
@@ -371,8 +396,15 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                 if (null_image_view != VK_NULL_HANDLE) vk_image_view = null_image_view;
             }
             Sampler& sampler{texture_cache.GetSampler(sampler_id)};
-            guest_descriptor_queue.AddSampledImage(vk_image_view,
-                                                   sampler.HandleFor(image_view, desc.is_depth));
+            const VkSampler vk_sampler{sampler.HandleFor(image_view, desc.is_depth)};
+            guest_descriptor_queue.AddSampledImage(vk_image_view, vk_sampler);
+            if (desc.count > 1) {
+                prev_view_id = image_view_id;
+                prev_sampler_id = sampler_id;
+                prev_vk_view = vk_image_view;
+                prev_vk_sampler = vk_sampler;
+                have_prev = true;
+            }
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
         }

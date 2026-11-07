@@ -198,6 +198,7 @@ struct InstanceDispatch {
 /// Table holding Vulkan device function pointers.
 struct DeviceDispatch : InstanceDispatch {
     PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR{};
+    PFN_vkGetPastPresentationTimingGOOGLE vkGetPastPresentationTimingGOOGLE{};
     PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers{};
     PFN_vkAllocateDescriptorSets vkAllocateDescriptorSets{};
     PFN_vkAllocateMemory vkAllocateMemory{};
@@ -965,6 +966,9 @@ class SwapchainKHR : public Handle<VkSwapchainKHR, VkDevice, DeviceDispatch> {
 
 public:
     std::vector<VkImage> GetImages() const;
+
+    /// Present times the driver has reported since the last call (VK_GOOGLE_display_timing).
+    std::vector<VkPastPresentationTimingGOOGLE> GetPastPresentationTiming() const;
 };
 
 class Event : public Handle<VkEvent, VkDevice, DeviceDispatch> {

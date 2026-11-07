@@ -222,6 +222,24 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // picture needs more.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
             return true;
+        case TitleID::HogwartsLegacy:
+            // At low accuracy its fences release before the GPU work behind them, and its scenes
+            // render washed out to white (the London street, the cave; AYN Thor, docked 1x).
+            // High keeps the picture and still holds 30.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
+            DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // High accuracy also delays fences until the host GPU is done, and the game waits on
+            // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
+            // 26-27 FPS on the cliff overlook with every thread under 60 % busy. Immediate fences
+            // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
+            // (AYN Thor, docked 1x).
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
+            // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
+            // (menus and bright scenes washed out white). Reactive flushing read-protects
+            // GPU-written pages, so that one read faults and downloads synchronously while the
+            // other 17 fences a frame stay free: picture correct, 27-29 FPS on the overlook.
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
             // Their effect shaders divide by fp16 subnormals (see LoadOverrides). The load-time
@@ -272,6 +290,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::DragonQuestVIIReimagined:
         case TitleID::XenobladeChronicles2:
         case TitleID::XenobladeChronicles3:
+        case TitleID::HogwartsLegacy:
             return true;
         default:
             return false;
@@ -289,6 +308,7 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.fix_fp16_denormals_by_title = false;
     Settings::values.disable_macro_hle_by_title = false;
     Settings::values.skip_buffer_downloads_by_title = false;
+    Settings::values.bindless_table_max_by_title = 0;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -326,6 +346,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // never reads them back on the CPU. Copying them to guest memory took the GPU thread to
             // 30 ms and the fencing thread to 23 ms a frame: 19 FPS in Rolent docked, 49 without.
             Settings::values.skip_buffer_downloads_by_title = true;
+            break;
+        case TitleID::HogwartsLegacy:
+            // Its materials index texture handle tables in 256-384 byte constant buffers (at most
+            // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
+            // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
+            Settings::values.bindless_table_max_by_title = 64;
             break;
         default:
             break;

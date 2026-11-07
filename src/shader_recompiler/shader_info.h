@@ -219,6 +219,10 @@ struct TextureDescriptor {
     u32 secondary_shift_left;
     u32 count;
     u32 size_shift;
+    // Array elements the shader can reach: those whose byte offset into the table, minus
+    // live_phase, is a multiple of live_stride (0: every element).
+    u32 live_stride;
+    u32 live_phase;
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };

@@ -338,7 +338,6 @@ void Layer::UpdateRawImage(const Tegra::FramebufferConfig& framebuffer, size_t i
     const u64 image_offset = GetRawImageOffset(framebuffer, image_index);
 
     const DAddr framebuffer_addr = framebuffer.address + framebuffer.offset;
-    const u8* const host_ptr = device_memory.GetPointer<u8>(framebuffer_addr);
 
     // TODO(Rodrigo): Read this from HLE
     constexpr u32 block_height_log2 = 4;
@@ -346,6 +345,15 @@ void Layer::UpdateRawImage(const Tegra::FramebufferConfig& framebuffer, size_t i
     const u64 linear_size{GetSizeInBytes(framebuffer)};
     const u64 tiled_size{Tegra::Texture::CalculateSize(
         true, bytes_per_pixel, framebuffer.stride, framebuffer.height, 1, block_height_log2, 0)};
+    // The framebuffer is contiguous only per page: a DMA-written one (Hogwarts Legacy's boot key
+    // art) read as one block from its first page's host pointer showed blocks of other memory
+    // from 0x1E0000 bytes in. Read it through the page table when the range isn't one span.
+    const u8* host_ptr = device_memory.GetSpan(framebuffer_addr, tiled_size);
+    if (!host_ptr && device_memory.GetPointer<u8>(framebuffer_addr)) {
+        tiled_scratch.resize(tiled_size);
+        device_memory.ReadBlockUnsafe(framebuffer_addr, tiled_scratch.data(), tiled_size);
+        host_ptr = tiled_scratch.data();
+    }
     if (host_ptr) {
         Tegra::Texture::UnswizzleTexture(
             mapped_span.subspan(image_offset, linear_size), std::span(host_ptr, tiled_size),

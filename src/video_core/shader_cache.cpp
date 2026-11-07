@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
+#include "common/cityhash.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/object_pool.h"
@@ -128,12 +130,49 @@ ShaderInfo* ShaderCache::TryGet(VAddr addr) const {
     if (it == lookup_cache.end()) {
         return nullptr;
     }
-    return it->second->data;
+    Entry& entry = *it->second;
+    if (entry.needs_validation.load(std::memory_order_acquire) && !ValidateHotEntry(entry)) {
+        return nullptr;
+    }
+    return entry.data;
+}
+
+bool ShaderCache::ValidateHotEntry(Entry& entry) const {
+    // Hogwarts Legacy on the AYN Thor: 600-750 shader entries a second were torn down and
+    // rebuilt (a scan for the code's end, a hash, a page protection) because their pages also
+    // hold per-frame streaming data. A hash per interval costs less than any of those.
+    constexpr u64 interval_ns = 16'000'000;
+    const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    if (now - entry.last_validation_ns < interval_ns) {
+        return true;
+    }
+    entry.last_validation_ns = now;
+    const size_t size = entry.data->hashed_bytes;
+    thread_local std::vector<u8> code;
+    code.resize(size);
+    device_memory.ReadBlockUnsafe(entry.addr_start, code.data(), size);
+    return Common::CityHash64(reinterpret_cast<const char*>(code.data()), size) ==
+           entry.data->unique_hash;
+}
+
+void ShaderCache::RemoveEntry(Entry* entry) {
+    UnmarkMemory(entry);
+    RemoveEntryFromInvalidationCache(entry);
+    std::erase_if(marked_for_removal, [entry](const Entry* e) { return e == entry; });
+    ShaderInfo* const data = entry->data;
+    std::erase_if(storage, [data](const std::unique_ptr<ShaderInfo>& s) { return s.get() == data; });
+    lookup_cache.erase(entry->addr_start);
 }
 
 void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex, lookup_mutex};
 
+    if (const auto stale = lookup_cache.find(addr); stale != lookup_cache.end()) {
+        // A hot entry whose code changed.
+        RemoveEntry(stale->second.get());
+    }
     const VAddr addr_end = addr + size;
     Entry* const entry = NewEntry(addr, addr_end, data.get());
 
@@ -196,6 +235,12 @@ void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr
         }
 
         UnmarkMemory(entry);
+        if (entry->data->hashed_bytes != 0 && ++entry->invalidations >= HOT_INVALIDATIONS) {
+            entry->needs_validation.store(true, std::memory_order_release);
+            ++index;
+            continue;
+        }
+        invalidation_history[entry->addr_start] = entry->invalidations;
         RemoveEntryFromInvalidationCache(entry);
         marked_for_removal.push_back(entry);
     }
@@ -226,7 +271,13 @@ void ShaderCache::UnmarkMemory(Entry* entry) {
 }
 
 ShaderCache::Entry* ShaderCache::NewEntry(VAddr addr, VAddr addr_end, ShaderInfo* data) {
-    auto entry = std::make_unique<Entry>(Entry{addr, addr_end, data});
+    auto entry = std::make_unique<Entry>();
+    entry->addr_start = addr;
+    entry->addr_end = addr_end;
+    entry->data = data;
+    if (const auto it = invalidation_history.find(addr); it != invalidation_history.end()) {
+        entry->invalidations = it->second;
+    }
     Entry* const entry_pointer = entry.get();
 
     lookup_cache.emplace(addr, std::move(entry));
@@ -238,6 +289,7 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
     if (const std::optional<u64> cached_hash{env.Analyze()}) {
         info->unique_hash = *cached_hash;
         info->size_bytes = env.CachedSizeBytes();
+        info->hashed_bytes = env.CachedSizeBytes() - sizeof(u64);
     } else {
         // Slow path, not really hit on commercial games
         // Build a control flow graph to get the real shader size

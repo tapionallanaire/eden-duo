@@ -83,6 +83,7 @@ void Proc(T& result, const DeviceDispatch& dld, const char* proc_name, VkDevice 
 void Load(VkDevice device, DeviceDispatch& dld) noexcept {
 #define X(name) Proc(dld.name, dld, #name, device)
     X(vkAcquireNextImageKHR);
+    X(vkGetPastPresentationTimingGOOGLE);
     X(vkAllocateCommandBuffers);
     X(vkAllocateDescriptorSets);
     X(vkAllocateMemory);
@@ -641,6 +642,23 @@ std::vector<VkImage> SwapchainKHR::GetImages() const {
     std::vector<VkImage> images(num);
     Check(dld->vkGetSwapchainImagesKHR(owner, handle, &num, images.data()));
     return images;
+}
+
+std::vector<VkPastPresentationTimingGOOGLE> SwapchainKHR::GetPastPresentationTiming() const {
+    if (!dld->vkGetPastPresentationTimingGOOGLE) {
+        return {};
+    }
+    u32 num = 0;
+    if (dld->vkGetPastPresentationTimingGOOGLE(owner, handle, &num, nullptr) != VK_SUCCESS) {
+        return {};
+    }
+    std::vector<VkPastPresentationTimingGOOGLE> timings(num);
+    if (num != 0 &&
+        dld->vkGetPastPresentationTimingGOOGLE(owner, handle, &num, timings.data()) < 0) {
+        return {};
+    }
+    timings.resize(num);
+    return timings;
 }
 
 void Event::SetObjectNameEXT(const char* name) const {
