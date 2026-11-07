@@ -101,6 +101,7 @@ extern "C" {
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/shader_notify.h"
+#include "video_core/shader_modes.h"
 #include "network/announce_multiplayer_session.h"
 
 #define jconst [[maybe_unused]] const auto
@@ -458,7 +459,7 @@ void EmulationSession::RunEmulation() {
     }
 
     // Load the disk shader cache.
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
+    if (Settings::values.use_disk_shader_cache.GetValue() || VideoCore::CompileRun()) {
         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
         m_system.Renderer().ReadRasterizer()->LoadDiskResources(
             m_system.GetApplicationProcessProgramID(), std::stop_token{}, LoadDiskCacheProgress);
@@ -493,6 +494,13 @@ void EmulationSession::RunEmulation() {
     m_applet_id = static_cast<int>(Service::AM::AppletId::Application);
 }
 
+void EmulationSession::SetShaderRunMode(bool record, bool compile, bool compile_max) {
+    // All three are read before the renderer exists: recording from the first pipeline the game
+    // builds, compile and max compile when the title's plan is loaded at boot.
+    VideoCore::SetShaderRecording(record);
+    VideoCore::SetCompileRun(compile);
+    VideoCore::SetMaxCompile(compile_max);
+}
 void EmulationSession::RequestDiskShaderCacheReload(u64 program_id) {
     // Loading a later session may notify through the previous callback while
     // InitializeEmulation already holds m_mutex. Initial loading handles that title.
@@ -1001,6 +1009,14 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_pauseEmulation(JNIEnv* env, jclass cl
     EmulationSession::GetInstance().PauseEmulation();
 }
 
+// Eden Duo: set before run(). Record writes this session's new pipelines to recording.bin; compile
+// max makes the boot warm build every vertex/fragment pair the plan knows.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderRunMode(JNIEnv* env, jclass clazz,
+                                                           jboolean record, jboolean compile,
+                                                           jboolean compile_max) {
+    EmulationSession::GetInstance().SetShaderRunMode(record == JNI_TRUE, compile == JNI_TRUE,
+                                                     compile_max == JNI_TRUE);
+}
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_stopEmulation(JNIEnv* env, jclass clazz) {
     EmulationSession::GetInstance().HaltEmulation();
 }

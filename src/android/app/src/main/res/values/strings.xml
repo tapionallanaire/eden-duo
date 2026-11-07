@@ -1954,4 +1954,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="warm_up_minutes">%1$d minutes</string>
     <string name="warm_up_remaining">Warming up shaders · %1$s left</string>
     <string name="warm_up_done">Warm-up finished: %1$d new shaders</string>
+    <!-- Eden Duo: record and compile shaders (ShaderRuns) -->
+    <string name="shader_record">Record shaders</string>
+    <string name="shader_record_description">Play with this on and every graphics pipeline the game builds for the first time is kept in a recording, so those effects can be compiled ahead of the next session.</string>
+    <string name="shader_record_last">%1$d pipelines in the last recording</string>
+    <string name="shader_record_none">No recording yet</string>
+    <string name="shader_record_started">Recording shaders: play the effects you want kept</string>
+    <string name="shader_record_done">Recorded %1$d pipelines</string>
+    <string name="shader_compile">Compile shaders</string>
+    <string name="shader_compile_description">Compiles the pipelines this title has already drawn, without playing it, and stops.</string>
+    <string name="shader_compile_max">Compile shaders (Max)</string>
+    <string name="shader_compile_max_description">Also builds every vertex and fragment shader combination the title knows, not only the pairs it has drawn. Takes longer and uses more disk, but should compile less while you play.</string>
+    <string name="shader_compile_done">Compiled %1$d of %2$d pipelines</string>
+    <string name="shader_compile_max_done">Compiled %1$d of %2$d pipelines, plus shader combinations</string>
 </resources>

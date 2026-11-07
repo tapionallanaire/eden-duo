@@ -589,6 +589,42 @@ class GamePropertiesFragment : Fragment() {
                     )
                 )
 
+                // Eden Duo: record shaders and compile them (see ShaderRuns). Recording keeps the
+                // pipelines a play session meets for the first time; compiling warms what is
+                // already known, and Compile max also builds shader combinations no draw has made.
+                val recorded = org.yuzu.yuzu_emu.utils.ShaderRuns.recordingCount(args.game)
+                add(
+                    SubmenuProperty(
+                        R.string.shader_record,
+                        R.string.shader_record_description,
+                        R.drawable.ic_play,
+                        details = {
+                            if (recorded > 0) {
+                                requireContext().getString(R.string.shader_record_last, recorded)
+                            } else {
+                                requireContext().getString(R.string.shader_record_none)
+                            }
+                        },
+                        action = { startShaderRun(record = true) }
+                    )
+                )
+                add(
+                    SubmenuProperty(
+                        R.string.shader_compile,
+                        R.string.shader_compile_description,
+                        R.drawable.ic_build,
+                        action = { startShaderRun(compile = true) }
+                    )
+                )
+                add(
+                    SubmenuProperty(
+                        R.string.shader_compile_max,
+                        R.string.shader_compile_max_description,
+                        R.drawable.ic_build,
+                        action = { startShaderRun(compile = true, max = true) }
+                    )
+                )
+
                 if (NativeLibrary.playTimeManagerGetPlayTime(args.game.programId) > 0) {
                     add(
                         SubmenuProperty(
@@ -901,6 +937,24 @@ class GamePropertiesFragment : Fragment() {
                 }
             )
         }
+    }
+
+    /**
+     * Eden Duo: launches the title to record the shaders it builds, or to compile the plan (and,
+     * with max, the shader combinations) without playing. See ShaderRuns.
+     */
+    private fun startShaderRun(
+        record: Boolean = false,
+        compile: Boolean = false,
+        max: Boolean = false
+    ) {
+        startActivity(
+            args.game.launchIntent.apply {
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_RECORD, record)
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_COMPILE, compile)
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_MAX, max)
+            }
+        )
     }
 
 }

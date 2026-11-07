@@ -176,6 +176,10 @@ private:
 
     std::filesystem::path pipeline_cache_filename;
 
+    /// "Record shaders" writes what the session builds here (see shader_modes.h).
+    std::filesystem::path recording_filename;
+    std::filesystem::path recording_log_filename;
+
     std::filesystem::path vulkan_pipeline_cache_filename;
     vk::PipelineCache vulkan_pipeline_cache;
     size_t pipelines_since_flush{};
@@ -189,6 +193,12 @@ private:
     static constexpr std::chrono::milliseconds CREATION_BUDGET{6};
     std::chrono::steady_clock::time_point creation_window_start{};
     std::chrono::steady_clock::duration creation_time_spent{};
+
+    /// Records the title's recording.bin line for a newly built graphics pipeline.
+    void AppendRecordingLine(const GraphicsPipelineCacheKey& key);
+
+    /// Max compile: builds every vertex/fragment pair the title's plan knows (see shader_modes.h).
+    void CompileShaderCombinations();
 
     Common::ThreadWorker workers;
     /// Builds a pipeline a draw or dispatch is about to wait for, ahead of the queue above.
