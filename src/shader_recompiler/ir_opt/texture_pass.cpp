@@ -460,17 +460,17 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     IR::Inst* const offset_inst{offset.InstRecursive()};
     u32 base_offset{};
     IR::U32 dynamic_offset;
-    if (offset_inst->GetOpcode() != IR::Opcode::IAdd32) {
-        // A table read at a run-time offset with no constant part (attr * stride).
-        dynamic_offset = IR::U32{offset};
-    } else if (offset_inst->Arg(0).IsImmediate()) {
+    if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && offset_inst->Arg(0).IsImmediate()) {
         base_offset = offset_inst->Arg(0).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(1)};
-    } else if (offset_inst->Arg(1).IsImmediate()) {
+    } else if (offset_inst->GetOpcode() == IR::Opcode::IAdd32 && offset_inst->Arg(1).IsImmediate()) {
         base_offset = offset_inst->Arg(1).U32();
         dynamic_offset = IR::U32{offset_inst->Arg(0)};
     } else {
-        return std::nullopt;
+        // A table read at a run-time offset with no top-level constant part: attr * stride, or
+        // attr * stride + field built from 16-bit multiplies (XMAD), where the constant sits
+        // inside. The whole offset indexes a table starting at 0.
+        dynamic_offset = IR::U32{offset};
     }
     auto const size_shift = DynamicDescriptorSizeShift(dynamic_offset);
     auto const sampled_limit = (std::max)(1U, (std::min)(host_info.max_per_stage_descriptor_sampled_images,
