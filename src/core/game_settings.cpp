@@ -228,6 +228,12 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // High keeps the picture and still holds 30.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
+            // High accuracy also delays fences until the host GPU is done, and the game waits on
+            // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
+            // 26-27 FPS on the cliff overlook with every thread under 60 % busy. Immediate fences
+            // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
+            // (AYN Thor, docked 1x).
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
             return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
