@@ -196,7 +196,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                       std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
             if (desc.has_secondary) {
                 ASSERT(((qmd.const_buffer_enable_mask >> desc.secondary_cbuf_index) & 1) != 0);
-                const u32 secondary_offset{desc.secondary_cbuf_offset + index_offset};
+                const u32 secondary_offset{desc.secondary_cbuf_offset};
                 const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].Address() +
                                              secondary_offset};
                 const u32 lhs_raw{gpu_memory.Read<u32>(addr) << desc.shift_left};
