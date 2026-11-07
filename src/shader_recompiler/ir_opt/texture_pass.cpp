@@ -350,6 +350,23 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             return std::nullopt;
         }
         if (lhs->has_secondary || rhs->has_secondary) {
+            // handle = Phi(table | word, ...) | word: ORing a word the tracked side already
+            // includes changes nothing (Hogwarts Legacy, sampler word cbuf2 + 0x590..0x5b8).
+            const auto includes = [](const ConstBufferAddr& with, const ConstBufferAddr& word) {
+                const bool scalar = word.count == 1 && !word.has_secondary;
+                const bool is_primary = with.index == word.index && with.offset == word.offset &&
+                                        with.shift_left == word.shift_left;
+                const bool is_secondary = with.secondary_index == word.index &&
+                                          with.secondary_offset == word.offset &&
+                                          with.secondary_shift_left == word.shift_left;
+                return with.has_secondary && scalar && (is_primary || is_secondary);
+            };
+            if (includes(*lhs, *rhs)) {
+                return lhs;
+            }
+            if (includes(*rhs, *lhs)) {
+                return rhs;
+            }
             return std::nullopt;
         }
         if (lhs->count > 1 && rhs->count > 1) {
