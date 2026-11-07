@@ -297,6 +297,7 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.fix_fp16_denormals_by_title = false;
     Settings::values.disable_macro_hle_by_title = false;
     Settings::values.skip_buffer_downloads_by_title = false;
+    Settings::values.bindless_table_max_by_title = 0;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -334,6 +335,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // never reads them back on the CPU. Copying them to guest memory took the GPU thread to
             // 30 ms and the fencing thread to 23 ms a frame: 19 FPS in Rolent docked, 49 without.
             Settings::values.skip_buffer_downloads_by_title = true;
+            break;
+        case TitleID::HogwartsLegacy:
+            // Its materials index texture handle tables in 256-384 byte constant buffers (at most
+            // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
+            // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
+            Settings::values.bindless_table_max_by_title = 64;
             break;
         default:
             break;
