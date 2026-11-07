@@ -366,9 +366,18 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
         // null pair instead of looking each one up.
         VkImageView null_view{VK_NULL_HANDLE};
         VkSampler null_sampler{VK_NULL_HANDLE};
+        VideoCommon::ImageViewId prev_view_id{};
+        VideoCommon::SamplerId prev_sampler_id{};
+        VkImageView prev_vk_view{VK_NULL_HANDLE};
+        VkSampler prev_vk_sampler{VK_NULL_HANDLE};
+        bool have_prev{false};
         for (u32 index = 0; index < desc.count; ++index) {
             const VideoCommon::ImageViewId image_view_id{(views++)->id};
             const VideoCommon::SamplerId sampler_id{*(samplers++)};
+            if (have_prev && image_view_id == prev_view_id && sampler_id == prev_sampler_id) {
+                guest_descriptor_queue.AddSampledImage(prev_vk_view, prev_vk_sampler);
+                continue;
+            }
             if (desc.count > 1 && image_view_id == VideoCommon::NULL_IMAGE_VIEW_ID &&
                 sampler_id == VideoCommon::NULL_SAMPLER_ID) {
                 if (null_view == VK_NULL_HANDLE) {
@@ -387,8 +396,15 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
                 if (null_image_view != VK_NULL_HANDLE) vk_image_view = null_image_view;
             }
             Sampler& sampler{texture_cache.GetSampler(sampler_id)};
-            guest_descriptor_queue.AddSampledImage(vk_image_view,
-                                                   sampler.HandleFor(image_view, desc.is_depth));
+            const VkSampler vk_sampler{sampler.HandleFor(image_view, desc.is_depth)};
+            guest_descriptor_queue.AddSampledImage(vk_image_view, vk_sampler);
+            if (desc.count > 1) {
+                prev_view_id = image_view_id;
+                prev_sampler_id = sampler_id;
+                prev_vk_view = vk_image_view;
+                prev_vk_sampler = vk_sampler;
+                have_prev = true;
+            }
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
         }
