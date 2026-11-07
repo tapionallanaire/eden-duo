@@ -234,6 +234,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
             // (AYN Thor, docked 1x).
             DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
+            // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
+            // (menus and bright scenes washed out white). Reactive flushing read-protects
+            // GPU-written pages, so that one read faults and downloads synchronously while the
+            // other 17 fences a frame stay free: picture correct, 27-29 FPS on the overlook.
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
             return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
