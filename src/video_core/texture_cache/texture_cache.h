@@ -246,8 +246,19 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         if (blacklist) {
             has_blacklisted = false;
         }
+        // Handle tables repeat an index in runs: look each run up once.
+        u32 prev_index{};
+        ImageViewId prev_id{};
+        bool have_prev{false};
         for (ImageViewInOut& view : views) {
+            if (have_prev && !view.blacklist && view.index == prev_index) {
+                view.id = prev_id;
+                continue;
+            }
             view.id = VisitImageView(view.index, compute);
+            prev_index = view.index;
+            prev_id = view.id;
+            have_prev = !view.blacklist;
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
