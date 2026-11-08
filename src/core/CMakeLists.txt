@@ -1277,4 +1277,9 @@ endif()
 
 include(mods/duo_core.cmake) # Eden Duo: dual-screen runtime sources
 
+# AES with the ARMv8 Cryptography Extensions (aes_util.cpp, runtime-checked).
+if (ARCHITECTURE_arm64 AND NOT MSVC)
+    set_source_files_properties(crypto/aes_util.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crypto")
+endif()
+
 create_target_directory_groups(core)
