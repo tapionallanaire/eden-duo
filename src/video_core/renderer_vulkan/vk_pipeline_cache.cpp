@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_modes.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/surface.h"
@@ -628,6 +629,18 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
     pipeline_cache_filename = base_dir / "vulkan.bin";
 
+    // Eden Duo: a recording is this session's pipelines, so it starts empty and only grows while
+    // "Record shaders" is on (see shader_modes.h).
+    recording_filename = base_dir / "recording.bin";
+    recording_log_filename = base_dir / "recording.log";
+    if (VideoCore::ShaderRecording()) {
+        std::error_code ec;
+        std::filesystem::remove(recording_filename, ec);
+        std::filesystem::remove(recording_log_filename, ec);
+        LOG_INFO(Render_Vulkan, "Recording shaders to {}",
+                 Common::FS::PathToUTF8String(recording_log_filename));
+    }
+
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename = base_dir / "vulkan_pipelines.bin";
         vulkan_pipeline_cache =
@@ -727,6 +740,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
     workers.WaitForRequests(stop_loading);
 
+    // Eden Duo: max compile builds the shader combinations the plan implies but no draw has asked
+    // for yet (see CompileShaderCombinations). It has to run before the driver cache is written.
+    if (VideoCore::MaxCompile()) {
+        CompileShaderCombinations();
+    }
+
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
@@ -739,6 +758,152 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (state.statistics) {
         state.statistics->Report();
     }
+}
+
+void PipelineCache::AppendRecordingLine(const GraphicsPipelineCacheKey& key) {
+    std::ofstream log{recording_log_filename, std::ios::binary | std::ios::app};
+    if (!log.is_open()) {
+        return;
+    }
+    // Text, one line per recorded pipeline: the stage hashes and the state's own hash. Counted by
+    // the UI, and greppable when a recording looks wrong.
+    log << fmt::format("{:016x}", key.Hash());
+    for (const u64 hash : key.unique_hashes) {
+        if (hash != 0) {
+            log << ' ' << fmt::format("{:016x}", hash);
+        }
+    }
+    log << '\n';
+}
+
+void PipelineCache::CompileShaderCombinations() {
+    if (pipeline_cache_filename.empty()) {
+        return;
+    }
+    // Budget: every combination costs a driver compile (tens to hundreds of ms) and its share of the
+    // driver cache, so a title with many shaders must not turn a compile run into an hour.
+    constexpr size_t MAX_COMBINATIONS{2000};
+
+    std::unordered_map<u64, FileEnvironment> shaders;
+    std::vector<GraphicsPipelineCacheKey> keys;
+    const auto collect{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
+        GraphicsPipelineCacheKey key;
+        file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        size_t env_index{0};
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] != 0 && env_index < envs.size()) {
+                shaders.try_emplace(key.unique_hashes[index], std::move(envs[env_index]));
+                ++env_index;
+            }
+        }
+        keys.push_back(key);
+    }};
+    // The compute callback still has to consume each record's key, or the scan loses its place.
+    const auto skip_compute{[](std::ifstream& file, FileEnvironment) {
+        ComputePipelineCacheKey key;
+        file.read(reinterpret_cast<char*>(&key), sizeof(key));
+    }};
+    VideoCommon::LoadPipelines(std::stop_token{}, pipeline_cache_filename, CACHE_VERSION,
+                               skip_compute, collect);
+    if (keys.empty()) {
+        return;
+    }
+
+    // A vertex program only combines into the slot it was compiled for: the environment carries the
+    // stage it was set up as, and VertexA and VertexB are translated differently.
+    std::vector<u64> vertex_a_shaders;
+    std::vector<u64> vertex_b_shaders;
+    std::vector<u64> fragment_shaders;
+    for (const auto& [hash, env] : shaders) {
+        switch (env.ShaderStage()) {
+        case Shader::Stage::VertexA:
+            vertex_a_shaders.push_back(hash);
+            break;
+        case Shader::Stage::VertexB:
+            vertex_b_shaders.push_back(hash);
+            break;
+        case Shader::Stage::Fragment:
+            fragment_shaders.push_back(hash);
+            break;
+        default:
+            break;
+        }
+    }
+    LOG_INFO(Render_Vulkan,
+             "Max compile: {} / {} vertex and {} fragment shaders over {} pipelines",
+             vertex_a_shaders.size(), vertex_b_shaders.size(), fragment_shaders.size(),
+             keys.size());
+    if (fragment_shaders.empty() ||
+        (vertex_a_shaders.empty() && vertex_b_shaders.empty())) {
+        return;
+    }
+
+    size_t added{0};
+    size_t attempted{0};
+    ShaderPools pools;
+    for (const auto& key : keys) {
+        // Only draws with a single vertex program: a dual-vertex merge (VertexA + VertexB) is not a
+        // pair the game can ask for with either shader alone.
+        const bool uses_a{key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexA)] != 0};
+        const bool uses_b{key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] != 0};
+        if (uses_a == uses_b) {
+            continue;
+        }
+        const size_t vertex_index{static_cast<size_t>(uses_a ? Maxwell::ShaderType::VertexA
+                                                             : Maxwell::ShaderType::VertexB)};
+        constexpr size_t fragment_index{static_cast<size_t>(Maxwell::ShaderType::Pixel)};
+        const std::vector<u64>& vertex_pool{uses_a ? vertex_a_shaders : vertex_b_shaders};
+        for (const u64 vertex : vertex_pool) {
+            for (const u64 fragment : fragment_shaders) {
+                if (added >= MAX_COMBINATIONS) {
+                    break;
+                }
+                if (vertex == key.unique_hashes[vertex_index] &&
+                    fragment == key.unique_hashes[fragment_index]) {
+                    continue;
+                }
+                GraphicsPipelineCacheKey combination{key};
+                combination.unique_hashes[vertex_index] = vertex;
+                combination.unique_hashes[fragment_index] = fragment;
+                if (graphics_cache.find(combination) != graphics_cache.end()) {
+                    continue;
+                }
+                std::array<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs{};
+                size_t env_count{0};
+                bool complete{true};
+                for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+                    const u64 hash{combination.unique_hashes[index]};
+                    if (hash == 0) {
+                        continue;
+                    }
+                    const auto found{shaders.find(hash)};
+                    if (found == shaders.end() || env_count >= env_ptrs.size()) {
+                        complete = false;
+                        break;
+                    }
+                    env_ptrs[env_count++] = &found->second;
+                }
+                if (!complete || env_count == 0) {
+                    continue;
+                }
+                ++attempted;
+                pools.ReleaseContents();
+                auto pipeline{CreateGraphicsPipeline(
+                    pools, combination, std::span<Shader::Environment* const>(env_ptrs.data(),
+                                                                              env_count),
+                    nullptr, false)};
+                if (pipeline) {
+                    graphics_cache.emplace(combination, std::move(pipeline));
+                    ++added;
+                }
+                if (added % 100 == 0) {
+                    LOG_INFO(Render_Vulkan, "Max compile: {} of at most {} combinations built", added,
+                             MAX_COMBINATIONS);
+                }
+            }
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Max compile: built {} of {} shader combinations", added, attempted);
 }
 
 void PipelineCache::QueueVulkanPipelineCacheFlush() {
@@ -1006,7 +1171,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }
-    serialization_thread.QueueWork([this, key = graphics_key, envs = std::move(environments.envs)] {
+    const bool recording{VideoCore::ShaderRecording() && !recording_filename.empty()};
+    serialization_thread.QueueWork([this, key = graphics_key, envs = std::move(environments.envs),
+                                    recording] {
         boost::container::static_vector<const GenericEnvironment*, Maxwell::MaxShaderProgram>
             env_ptrs;
         for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
@@ -1015,6 +1182,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
             }
         }
         SerializePipeline(key, env_ptrs, pipeline_cache_filename, CACHE_VERSION);
+        // Eden Duo: a recording is the same kind of file (a plan: keys and the shaders' code), so a
+        // later compile can warm exactly the pipelines this session met for the first time.
+        if (recording) {
+            SerializePipeline(key, env_ptrs, recording_filename, CACHE_VERSION);
+            AppendRecordingLine(key);
+        }
     });
     QueueVulkanPipelineCacheFlush();
     return pipeline;

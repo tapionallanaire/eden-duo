@@ -461,7 +461,12 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             {
                 driverViewModel.isInteractionAllowed.value && !isStoppingForRomSwap
             },
-            { finishWarmUpIfAny() }
+            {
+                finishWarmUpIfAny()
+                finishShaderRunIfAny()
+            },
+            // Eden Duo: this launch records shaders or compiles them (see ShaderRuns).
+            { NativeLibrary.setShaderRunMode(recordShaders, compileShaders, compileMax) }
         )
     }
 
@@ -1084,6 +1089,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 emulationState.updateSurface()
                 dualScreen.onEmulationStarted()
                 startWarmUpIfRequested()
+                startRecordingIfRequested()
 
                 updateShowStatsOverlay()
                 updateSocOverlay()
@@ -2453,6 +2459,14 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
     // ---- Eden Duo: shader warm-up ----
 
+    // Eden Duo: record / compile modes of this launch (see ShaderRuns). The counts are what the
+    // shader cache loader last reported, which for a compile run is its final built/total.
+    private var recordShaders = false
+    private var compileShaders = false
+    private var compileMax = false
+    private var shaderCompileBuilt = 0
+    private var shaderCompileTotal = 0
+
     private var warmUpMinutes = 0
     private var warmUpBackupPath: String? = null
     private var warmUpShadersBefore = 0
@@ -2484,6 +2498,60 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         warmUpMinutes = intent.getIntExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, 0)
         warmUpBackupPath = intent.getStringExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_BACKUP)
         warmUpShadersBefore = intent.getIntExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SHADERS_BEFORE, 0)
+        // Eden Duo: record / compile / compile max (see ShaderRuns).
+        recordShaders = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_RECORD, false)
+        compileShaders = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_COMPILE, false)
+        compileMax = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_MAX, false)
+        org.yuzu.yuzu_emu.utils.ShaderRuns.recordingNow = recordShaders
+        org.yuzu.yuzu_emu.utils.ShaderRuns.compilingNow = compileShaders
+    }
+
+    /** Says the session is recording once it has booted, and names what it will keep. */
+    private fun startRecordingIfRequested() {
+        if (!recordShaders) return
+        Log.info("[ShaderRuns] recording ${game?.programId}")
+        android.widget.Toast.makeText(
+            requireContext().applicationContext,
+            getString(R.string.shader_record_started),
+            android.widget.Toast.LENGTH_LONG
+        ).show()
+    }
+
+    /**
+     * Runs when a record or compile run ends: the compile reports what it built, a recording what
+     * it captured, and the launch returns to the game's page.
+     */
+    private fun finishShaderRunIfAny() {
+        if (!recordShaders && !compileShaders) return
+        val wasCompile = compileShaders
+        val wasMax = compileMax
+        recordShaders = false
+        compileShaders = false
+        compileMax = false
+        org.yuzu.yuzu_emu.utils.ShaderRuns.recordingNow = false
+        org.yuzu.yuzu_emu.utils.ShaderRuns.compilingNow = false
+        val ctx = context?.applicationContext ?: return
+        val title = game ?: return
+        shaderCompileBuilt = org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt
+        shaderCompileTotal = org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal
+        org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt = 0
+        org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal = 0
+        val message = if (wasCompile) {
+            getString(
+                if (wasMax) R.string.shader_compile_max_done else R.string.shader_compile_done,
+                shaderCompileBuilt,
+                shaderCompileTotal
+            )
+        } else {
+            getString(
+                R.string.shader_record_done,
+                org.yuzu.yuzu_emu.utils.ShaderRuns.recordingCount(title)
+            )
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(ctx, message, android.widget.Toast.LENGTH_LONG).show()
+            activity?.finish()
+        }
     }
 
     /** Starts the countdown once the game has booted; the screen says how long is left. */
@@ -2537,8 +2605,10 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         private val programId: String,
         private val emulationCanStart: () -> Boolean,
         // Eden Duo: runs on the emulation thread once the game has stopped, for a warm-up's save
-        // restore; harmless when no warm-up asked for it.
-        private val onGameFinished: () -> Unit = {}
+        // restore and a record/compile run's report; harmless when neither asked for it.
+        private val onGameFinished: () -> Unit = {},
+        // Eden Duo: hands this launch's record/compile modes to the native side before it runs.
+        private val prepareShaderRun: () -> Unit = {}
     ) {
         private var state: State
         private var surface: Surface? = null
@@ -2685,6 +2755,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         private fun runEmulation(programIndex: Int, frontendInitiated: Boolean) {
             GameHelper.onEmulationStarting(gamePath, programId)
             try {
+                prepareShaderRun()
                 NativeLibrary.run(gamePath, programIndex, frontendInitiated)
             } finally {
                 GameHelper.onEmulationStopped()
