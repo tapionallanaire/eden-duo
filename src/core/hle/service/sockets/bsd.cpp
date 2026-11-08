@@ -76,7 +76,22 @@ bool IsNonBlocking(u32 flags, s32 fd_flags) {
     return (flags & Network::FLAG_MSG_DONTWAIT) != 0 || (fd_flags & Network::FLAG_O_NONBLOCK) != 0;
 }
 
-std::pair<s32, Errno> EventFdRead(EventFdCounter& counter, bool nonblock, std::span<u8> message) {
+// A guest thread parked in a blocking eventfd read or write is served by a bsdsocket host thread.
+// When emulation shuts down the guest is suspended first, so the counter would never change again
+// and that host thread could never be joined (Double Dragon Revive hung on "Shutting down" this way).
+// Wake up periodically and give up once the system is shutting down.
+template <typename Pred>
+bool WaitEventFd(Core::System& system, std::unique_lock<std::mutex>& lock, Pred&& pred) {
+    while (!event_fd_cv.wait_for(lock, std::chrono::milliseconds{50}, pred)) {
+        if (system.IsShuttingDown()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::pair<s32, Errno> EventFdRead(Core::System& system, EventFdCounter& counter, bool nonblock,
+                                  std::span<u8> message) {
     if (message.size() < sizeof(u64)) {
         return {-1, Errno::INVAL};
     }
@@ -84,7 +99,9 @@ std::pair<s32, Errno> EventFdRead(EventFdCounter& counter, bool nonblock, std::s
     if (counter.value == 0 && nonblock) {
         return {-1, Errno::AGAIN};
     }
-    event_fd_cv.wait(lock, [&] { return counter.value != 0; });
+    if (!WaitEventFd(system, lock, [&] { return counter.value != 0; })) {
+        return {-1, Errno::AGAIN};
+    }
     const u64 result = counter.semaphore ? 1 : counter.value;
     counter.value -= result;
     event_fd_cv.notify_all();
@@ -92,7 +109,7 @@ std::pair<s32, Errno> EventFdRead(EventFdCounter& counter, bool nonblock, std::s
     return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
 }
 
-std::pair<s32, Errno> EventFdWrite(EventFdCounter& counter, bool nonblock,
+std::pair<s32, Errno> EventFdWrite(Core::System& system, EventFdCounter& counter, bool nonblock,
                                    std::span<const u8> message) {
     if (message.size() < sizeof(u64)) {
         return {-1, Errno::INVAL};
@@ -106,7 +123,9 @@ std::pair<s32, Errno> EventFdWrite(EventFdCounter& counter, bool nonblock,
     if (!fits() && nonblock) {
         return {-1, Errno::AGAIN};
     }
-    event_fd_cv.wait(lock, fits);
+    if (!WaitEventFd(system, lock, fits)) {
+        return {-1, Errno::AGAIN};
+    }
     counter.value += add;
     event_fd_cv.notify_all();
     return {static_cast<s32>(sizeof(u64)), Errno::SUCCESS};
@@ -698,7 +717,9 @@ std::pair<s32, Errno> BSD_USA::PollImpl(std::vector<u8>& write_buffer, std::span
     }
 
     for (PollFD& pollfd : fds) {
-        ASSERT(False(pollfd.revents));
+        // poll(2) ignores revents on input. Double Dragon Revive polls every frame with the
+        // array it got back last time, so asserting here logged a line per frame.
+        pollfd.revents = PollEvents{};
 
         if (pollfd.fd >= static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
             LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
@@ -1025,7 +1046,7 @@ std::pair<s32, Errno> BSD_USA::RecvImpl(s32 fd, u32 flags, std::vector<u8>& mess
     if (IsEventFd(fd)) {
         // Copy the pointer so the counter outlives a Close from another thread while blocked
         const auto event_fd = file_descriptors[fd]->event_fd;
-        return EventFdRead(*event_fd, IsNonBlocking(flags, file_descriptors[fd]->flags), message);
+        return EventFdRead(system, *event_fd, IsNonBlocking(flags, file_descriptors[fd]->flags), message);
     }
     if (const Errno bsd_errno = CheckSocket(fd); bsd_errno != Errno::SUCCESS) {
         return {-1, bsd_errno};
@@ -1103,7 +1124,7 @@ std::pair<s32, Errno> BSD_USA::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& 
 std::pair<s32, Errno> BSD_USA::SendImpl(s32 fd, u32 flags, std::span<const u8> message) {
     if (IsEventFd(fd)) {
         const auto event_fd = file_descriptors[fd]->event_fd;
-        return EventFdWrite(*event_fd, IsNonBlocking(flags, file_descriptors[fd]->flags), message);
+        return EventFdWrite(system, *event_fd, IsNonBlocking(flags, file_descriptors[fd]->flags), message);
     }
     if (const Errno bsd_errno = CheckSocket(fd); bsd_errno != Errno::SUCCESS) {
         return {-1, bsd_errno};
