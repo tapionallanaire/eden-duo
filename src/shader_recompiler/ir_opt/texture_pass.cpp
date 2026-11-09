@@ -339,15 +339,25 @@ static inline u32 GetTextureHandleCached(Environment& env, const ConstBufferAddr
 }
 
 // Cached variants of existing helpers
+// A run-time handle names no descriptor here: a 2D colour texture, as for attribute handles.
 static inline TextureType ReadTextureTypeCached(Environment& env, const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return TextureType::Color2D;
+    }
     return env.ReadTextureType(GetTextureHandleCached(env, cbuf));
 }
 static inline TexturePixelFormat ReadTexturePixelFormatCached(Environment& env,
                                                                 const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return TexturePixelFormat::A8B8G8R8_UNORM;
+    }
     return env.ReadTexturePixelFormat(GetTextureHandleCached(env, cbuf));
 }
 static inline bool IsTexturePixelFormatIntegerCached(Environment& env,
                                                         const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return false;
+    }
     return env.IsTexturePixelFormatInteger(GetTextureHandleCached(env, cbuf));
 }
 
@@ -365,10 +375,101 @@ static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Env
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info);
 
+// A value loaded from memory is not known when the shader is compiled, and the load's operands are
+// its address, not the value: a handle must never be tracked through one. Hogwarts Legacy ORs a
+// texture index loaded from a storage buffer with a sampler word (LoadStorage32(ssbo, base +
+// i * 8) | c2[0x578]); searching the load's address found the storage buffer's own address in
+// c0[0x270] and took (address << 4) as the texture: a descriptor far past the end of the TIC, so
+// the shader was compiled with whatever type and format that memory held (format 90/105 asserts).
+static bool IsMemoryLoad(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::LoadGlobalU8:
+    case IR::Opcode::LoadGlobalS8:
+    case IR::Opcode::LoadGlobalU16:
+    case IR::Opcode::LoadGlobalS16:
+    case IR::Opcode::LoadGlobal32:
+    case IR::Opcode::LoadGlobal64:
+    case IR::Opcode::LoadGlobal128:
+    case IR::Opcode::LoadStorageU8:
+    case IR::Opcode::LoadStorageS8:
+    case IR::Opcode::LoadStorageU16:
+    case IR::Opcode::LoadStorageS16:
+    case IR::Opcode::LoadStorage32:
+    case IR::Opcode::LoadStorage64:
+    case IR::Opcode::LoadStorage128:
+    case IR::Opcode::LoadLocal:
+    case IR::Opcode::LoadSharedU8:
+    case IR::Opcode::LoadSharedS8:
+    case IR::Opcode::LoadSharedU16:
+    case IR::Opcode::LoadSharedS16:
+    case IR::Opcode::LoadSharedU32:
+    case IR::Opcode::LoadSharedU64:
+    case IR::Opcode::LoadSharedU128:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// True when the value is computed from a memory load (searched to a bounded depth).
+static bool DependsOnMemoryLoad(const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return false;
+    }
+    boost::container::small_vector<const IR::Inst*, 16> visited;
+    std::queue<const IR::Inst*> queue;
+    queue.push(value.InstRecursive());
+    while (!queue.empty() && visited.size() < 256) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (IsMemoryLoad(inst->GetOpcode())) {
+            return true;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            const IR::Value arg_value{inst->Arg(arg)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (std::ranges::find(visited, arg_inst) == visited.end()) {
+                visited.push_back(arg_inst);
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return false;
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info) {
-    return IR::BreadthFirstSearch(value, [&env, &host_info](const IR::Inst* inst) {
-        return TryGetConstBuffer(inst, env, host_info);
-    });
+    if (value.IsImmediate()) {
+        return std::nullopt;
+    }
+    // IR::BreadthFirstSearch, except that it does not descend into memory loads.
+    boost::container::small_vector<const IR::Inst*, 8> visited;
+    std::queue<const IR::Inst*> queue;
+    queue.push(value.InstRecursive());
+    while (!queue.empty()) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (IsMemoryLoad(inst->GetOpcode())) {
+            continue;
+        }
+        if (const std::optional result = TryGetConstBuffer(inst, env, host_info)) {
+            return result;
+        }
+        for (size_t arg = inst->NumArgs(); arg--;) {
+            const IR::Value arg_value{inst->Arg(arg)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (std::ranges::find(visited, arg_inst) == visited.end()) {
+                visited.push_back(arg_inst);
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
@@ -400,6 +501,17 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         std::optional lhs{TrackCached(inst->Arg(0), env, host_info)};
         std::optional rhs{TrackCached(inst->Arg(1), env, host_info)};
         if (!lhs || !rhs) {
+            // Hogwarts Legacy: texture index loaded from a storage buffer | sampler word from a
+            // constant buffer. Bind by the word it can see, and mark the handle run-time only so
+            // its type and format are not read from whatever descriptor that word alone names.
+            if (lhs && !rhs && DependsOnMemoryLoad(inst->Arg(1))) {
+                lhs->dynamic_handle = true;
+                return lhs;
+            }
+            if (rhs && !lhs && DependsOnMemoryLoad(inst->Arg(0))) {
+                rhs->dynamic_handle = true;
+                return rhs;
+            }
             return std::nullopt;
         }
         if (lhs->has_secondary || rhs->has_secondary) {
@@ -444,6 +556,7 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .dynamic_offset = lhs->dynamic_offset,
             .count = lhs->count,
             .has_secondary = true,
+            .dynamic_handle = lhs->dynamic_handle || rhs->dynamic_handle,
         };
     }
     case IR::Opcode::ShiftLeftLogical32: {

@@ -66,6 +66,9 @@ struct ConstBufferAddr {
     IR::U32 dynamic_offset;
     u32 count;
     bool has_secondary;
+    /// Part of the handle is loaded from memory, so the texture it names is only known at run
+    /// time: the tracked word alone does not name a texture to read a type or format from.
+    bool dynamic_handle{};
 };
 
 class Environment {

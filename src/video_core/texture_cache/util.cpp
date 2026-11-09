@@ -835,6 +835,14 @@ bool IsValidEntry(const Tegra::MemoryManager& gpu_memory, const TICEntry& config
     if (address >= (1ULL << 40)) {
         return false;
     }
+    // A descriptor whose format is no texture format at all is not a texture but memory read
+    // through a bad handle (Hogwarts Legacy: format 90 / 105 with mixed component types).
+    // PixelFormatFromTIC would build it as an A8B8G8R8 image of whatever size the garbage
+    // encodes; the null view samples zeros instead.
+    if (!TryPixelFormatFromTextureInfo(config.format, config.r_type, config.g_type, config.b_type,
+                                       config.a_type, config.srgb_conversion)) {
+        return false;
+    }
     if (gpu_memory.GpuToCpuAddress(address).has_value()) {
         return true;
     }

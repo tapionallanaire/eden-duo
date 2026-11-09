@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+
 #include "common/common_types.h"
 #include "common/logging.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -41,9 +43,10 @@ constexpr u32 Hash(TextureFormat format, ComponentType component, bool is_srgb =
 
 } // Anonymous namespace
 
-PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
-                                       ComponentType blue, ComponentType alpha,
-                                       bool is_srgb) noexcept {
+std::optional<PixelFormat> TryPixelFormatFromTextureInfo(TextureFormat format, ComponentType red,
+                                                         ComponentType green, ComponentType blue,
+                                                         ComponentType alpha,
+                                                         bool is_srgb) noexcept {
     switch (Hash(format, red, green, blue, alpha, is_srgb)) {
     case Hash(TextureFormat::A8B8G8R8, UNORM):
         return PixelFormat::A8B8G8R8_UNORM;
@@ -270,6 +273,16 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
         return PixelFormat::ASTC_2D_6X5_UNORM;
     case Hash(TextureFormat::ASTC_2D_6X5, UNORM, SRGB):
         return PixelFormat::ASTC_2D_6X5_SRGB;
+    }
+    return std::nullopt;
+}
+
+PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, ComponentType green,
+                                       ComponentType blue, ComponentType alpha,
+                                       bool is_srgb) noexcept {
+    if (const auto pixel_format = TryPixelFormatFromTextureInfo(format, red, green, blue, alpha,
+                                                                is_srgb)) {
+        return *pixel_format;
     }
     UNIMPLEMENTED_MSG("texture format={} srgb={} components={{{} {} {} {}}}",
                       static_cast<int>(format), is_srgb, static_cast<int>(red),
