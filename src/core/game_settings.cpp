@@ -228,16 +228,12 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // High keeps the picture and still holds 30.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
-            // High accuracy also delays fences until the host GPU is done, and the game waits on
-            // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
-            // 26-27 FPS on the cliff overlook with every thread under 60 % busy. Immediate fences
-            // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
-            // (AYN Thor, docked 1x).
-            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
-            // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
-            // (menus and bright scenes washed out white). Reactive flushing read-protects
-            // GPU-written pages, so that one read faults and downloads synchronously while the
-            // other 17 fences a frame stay free: picture correct, 27-29 FPS on the overlook.
+            // Immediate fences (an earlier default, against a lockstep at 26-27 FPS on the cliff
+            // overlook) let the CPU read the exposure result before the GPU wrote it: menus and
+            // bright scenes washed out white, with reactive flushing on too (entrance hall, AYN
+            // Thor and desktop). The lockstep came from the handle-table writes on the GPU
+            // thread (see bindless_table_max_by_title), which are now cheap, so fences wait.
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Default);
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
             return true;
         case TitleID::FireEmblemEngage:
@@ -348,12 +344,10 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             Settings::values.skip_buffer_downloads_by_title = true;
             break;
         case TitleID::HogwartsLegacy:
-            // Its materials index texture handle tables in 256-384 byte constant buffers (at most
-            // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
-            // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
-            // Material handle tables of up to 800 entries (64 truncated them: black roughness,
-            // chrome world). Per-draw constant indices are resolved on the CPU and the arrays
-            // are sized per pipeline variant, so the cap costs little.
+            // Its material handle tables hold up to 800 entries; a 64 cap truncated them (black
+            // roughness map, chrome world, blown-out reflection capture). Writing 1024 slots per
+            // table per draw cost most of the frame; now the arrays are sized per pipeline
+            // variant and per-draw constant indices are resolved on the CPU, so 1024 is cheap.
             Settings::values.bindless_table_max_by_title = 1024;
             break;
         default:
