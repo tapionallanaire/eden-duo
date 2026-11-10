@@ -176,7 +176,7 @@ void GenericEnvironment::SetCachedSize(size_t size_bytes) {
     cached_lowest = start_address;
     cached_highest = start_address + static_cast<u32>(size_bytes);
     code.resize(CachedSizeWords());
-    gpu_memory->ReadBlock(program_base + cached_lowest, code.data(), code.size() * sizeof(u64));
+    gpu_memory->ReadBlockUnsafe(program_base + cached_lowest, code.data(), code.size() * sizeof(u64));
 }
 
 size_t GenericEnvironment::CachedSizeWords() const noexcept {
@@ -198,7 +198,7 @@ bool GenericEnvironment::CanBeSerialized() const noexcept {
 u64 GenericEnvironment::CalculateHash() const {
     const size_t size{ReadSizeBytes()};
     const auto data{std::make_unique<char[]>(size)};
-    gpu_memory->ReadBlock(program_base + read_lowest, data.get(), size);
+    gpu_memory->ReadBlockUnsafe(program_base + read_lowest, data.get(), size);
     return Common::CityHash64(data.get(), size);
 }
 
@@ -273,7 +273,7 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     size_t size{BLOCK_SIZE};
     while (size <= MAXIMUM_SIZE) {
         u64* const data = code.data() + offset / INST_SIZE;
-        gpu_memory->ReadBlock(guest_addr, data, BLOCK_SIZE);
+        gpu_memory->ReadBlockUnsafe(guest_addr, data, BLOCK_SIZE);
         for (size_t index = 0; index < BLOCK_SIZE; index += INST_SIZE) {
             const u64 inst = data[index / INST_SIZE];
             if (inst == SELF_BRANCH_A || inst == SELF_BRANCH_B) {
@@ -296,7 +296,7 @@ Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, 
     ASSERT(handle.first <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + handle.first * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
-    gpu_memory->ReadBlock(descriptor_addr, &entry, sizeof(entry));
+    gpu_memory->ReadBlockUnsafe(descriptor_addr, &entry, sizeof(entry));
     return entry;
 }
 
@@ -305,7 +305,7 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          Maxwell::ShaderType program, GPUVAddr program_base_,
                                          u32 start_address_)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_}, maxwell3d{&maxwell3d_} {
-    gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
+    gpu_memory->ReadBlockUnsafe(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
     gp_passthrough_mask = maxwell3d->regs.post_vtg_shader_attrib_skip_mask;
     switch (program) {
