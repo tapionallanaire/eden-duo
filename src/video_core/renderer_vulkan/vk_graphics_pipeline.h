@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "common/thread_worker.h"
@@ -138,9 +139,8 @@ public:
         if (key == current_key) {
             return this;
         }
-        const auto it{std::find(transition_keys.begin(), transition_keys.end(), current_key)};
-        return it != transition_keys.end() ? transitions[std::distance(transition_keys.begin(), it)]
-                                           : nullptr;
+        const auto it{transitions.find(current_key)};
+        return it != transitions.end() ? it->second : nullptr;
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
@@ -185,8 +185,9 @@ private:
 
     bool (*configure_func)(GraphicsPipeline*, bool){};
 
-    std::vector<GraphicsPipelineCacheKey> transition_keys;
-    std::vector<GraphicsPipeline*> transitions;
+    /// Pipelines drawn right after this one. Hashed: the list search of their keys ran on every
+    /// draw that changed pipeline (a fifth of the GPU thread in Hogwarts Legacy).
+    std::unordered_map<GraphicsPipelineCacheKey, GraphicsPipeline*> transitions;
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 

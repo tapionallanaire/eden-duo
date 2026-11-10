@@ -398,8 +398,7 @@ void GraphicsPipeline::BuildUrgently(Common::ThreadWorker& worker) {
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
-    transition_keys.push_back(transition->key);
-    transitions.push_back(transition);
+    transitions.emplace(transition->key, transition);
 }
 
 template <typename Spec>
