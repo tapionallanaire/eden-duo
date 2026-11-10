@@ -66,6 +66,7 @@ private:
     VkDescriptorSetLayout layout{};
 
     std::vector<vk::DescriptorSets> sets;
+    std::vector<VkDescriptorSet> handles; ///< Every set in sets, in commit index order
 };
 
 class DescriptorPool {

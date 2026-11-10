@@ -29,6 +29,9 @@ constexpr s32 SCORE_THRESHOLD = 3;
 // At the usual 64 sets per pool Hogwarts Legacy held 1.3 GiB of pools, most of it never used: banks
 // of such sets get pools of one batch of sets.
 constexpr s32 BIG_SET_SCORE = 256;
+// Most allocators of such sets never hold more than a few (AYN Thor: 133 of 160 never grew past
+// their first 16), so they grow by a few sets at a time.
+constexpr size_t BIG_SETS_GROW_RATE = 4;
 
 struct DescriptorBank {
     DescriptorBankInfo info;
@@ -97,16 +100,22 @@ static void AllocatePool(const Device& device, DescriptorBank& bank) {
 
 DescriptorAllocator::DescriptorAllocator(const Device& device_, MasterSemaphore& master_semaphore_,
                                          DescriptorBank& bank_, VkDescriptorSetLayout layout_)
-    : ResourcePool(master_semaphore_, SETS_GROW_RATE), device{&device_}, bank{&bank_},
+    : ResourcePool(master_semaphore_,
+                   bank_.info.score > BIG_SET_SCORE ? BIG_SETS_GROW_RATE : SETS_GROW_RATE),
+      device{&device_}, bank{&bank_},
       layout{layout_} {}
 
 VkDescriptorSet DescriptorAllocator::Commit() {
     const size_t index = CommitResource();
-    return sets[index / SETS_GROW_RATE][index % SETS_GROW_RATE];
+    return handles[index];
 }
 
 void DescriptorAllocator::Allocate(size_t begin, size_t end) {
-    sets.push_back(AllocateDescriptors(end - begin));
+    vk::DescriptorSets new_sets = AllocateDescriptors(end - begin);
+    for (size_t i = 0; i < end - begin; ++i) {
+        handles.push_back(new_sets[i]);
+    }
+    sets.push_back(std::move(new_sets));
 }
 
 vk::DescriptorSets DescriptorAllocator::AllocateDescriptors(size_t count) {
