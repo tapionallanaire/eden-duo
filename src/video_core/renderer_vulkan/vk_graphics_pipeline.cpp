@@ -299,6 +299,10 @@ GraphicsPipeline::GraphicsPipeline(
     }
     if (is_template) {
         is_built = true;
+        // The deferred emit owns the translated IR of every stage (pools included): nothing
+        // will run it, so release it here or each template keeps megabytes alive for good.
+        emit_modules = nullptr;
+        spv_modules = {};
         if (shader_notify) {
             shader_notify->MarkShaderComplete();
         }
