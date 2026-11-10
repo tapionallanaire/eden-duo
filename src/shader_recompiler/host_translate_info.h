@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/common_types.h"
 
 namespace Shader {
@@ -38,6 +40,10 @@ struct HostTranslateInfo {
     bool support_viewport_mask{};
     bool support_geometry_shader_passthrough{}; ///< True when the device supports geometry
                                                 ///< passthrough shaders
+    /// Handle tables (TextureDescriptor::count > 1), in the order the texture pass finds them:
+    /// log2 of the descriptor array size this pipeline variant binds, 0 for the default cap.
+    /// Set per pipeline variant from GraphicsPipelineCacheKey::table_buckets.
+    std::array<u8, 32> table_buckets{};
     bool support_conditional_barrier{}; ///< True when the device supports barriers in conditional
                                         ///< control flow
     bool single_lane_geometry_subgroups{};

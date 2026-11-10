@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -69,6 +70,10 @@ struct ConstBufferAddr {
     /// Part of the handle is loaded from memory, so the texture it names is only known at run
     /// time: the tracked word alone does not name a texture to read a type or format from.
     bool dynamic_handle{};
+    /// The handle table lives in storage buffer [storage_index] (8-byte elements; dynamic_offset
+    /// is the load's byte offset into it), ORed with the secondary word.
+    bool storage_table{};
+    u32 storage_index{};
 };
 
 class Environment {

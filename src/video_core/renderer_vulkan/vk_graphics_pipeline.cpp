@@ -15,6 +15,10 @@
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
+#include <array>
+#include <bit>
+
+#include "common/alignment.h"
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -424,9 +428,26 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         // get an out-of-range index, which the texture cache turns into a null view without a
         // lookup. Hogwarts Legacy indexes per-instance tables of a few hundred bytes, and resolving
         // all 1024 possible elements per draw held the GPU thread at 86 % (30 -> 20 FPS, Thor).
+        // A storage table: the constant buffer holds the table's 64-bit address; its elements are
+        // 8 bytes, the first word a handle. Base and alignment match the shader's storage offset.
+        const auto storage_table_base{[&](const Shader::TextureDescriptor& desc) -> GPUVAddr {
+            const GPUVAddr pointer{
+                gpu_memory->Read<u64>(cbufs[desc.cbuf_index].address + desc.cbuf_offset)};
+            return Common::AlignDown(pointer, static_cast<GPUVAddr>(device.GetStorageBufferAlignment()));
+        }};
         const auto bound_count{[&](const auto& desc) -> u32 {
             if (desc.count <= 1) {
                 return desc.count;
+            }
+            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&>) {
+                if (desc.storage_table) {
+                    const GPUVAddr base{storage_table_base(desc)};
+                    if (base == 0) {
+                        return 0;
+                    }
+                    const u64 bytes{gpu_memory->GetMemoryLayoutSize(base)};
+                    return static_cast<u32>((std::min)(u64{desc.count}, bytes >> desc.size_shift));
+                }
             }
             const u32 size{cbufs[desc.cbuf_index].size};
             if (desc.cbuf_offset + sizeof(u32) > size) {
@@ -457,6 +478,46 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            if (desc.index_program != 0) {
+                // The table index is a per-draw constant: evaluate it and bind that element (one
+                // per Phi candidate) instead of the table.
+                const auto& table_cbuf{cbufs[desc.cbuf_index]};
+                const auto read_cbuf{[&](u32 cbuf_index, u32 offset) -> u32 {
+                    if (cbuf_index >= cbufs.size()) {
+                        return 0;
+                    }
+                    const auto& cbuf{cbufs[cbuf_index]};
+                    if (!cbuf.enabled || offset + sizeof(u32) > cbuf.size) {
+                        return 0;
+                    }
+                    return gpu_memory->Read<u32>(cbuf.address + offset);
+                }};
+                const u32 table_bound{
+                    table_cbuf.enabled && desc.cbuf_offset + sizeof(u32) <= table_cbuf.size
+                        ? ((table_cbuf.size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1
+                        : 0u};
+                u32 secondary{};
+                if (desc.has_secondary) {
+                    secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
+                                                      desc.secondary_cbuf_offset)
+                                << desc.secondary_shift_left;
+                }
+                const auto& index_program{info.index_programs[desc.index_program - 1]};
+                for (u32 candidate = 0; candidate < desc.count; ++candidate) {
+                    const u32 element{Shader::EvaluateIndexProgram(index_program, candidate, read_cbuf)};
+                    if (element >= table_bound) {
+                        views.push_back({OUT_OF_RANGE});
+                        samplers.push_back(VideoCommon::NULL_SAMPLER_ID);
+                        continue;
+                    }
+                    const u32 word{gpu_memory->Read<u32>(table_cbuf.address + desc.cbuf_offset +
+                                                         (element << desc.size_shift))};
+                    const auto handle{TexturePair((word << desc.shift_left) | secondary, via_header_index)};
+                    views.push_back({handle.first});
+                    samplers.push_back(texture_cache.GetSamplerId(handle.second, false));
+                }
+                continue;
+            }
             const u32 bound{bound_count(desc)};
             if (desc.count > 1 && bound > 0) {
                 // A handle table: read it in one block, skip the elements the shader's offset
@@ -465,8 +526,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 static thread_local std::vector<u32> table;
                 const u32 stride_words{(1u << desc.size_shift) / static_cast<u32>(sizeof(u32))};
                 table.resize(static_cast<size_t>(bound) * stride_words);
-                gpu_memory->ReadBlockUnsafe(cbufs[desc.cbuf_index].address + desc.cbuf_offset,
-                                            table.data(), table.size() * sizeof(u32));
+                const GPUVAddr table_addr{desc.storage_table
+                                              ? storage_table_base(desc)
+                                              : cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                gpu_memory->ReadBlockUnsafe(table_addr, table.data(), table.size() * sizeof(u32));
                 u32 secondary{};
                 if (desc.has_secondary) {
                     secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
@@ -647,6 +710,47 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         return false;
     }
     return ConfigureDraw(rescaling, render_area);
+}
+
+std::array<u64, 2> GraphicsPipeline::TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
+                                                  Tegra::MemoryManager& gpu_memory_) const {
+    // Hogwarts Legacy binds handle tables of 4 to 800 entries; the base pipeline declares 1024
+    // descriptors for each and the per-draw writes of those arrays cost a third of the frame.
+    // Size each array to the next power of two of what is bound (4..1024), from the cap-free
+    // bound, so a variant sized for a small table steps up when the table grows.
+    std::array<u64, 2> packed{};
+    if (key.unique_hashes[0] != 0) {
+        return packed; // dual vertex programs: slot order differs, keep the base
+    }
+    u32 slot{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const auto& cbufs{maxwell3d_.state.shader_stages[stage].const_buffers};
+        for (const auto& desc : stage_infos[stage].texture_descriptors) {
+            if (!Shader::IsHandleTable(desc)) {
+                continue;
+            }
+            if (slot >= 32) {
+                return packed;
+            }
+            u64 bound{};
+            const auto& cbuf{cbufs[desc.cbuf_index]};
+            if (cbuf.enabled) {
+                if (desc.storage_table) {
+                    const GPUVAddr pointer{gpu_memory_.Read<u64>(cbuf.address + desc.cbuf_offset)};
+                    const GPUVAddr base{Common::AlignDown(
+                        pointer, static_cast<GPUVAddr>(device.GetStorageBufferAlignment()))};
+                    bound = base != 0 ? gpu_memory_.GetMemoryLayoutSize(base) >> desc.size_shift : 0;
+                } else if (desc.cbuf_offset + sizeof(u32) <= cbuf.size) {
+                    bound = ((cbuf.size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1;
+                }
+            }
+            bound = (std::min)(bound, u64{1024});
+            const u32 bucket{bound <= 4 ? 2u : std::bit_width(static_cast<u32>(bound) - 1)};
+            packed[slot / 16] |= u64{bucket} << (4 * (slot % 16));
+            ++slot;
+        }
+    }
+    return packed;
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,

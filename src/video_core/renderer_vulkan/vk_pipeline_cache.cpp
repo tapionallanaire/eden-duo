@@ -64,7 +64,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 18;
+constexpr u32 CACHE_VERSION = 20;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -573,6 +573,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         return nullptr;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    // Handle tables: the variant whose descriptor arrays fit what is bound now. Only a pipeline
+    // of the same shaders knows the tables; otherwise start from the base and switch below.
+    graphics_key.table_buckets =
+        current_pipeline && current_pipeline->CacheKey().unique_hashes == graphics_key.unique_hashes
+            ? current_pipeline->TableBuckets(*maxwell3d, *gpu_memory)
+            : std::array<u64, 2>{};
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
@@ -865,6 +871,7 @@ void PipelineCache::CompileShaderCombinations() {
                 GraphicsPipelineCacheKey combination{key};
                 combination.unique_hashes[vertex_index] = vertex;
                 combination.unique_hashes[fragment_index] = fragment;
+                combination.table_buckets = {}; // other shaders, other tables: the base
                 if (graphics_cache.find(combination) != graphics_cache.end()) {
                     continue;
                 }
@@ -958,6 +965,19 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         creation_time_spent += std::chrono::steady_clock::now() - now;
         found = graphics_cache.emplace(graphics_key, std::move(created)).first;
     }
+    if (found->second && graphics_key.table_buckets == std::array<u64, 2>{}) {
+        // The base pipeline knows its tables: draw with the variant sized for them.
+        // ponytail: the base is built too though never drawn with; translate-only base later.
+        const auto want{found->second->TableBuckets(*maxwell3d, *gpu_memory)};
+        if (want != std::array<u64, 2>{}) {
+            graphics_key.table_buckets = want;
+            auto variant{graphics_cache.find(graphics_key)};
+            if (variant == graphics_cache.end()) {
+                variant = graphics_cache.emplace(graphics_key, CreateGraphicsPipeline()).first;
+            }
+            found = variant;
+        }
+    }
     auto& pipeline{found->second};
     if (!pipeline) {
         return nullptr;
@@ -1027,6 +1047,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
     // Layer passthrough generation for devices without VK_EXT_shader_viewport_index_layer
     Shader::IR::Program* layer_source_program{};
+    u32 table_slot{}; // handle tables so far, across stages (GraphicsPipeline::TableBuckets)
 
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         const bool is_emulated_stage = layer_source_program != nullptr &&
@@ -1045,14 +1066,24 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         const u32 cfg_offset{static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader))};
         Shader::Maxwell::Flow::CFG cfg(env, pools.flow_block, cfg_offset, index == 0);
+        // This variant's handle-table array sizes for this stage's tables
+        Shader::HostTranslateInfo stage_info{host_info};
+        for (u32 n = 0; n < stage_info.table_buckets.size() && table_slot + n < 32; ++n) {
+            const u32 slot{table_slot + n};
+            stage_info.table_buckets[n] =
+                static_cast<u8>((key.table_buckets[slot / 16] >> (4 * (slot % 16))) & 0xF);
+        }
         if (!uses_vertex_a || index != 1) {
             // Normal path
-            programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, host_info);
+            programs[index] = TranslateProgram(pools.inst, pools.block, env, cfg, stage_info);
         } else {
             // VertexB path when VertexA is present.
             auto& program_va{programs[0]};
-            auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
+            auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, stage_info)};
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
+        }
+        for (const auto& desc : programs[index].info.texture_descriptors) {
+            table_slot += Shader::IsHandleTable(desc) ? 1 : 0;
         }
 
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {

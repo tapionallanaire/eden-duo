@@ -190,6 +190,7 @@ add_library(shader_recompiler STATIC
     profile.h
     program_header.h
     runtime_info.h
+    index_program.h
     shader_info.h
     varying_state.h)
 

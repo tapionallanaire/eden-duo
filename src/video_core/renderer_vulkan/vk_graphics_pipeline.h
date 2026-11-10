@@ -35,6 +35,9 @@ namespace Vulkan {
 
 struct GraphicsPipelineCacheKey {
     std::array<u64, 6> unique_hashes;
+    /// Handle-table descriptor array sizes of this variant: 4 bits per table (log2, 2..10) in
+    /// stage/descriptor order, 32 tables; all zero = the base pipeline (every table at the cap).
+    std::array<u64, 2> table_buckets;
     FixedPipelineState state;
 
     size_t Hash() const noexcept;
@@ -46,7 +49,7 @@ struct GraphicsPipelineCacheKey {
     }
 
     size_t Size() const noexcept {
-        return sizeof(unique_hashes) + state.Size();
+        return sizeof(unique_hashes) + sizeof(table_buckets) + state.Size();
     }
 };
 static_assert(std::has_unique_object_representations_v<GraphicsPipelineCacheKey>);
@@ -115,6 +118,15 @@ public:
     bool Configure(bool is_indexed) {
         return configure_func(this, is_indexed);
     }
+
+    [[nodiscard]] const GraphicsPipelineCacheKey& CacheKey() const noexcept {
+        return key;
+    }
+
+    /// The table_buckets key of the variant that fits the handle tables bound right now.
+    /// (The engine pointers are passed: a fresh pipeline has none until SetEngine.)
+    [[nodiscard]] std::array<u64, 2> TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
+                                                  Tegra::MemoryManager& gpu_memory_) const;
 
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
         if (key == current_key) {

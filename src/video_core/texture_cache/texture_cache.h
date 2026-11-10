@@ -353,6 +353,11 @@ SamplerId TextureCache<P>::GetSamplerId(u32 index, bool compute) {
         return NULL_SAMPLER_ID;
     }
     auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
+    // A handle past the bound table names no descriptor: a wrong handle (Hogwarts Legacy) read
+    // whatever memory followed the table as a texture, allocating gigabytes for garbage sizes.
+    if (index > table.Limit()) {
+        return NULL_IMAGE_VIEW_ID;
+    }
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
         auto const id = FindSampler(descriptor, compute);
@@ -584,6 +589,11 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     }
     auto const map_index = index | (compute ? Common::SlotId::TAGGED_VALUE : 0);
     // Is new (on the tegra engine side)?
+    // A handle past the bound table names no descriptor: a wrong handle (Hogwarts Legacy) read
+    // whatever memory followed the table as a texture, allocating gigabytes for garbage sizes.
+    if (index > table.Limit()) {
+        return NULL_IMAGE_VIEW_ID;
+    }
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     const auto is_remapped = [this](ImageViewId view_id) {
         if (!view_id) {
