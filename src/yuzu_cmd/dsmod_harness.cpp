@@ -1052,9 +1052,10 @@ void Iterate(Core::System& system, InputCommon::InputSubsystem& input_subsystem)
         next_perf = now + std::chrono::seconds(5);
         const auto results = system.GetAndResetPerfStats();
         if (results.average_game_fps > 0.0) {
-            LOG_INFO(Frontend, "perf: {:.1f} game fps, {:.0f}% speed, {:.2f} ms/frame",
+            LOG_INFO(Frontend,
+                     "perf: {:.1f} game fps, {:.0f}% speed, {:.2f} ms/frame, worst gap {:.0f} ms",
                      results.average_game_fps, results.emulation_speed * 100.0,
-                     results.frametime * 1000.0);
+                     results.frametime * 1000.0, results.worst_frame_gap * 1000.0);
         }
     }
     if (g_screenshot_requested.exchange(false)) {

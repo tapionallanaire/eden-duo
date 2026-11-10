@@ -21,6 +21,8 @@ struct PerfStatsResults {
     double frametime;
     /// Ratio of walltime / emulated time elapsed
     double emulation_speed;
+    /// Longest time between two game frames since the last reset, in seconds
+    double worst_frame_gap;
 };
 
 /**
@@ -82,6 +84,9 @@ private:
     u32 system_frames = 0;
     /// Cumulative number of game frames (GSP frame submissions) since last reset
     std::atomic<u32> game_frames = 0;
+    /// Time of the last game frame and the longest gap between two since last reset (Clock ticks)
+    std::atomic<s64> last_game_frame = 0;
+    std::atomic<s64> worst_frame_gap = 0;
 
     /// Point when the previous system frame ended
     Clock::time_point previous_frame_end = reset_point;
