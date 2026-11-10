@@ -351,7 +351,10 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // Its materials index texture handle tables in 256-384 byte constant buffers (at most
             // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
             // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
-            Settings::values.bindless_table_max_by_title = 64;
+            // Material handle tables of up to 800 entries (64 truncated them: black roughness,
+            // chrome world). Per-draw constant indices are resolved on the CPU and the arrays
+            // are sized per pipeline variant, so the cap costs little.
+            Settings::values.bindless_table_max_by_title = 1024;
             break;
         default:
             break;
