@@ -7,7 +7,11 @@
 #pragma once
 
 #include <shared_mutex>
+#include <memory>
+#include <mutex>
 #include <span>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "shader_recompiler/shader_info.h"
@@ -20,6 +24,7 @@ class Device;
 class Scheduler;
 
 struct DescriptorBank;
+class DescriptorLayoutBuilder;
 
 struct DescriptorBankInfo {
     [[nodiscard]] bool IsSuperset(const DescriptorBankInfo& subset) const noexcept;
@@ -75,11 +80,25 @@ public:
     DescriptorAllocator Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const Shader::Info& info);
     DescriptorAllocator Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const DescriptorBankInfo& info);
 
+    /// One allocator per distinct set layout, used by every pipeline with that layout: sets are
+    /// then held for the draws in flight, not for every pipeline ever drawn. Commit() on it only
+    /// from the scheduler's command recording.
+    DescriptorAllocator& SharedAllocator(const Device& device, Scheduler& scheduler,
+                                         const DescriptorLayoutBuilder& builder,
+                                         std::span<const Shader::Info> infos);
+
 private:
+    struct SharedAllocatorEntry {
+        vk::DescriptorSetLayout layout;
+        std::unique_ptr<DescriptorAllocator> allocator;
+    };
+
     DescriptorBank& Bank(const Device& device, const DescriptorBankInfo& reqs);
     std::shared_mutex banks_mutex;
     std::vector<DescriptorBankInfo> bank_infos;
     std::vector<std::unique_ptr<DescriptorBank>> banks;
+    std::mutex shared_mutex;
+    std::unordered_map<std::string, SharedAllocatorEntry> shared_allocators;
 };
 
 } // namespace Vulkan

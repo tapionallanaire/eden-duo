@@ -200,7 +200,7 @@ private:
     bool fragment_has_color0_output{};
 
     vk::DescriptorSetLayout descriptor_set_layout;
-    DescriptorAllocator descriptor_allocator;
+    DescriptorAllocator* descriptor_allocator{};
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;

@@ -76,8 +76,8 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         descriptor_update_template =
             builder.CreateTemplate(*descriptor_set_layout, *pipeline_layout, uses_push_descriptor);
         if (!uses_push_descriptor) {
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, info);
+            descriptor_allocator = &descriptor_pool.SharedAllocator(device, scheduler, builder,
+                                                                    std::span{&info, 1});
         }
     }
 
@@ -403,7 +403,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);
         } else {
-            const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
+            const VkDescriptorSet descriptor_set{descriptor_allocator->Commit()};
             const vk::Device& dev{device.GetLogical()};
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline_layout, 0,

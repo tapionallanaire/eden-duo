@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include <ranges>
+#include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -151,6 +152,20 @@ DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& s
 
 DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& scheduler, VkDescriptorSetLayout layout, const DescriptorBankInfo& info) {
     return DescriptorAllocator(device, scheduler.GetMasterSemaphore(), Bank(device, info), layout);
+}
+
+DescriptorAllocator& DescriptorPool::SharedAllocator(const Device& device, Scheduler& scheduler,
+                                                     const DescriptorLayoutBuilder& builder,
+                                                     std::span<const Shader::Info> infos) {
+    std::scoped_lock lock{shared_mutex};
+    auto [it, inserted] = shared_allocators.try_emplace(builder.LayoutKey());
+    SharedAllocatorEntry& entry = it->second;
+    if (inserted) {
+        entry.layout = builder.CreateDescriptorSetLayout(false);
+        entry.allocator = std::make_unique<DescriptorAllocator>(
+            Allocator(device, scheduler, *entry.layout, infos));
+    }
+    return *entry.allocator;
 }
 
 DescriptorBank& DescriptorPool::Bank(const Device& device, const DescriptorBankInfo& reqs) {

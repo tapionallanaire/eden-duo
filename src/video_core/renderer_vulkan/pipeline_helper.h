@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 
 #include <boost/container/small_vector.hpp>
 
@@ -182,6 +183,19 @@ public:
             });
         }
         return result;
+    }
+
+    /// Equal for two builders whose plain (not push, not buffer) set layouts are identically
+    /// defined, so sets of one can be bound with the other.
+    std::string LayoutKey() const {
+        std::string key;
+        for (const VkDescriptorSetLayoutBinding& entry : bindings) {
+            const std::array<u32, 3> words{static_cast<u32>(entry.descriptorType),
+                                           entry.descriptorCount,
+                                           static_cast<u32>(entry.stageFlags)};
+            key.append(reinterpret_cast<const char*>(words.data()), sizeof(words));
+        }
+        return key;
     }
 
     vk::DescriptorSetLayout CreateDescriptorSetLayout(bool use_push_descriptor,

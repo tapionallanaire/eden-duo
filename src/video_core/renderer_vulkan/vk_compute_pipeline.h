@@ -81,7 +81,7 @@ private:
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
     DescriptorBufferLayout descriptor_buffer_layout;
-    DescriptorAllocator descriptor_allocator;
+    DescriptorAllocator* descriptor_allocator{};
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
