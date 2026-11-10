@@ -210,11 +210,6 @@ void TextureCache<P>::TickFrame() {
     if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
     }
-    if ((frame_tick % 120) == 0) { // HLDIAG
-        LOG_INFO(HW_GPU, "HLDIAG texture cache: used {} MiB (minimum {}, expected {}, critical {}), device {} MiB, {} images",
-                 total_used_memory >> 20, minimum_memory >> 20, expected_memory >> 20, critical_memory >> 20,
-                 runtime.CanReportMemoryUsage() ? runtime.GetDeviceMemoryUsage() >> 20 : 0, slot_images.size());
-    }
     SentenceRemovedFramebuffers();
     sentenced_images.Tick();
     sentenced_framebuffers.Tick();

@@ -43,7 +43,6 @@
 
 namespace Vulkan {
 
-std::atomic<u64> hl_ns_configure{}, hl_ns_update{}, hl_n_draws{}, hl_ns_tables{}, hl_ns_fill{}, hl_ns_push{}, hl_n_table_desc{}; // HLDIAG
 
 namespace {
 using boost::container::small_vector;
@@ -544,9 +543,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
             const u32 bound{bound_count(desc)};
             if (desc.count > 1 && bound > 0) {
-                const auto hl_t0{std::chrono::steady_clock::now()}; // HLDIAG
-                hl_n_table_desc += desc.count;
-                struct HlScope { std::chrono::steady_clock::time_point t0; ~HlScope() { hl_ns_tables += static_cast<u64>((std::chrono::steady_clock::now() - t0).count()); } } hl_scope{hl_t0};
                 // A handle table: read it in one block, skip the elements the shader's offset
                 // arithmetic can't reach (Hogwarts Legacy: a handle every 72 bytes in some tables),
                 // and give a slot holding the same handle as the one before it that slot's result.
@@ -891,9 +887,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         } else if (update_descriptors) {
             const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
             const vk::Device& dev{device.GetLogical()};
-            const auto hl_t0{std::chrono::steady_clock::now()}; // HLDIAG
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
-            hl_ns_update += static_cast<u64>((std::chrono::steady_clock::now() - hl_t0).count());
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout, 0,
                                       descriptor_set, nullptr);
         }

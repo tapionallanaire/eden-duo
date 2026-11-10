@@ -33,9 +33,6 @@ class ShaderNotify;
 
 namespace Vulkan {
 
-// HLDIAG: per-frame time in Configure (GPU thread) and descriptor set updates (scheduler thread)
-extern std::atomic<u64> hl_ns_configure, hl_ns_update, hl_n_draws, hl_ns_tables, hl_ns_fill, hl_ns_push, hl_n_table_desc;
-
 struct GraphicsPipelineCacheKey {
     std::array<u64, 6> unique_hashes;
     /// Handle-table descriptor array sizes of this variant: 4 bits per table (log2, 2..10) in
