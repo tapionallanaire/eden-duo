@@ -137,6 +137,9 @@ public:
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                const Tegra::Engines::Fermi2D::Surface& dst,
                                const Tegra::Engines::Fermi2D::Config& copy_config) override;
+    void SoftwareSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& dst,
+                             const Tegra::Engines::Fermi2D::Config& copy_config,
+                             bool done) override;
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;

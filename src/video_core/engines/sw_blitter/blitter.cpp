@@ -222,6 +222,33 @@ bool SoftwareBlitEngine::Blit(Fermi2D::Surface& src, Fermi2D::Surface& dst,
     }
 
     const size_t dst_size = get_surface_size(dst, dst_bytes_per_pixel);
+    if (dst.linear == Fermi2D::MemoryLayout::BlockLinear && dst.depth == 1 &&
+        dst.block_depth == 0 && config.dst_x0 >= 0 && config.dst_y0 >= 0 &&
+        config.dst_x0 < config.dst_x1 && config.dst_y0 < config.dst_y1 &&
+        static_cast<u32>(config.dst_x1) <= dst.width &&
+        static_cast<u32>(config.dst_y1) <= dst.height) {
+        // Read and write back only the runs of the surface that hold the rect. Writing all of it
+        // cost a full copy both ways and made the rasterizer reload every texture in the surface,
+        // however small the blit.
+        const auto runs = CalculateSubrectRuns(dst_bytes_per_pixel, dst.width, config.dst_x0,
+                                               config.dst_y0, dst_extent_x, dst_extent_y,
+                                               dst.block_height);
+        impl->tmp_buffer.resize_destructive(dst_size);
+        u8* const surface = impl->tmp_buffer.data();
+        for (u32 row = 0; row < runs.rows; ++row) {
+            const size_t offset = runs.offset + size_t{row} * runs.stride;
+            memory_manager.ReadBlock(dst.Address() + offset, surface + offset, runs.size);
+        }
+        SwizzleSubrect(std::span(surface, dst_size), impl->dst_buffer, dst_bytes_per_pixel,
+                       dst.width, dst.height, dst.depth, config.dst_x0, config.dst_y0,
+                       dst_extent_x, dst_extent_y, dst.block_height, dst.block_depth,
+                       dst_extent_x * dst_bytes_per_pixel);
+        for (u32 row = 0; row < runs.rows; ++row) {
+            const size_t offset = runs.offset + size_t{row} * runs.stride;
+            memory_manager.WriteBlock(dst.Address() + offset, surface + offset, runs.size);
+        }
+        return true;
+    }
     Tegra::Memory::GpuGuestMemoryScoped<u8, Tegra::Memory::GuestMemoryFlags::SafeReadWrite>
         tmp_buffer2(memory_manager, dst.Address(), dst_size, &impl->tmp_buffer);
 

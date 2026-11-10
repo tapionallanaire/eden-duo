@@ -236,7 +236,23 @@ public:
     Framebuffer* GetFramebuffer();
 
     /// Mark images in a range as modified from the CPU
-    void WriteMemory(DAddr cpu_addr, size_t size);
+    /// gpu_thread: the write comes from a GPU engine, not from the guest CPU
+    void WriteMemory(DAddr cpu_addr, size_t size, bool gpu_thread = false);
+
+    /// Called around a software blit into dst (done: false before it, true after). When dst is a
+    /// loaded, unmodified texture, the blit's writes don't mark it for reload and only the rect
+    /// is uploaded afterwards: Hogwarts Legacy streams 34x34-block virtual texture tiles into
+    /// three 16 MiB textures this way, several a frame.
+    void SoftwareBlit(const Tegra::Engines::Fermi2D::Surface& dst,
+                      const Tegra::Engines::Fermi2D::Config& copy, bool done);
+
+    /// A 2D-engine copy of whole blocks from a texture the GPU wrote into loaded textures of
+    /// another format with the same block size (those virtual texture tiles, compressed into a
+    /// 16-byte-per-pixel staging texture): copies on the host, where the software blit would
+    /// first download the source and wait for the host GPU. False when it doesn't apply.
+    bool CopyBlocks(const Tegra::Engines::Fermi2D::Surface& dst,
+                    const Tegra::Engines::Fermi2D::Surface& src,
+                    const Tegra::Engines::Fermi2D::Config& copy);
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
@@ -554,6 +570,7 @@ private:
     ::Common::unordered_map<GPUVAddr, ImageAllocId> image_allocs_table;
 
     Common::ScratchBuffer<u8> swizzle_data_buffer;
+    std::vector<ImageId> software_blit_images; ///< textures SoftwareBlit keeps loaded during the blit
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
 
     u64 modification_tick = 0;

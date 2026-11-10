@@ -652,8 +652,11 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
 }
 
 template <class P>
-void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
-    ForEachImageInRegion(cpu_addr, size, [this](ImageId image_id, Image& image) {
+void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size, bool gpu_thread) {
+    ForEachImageInRegion(cpu_addr, size, [&, this](ImageId image_id, Image& image) {
+        if (gpu_thread && std::ranges::find(software_blit_images, image_id) != software_blit_images.end()) {
+            return;
+        }
         if (True(image.flags & ImageFlagBits::CpuModified)) {
             return;
         }
@@ -683,7 +686,8 @@ template <class P>
 void TextureCache<P>::DownloadMemory(DAddr cpu_addr, size_t size) {
     boost::container::small_vector<ImageId, 16> images;
     ForEachImageInRegion(cpu_addr, size, [this, &images](ImageId image_id, ImageBase& image) {
-        if (!IsDownloadable(image)) {
+        if (!IsDownloadable(image) || std::ranges::find(software_blit_images, image_id) !=
+                                          software_blit_images.end()) {
             return;
         }
         image.flags &= ~ImageFlagBits::GpuModified;
@@ -779,6 +783,9 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    if (CopyBlocks(dst, src, copy)) {
+        return true;
+    }
     const auto result = GetBlitImages(dst, src, copy);
     if (!result) {
         return false;
@@ -1848,6 +1855,164 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
 
     RegisterImage(new_image_id);
     return new_image_id;
+}
+
+/// True when level 0 of [image] is the 2D-engine surface [surface] read as blocks of the image's
+/// format, its host copy is those guest bytes, and it holds the blocks up to (x1, y1)
+inline bool HoldsSurfaceBlocks(const ImageBase& image,
+                               const Tegra::Engines::Fermi2D::Surface& surface, s32 x1, s32 y1) {
+    using namespace VideoCore::Surface;
+    const ImageInfo& info = image.info;
+    const u32 bpp = BytesPerBlock(PixelFormatFromRenderTargetFormat(surface.format));
+    const u32 blocks_x = Common::DivCeil(info.size.width, DefaultBlockWidth(info.format));
+    const u32 blocks_y = Common::DivCeil(info.size.height, DefaultBlockHeight(info.format));
+    const ImageFlagBits not_guest_bytes =
+        ImageFlagBits::Converted | ImageFlagBits::AcceleratedUpload |
+        ImageFlagBits::AsynchronousDecode | ImageFlagBits::IsDecoding | ImageFlagBits::Remapped |
+        ImageFlagBits::Rescaled;
+    return surface.linear == Tegra::Engines::Fermi2D::MemoryLayout::BlockLinear &&
+           surface.depth == 1 && surface.block_depth == 0 && image.gpu_addr == surface.Address() &&
+           info.type == ImageType::e2D && info.num_samples == 1 &&
+           False(image.flags & not_guest_bytes) && BytesPerBlock(info.format) == bpp &&
+           info.block.height == surface.block_height && info.block.depth == 0 &&
+           // Same row stride, and tall enough that level 0 really uses that block height
+           Common::DivCeil(blocks_x * bpp, 64u) == Common::DivCeil(surface.width * bpp, 64u) &&
+           blocks_y >= (8u << surface.block_height) && static_cast<u32>(x1) <= blocks_x &&
+           static_cast<u32>(y1) <= blocks_y;
+}
+
+template <class P>
+bool TextureCache<P>::CopyBlocks(const Tegra::Engines::Fermi2D::Surface& dst,
+                                 const Tegra::Engines::Fermi2D::Surface& src,
+                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    using namespace VideoCore::Surface;
+    const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(src.Address());
+    if (!cpu_addr || src.format != dst.format || copy.src_x0 < 0 || copy.src_y0 < 0 ||
+        copy.src_x1 - copy.src_x0 != copy.dst_x1 - copy.dst_x0 ||
+        copy.src_y1 - copy.src_y0 != copy.dst_y1 - copy.dst_y0) {
+        return false;
+    }
+    // The source has to be what a download of that memory would write last
+    const u32 bpp = BytesPerBlock(PixelFormatFromRenderTargetFormat(src.format));
+    const size_t src_size = Tegra::Texture::CalculateSize(true, bpp, src.width, src.height, 1,
+                                                          src.block_height, 0);
+    ImageId src_id{};
+    u64 newest = 0;
+    ForEachImageInRegion(*cpu_addr, src_size, [&](ImageId image_id, Image& image) {
+        if (!IsDownloadable(image) || image.modification_tick < newest) {
+            return;
+        }
+        newest = image.modification_tick;
+        src_id = HoldsSurfaceBlocks(image, src, copy.src_x1, copy.src_y1) ? image_id : ImageId{};
+    });
+    if (!src_id) {
+        return false;
+    }
+    SoftwareBlit(dst, copy, false);
+    // Only into textures the surface format merely stands in for; same-format images blit
+    const bool block_textures =
+        !software_blit_images.empty() &&
+        std::ranges::all_of(software_blit_images, [this](ImageId image_id) {
+            return DefaultBlockWidth(slot_images[image_id].info.format) > 1;
+        });
+    if (!block_textures) {
+        software_blit_images.clear();
+        return false;
+    }
+    PrepareImage(src_id, false, false);
+    const PixelFormat src_format = slot_images[src_id].info.format;
+    const u32 src_tile_width = DefaultBlockWidth(src_format);
+    const u32 src_tile_height = DefaultBlockHeight(src_format);
+    const Extent3D src_extent = slot_images[src_id].info.size;
+    const u64 tick = ++modification_tick; // one tick for all, or aliases would copy each other
+    for (const ImageId dst_id : std::exchange(software_blit_images, {})) {
+        const PixelFormat dst_format = slot_images[dst_id].info.format;
+        const ImageCopy tile{
+            .src_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+            .dst_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+            .src_offset = {static_cast<s32>(copy.src_x0 * src_tile_width),
+                           static_cast<s32>(copy.src_y0 * src_tile_height), 0},
+            .dst_offset = {static_cast<s32>(copy.dst_x0 * DefaultBlockWidth(dst_format)),
+                           static_cast<s32>(copy.dst_y0 * DefaultBlockHeight(dst_format)), 0},
+            // In source texels
+            .extent = {(std::min)((copy.src_x1 - copy.src_x0) * src_tile_width,
+                                  src_extent.width - copy.src_x0 * src_tile_width),
+                       (std::min)((copy.src_y1 - copy.src_y0) * src_tile_height,
+                                  src_extent.height - copy.src_y0 * src_tile_height),
+                       1},
+        };
+        CopyImage(dst_id, src_id, {tile});
+        Image& image = slot_images[dst_id];
+        image.flags |= ImageFlagBits::GpuModified;
+        image.modification_tick = tick;
+    }
+    return true;
+}
+
+template <class P>
+void TextureCache<P>::SoftwareBlit(const Tegra::Engines::Fermi2D::Surface& dst,
+                                   const Tegra::Engines::Fermi2D::Config& copy, bool done) {
+    using namespace VideoCore::Surface;
+    if (!done) {
+        software_blit_images.clear();
+        const std::optional<DAddr> cpu_addr = gpu_memory->GpuToCpuAddress(dst.Address());
+        if (!cpu_addr || copy.dst_x0 < 0 || copy.dst_y0 < 0 || copy.dst_x0 >= copy.dst_x1 ||
+            copy.dst_y0 >= copy.dst_y1 || static_cast<u32>(copy.dst_y1) > dst.height) {
+            return;
+        }
+        ForEachImageInRegion(*cpu_addr, 1, [&](ImageId image_id, Image& image) {
+            // Loaded already; one the GPU wrote stays as it is, the blit's reads skip it
+            if (False(image.flags & ImageFlagBits::CpuModified) &&
+                HoldsSurfaceBlocks(image, dst, copy.dst_x1, copy.dst_y1)) {
+                software_blit_images.push_back(image_id);
+            }
+        });
+        return;
+    }
+    // Usually one; a second image when the same memory is also bound in another format
+    for (const ImageId image_id : std::exchange(software_blit_images, {})) {
+        Image& image = slot_images[image_id];
+        if (True(image.flags & ImageFlagBits::CpuModified)) {
+            continue; // the guest CPU wrote to it meanwhile: it reloads whole
+        }
+        const ImageInfo& info = image.info;
+        const u32 bpp = BytesPerBlock(info.format);
+        const u32 tile_width = DefaultBlockWidth(info.format);
+        const u32 tile_height = DefaultBlockHeight(info.format);
+        const u32 x = copy.dst_x0;
+        const u32 y = copy.dst_y0;
+        const u32 width = copy.dst_x1 - copy.dst_x0;
+        const u32 height = copy.dst_y1 - copy.dst_y0;
+        const auto runs = Tegra::Texture::CalculateSubrectRuns(bpp, dst.width, x, y, width, height,
+                                                               dst.block_height);
+        const size_t end = runs.offset + size_t{runs.rows - 1} * runs.stride + runs.size;
+        swizzle_data_buffer.resize_destructive(end);
+        for (u32 row = 0; row < runs.rows; ++row) {
+            const size_t offset = runs.offset + size_t{row} * runs.stride;
+            gpu_memory->ReadBlockUnsafe(image.gpu_addr + offset,
+                                        swizzle_data_buffer.data() + offset, runs.size);
+        }
+        const size_t size = size_t{width} * height * bpp;
+        auto staging = runtime.UploadStagingBuffer(size);
+        Tegra::Texture::UnswizzleSubrect(staging.mapped_span,
+                                         std::span<const u8>(swizzle_data_buffer.data(), end), bpp,
+                                         dst.width, dst.height, 1, x, y, width, height,
+                                         dst.block_height, 0, width * bpp);
+        const std::array copies{BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_size = size,
+            .buffer_row_length = width * tile_width,
+            .buffer_image_height = height * tile_height,
+            .image_subresource = {.base_level = 0, .base_layer = 0, .num_layers = 1},
+            .image_offset = {static_cast<s32>(x * tile_width), static_cast<s32>(y * tile_height),
+                             0},
+            .image_extent = {(std::min)(width * tile_width, info.size.width - x * tile_width),
+                             (std::min)(height * tile_height, info.size.height - y * tile_height),
+                             1},
+        }};
+        image.UploadMemory(staging, copies);
+        runtime.InsertUploadMemoryBarrier();
+    }
 }
 
 template <class P>
