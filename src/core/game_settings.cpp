@@ -240,6 +240,17 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // other 17 fences a frame stay free. (The white and yellow blowouts of 2026-11-10 were
             // the truncated handle tables, see bindless_table_max_by_title, not the fences.)
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            // AYN Thor (11.5 GB, zram swap, swappiness 100): the device budget lets the texture
+            // cache grow to 3.2 GB next to the game's 4 GB guest RAM and 0.5 GB of buffers; the
+            // kernel then swaps the guest to zram and lmkd kills the app on the stalls (seven
+            // times on 2026-11-10, at 3.4-4.7 GB RSS, once with 4 GB still free). Keep the
+            // cache near 1.3 GB; the collector works from the cache's own tally.
+            Settings::values.texture_cache_expected_mib_by_title = 1280;
+            Settings::values.texture_cache_critical_mib_by_title = 1536;
+            // Each 64 MB block the driver allocated while the game streamed cost the kernel a
+            // memory compaction storm (compact_stall +6,000-14,800 per 2 s) and lmkd killed the
+            // app on the stalls, twice within a minute of launching. Reserve the GPU memory once.
+            Settings::values.gpu_memory_pinned_mib_by_title = 1536;
             return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
@@ -259,6 +270,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
 } // namespace
 
 void LoadBootOverrides(std::uint64_t program_id) {
+    // Read when the renderer is built (texture cache budgets, the pinned device memory pool),
+    // so they are set here, before it, unlike the *_by_title values of LoadOverrides.
+    Settings::values.texture_cache_expected_mib_by_title = 0;
+    Settings::values.texture_cache_critical_mib_by_title = 0;
+    Settings::values.gpu_memory_pinned_mib_by_title = 0;
     TitleSettings(program_id, false);
 #ifdef __ANDROID__
     if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && IsAdreno6xx()) {
@@ -310,8 +326,6 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.disable_macro_hle_by_title = false;
     Settings::values.skip_buffer_downloads_by_title = false;
     Settings::values.bindless_table_max_by_title = 0;
-    Settings::values.texture_cache_expected_mib_by_title = 0;
-    Settings::values.texture_cache_critical_mib_by_title = 0;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -356,13 +370,6 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // table per draw cost most of the frame; now the arrays are sized per pipeline
             // variant and per-draw constant indices are resolved on the CPU, so 1024 is cheap.
             Settings::values.bindless_table_max_by_title = 1024;
-            // AYN Thor (11.5 GB, zram swap, swappiness 100): the device budget lets the texture
-            // cache grow to 3.2 GB next to the game's 4 GB guest RAM and 0.5 GB of buffers; the
-            // kernel then swaps the guest to zram and lmkd kills the app on the stalls (seven
-            // times on 2026-11-10, at 3.4-4.7 GB RSS, once with 4 GB still free). Keep the
-            // cache near 1.3 GB; the collector works from the cache's own tally.
-            Settings::values.texture_cache_expected_mib_by_title = 1280;
-            Settings::values.texture_cache_critical_mib_by_title = 1536;
             break;
         default:
             break;

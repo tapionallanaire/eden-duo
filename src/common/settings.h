@@ -971,6 +971,11 @@ struct Values {
     // low-memory kill. Set at load, never saved.
     u32 texture_cache_expected_mib_by_title{};
     u32 texture_cache_critical_mib_by_title{};
+    // Device-local GPU memory reserved for the running title at start, in MiB (0: none): images
+    // and device-local buffers come from this pool and its blocks are never returned, so the
+    // driver's large allocations (and the kernel's memory compaction for them) happen once,
+    // while the process is small, not while the title streams. Set at load, never saved.
+    u32 gpu_memory_pinned_mib_by_title{};
 
 };
 

@@ -213,7 +213,7 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci) const
             .requiredFlags = 0,
             .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             .memoryTypeBits = 0,
-            .pool = VK_NULL_HANDLE,
+            .pool = device.GetPinnedPool(),
             .pUserData = nullptr,
             .priority = 0.f,
     };
@@ -248,7 +248,7 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
         .requiredFlags = 0,
         .preferredFlags = MemoryUsagePreferredVmaFlags(usage) | anv_flags,
         .memoryTypeBits = usage == MemoryUsage::Stream ? 0u : valid_memory_types,
-        .pool = VK_NULL_HANDLE,
+        .pool = usage == MemoryUsage::DeviceLocal ? device.GetPinnedPool() : VK_NULL_HANDLE,
         .pUserData = nullptr,
         .priority = 0.f,
     };
