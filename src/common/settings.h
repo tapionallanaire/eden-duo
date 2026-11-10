@@ -965,6 +965,12 @@ struct Values {
     // Most slots a texture handle table indexed at run time gets for the running title (0: the
     // default, 1024). Every slot is written for every draw (set at load, never saved).
     u32 bindless_table_max_by_title{};
+    // Texture cache budget for the running title, in MiB (0: from the device's memory): past
+    // expected the garbage collector evicts, past critical it evicts hard. Hogwarts Legacy on an
+    // 11.5 GB Android device: its 4 GB guest RAM plus a 3.2 GB texture budget ends in a
+    // low-memory kill. Set at load, never saved.
+    u32 texture_cache_expected_mib_by_title{};
+    u32 texture_cache_critical_mib_by_title{};
 
 };
 
