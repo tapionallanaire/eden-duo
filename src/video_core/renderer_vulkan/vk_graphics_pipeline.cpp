@@ -739,8 +739,9 @@ std::array<u64, 2> GraphicsPipeline::TableBuckets(const Tegra::Engines::Maxwell3
                                                   Tegra::MemoryManager& gpu_memory_) const {
     // Hogwarts Legacy binds handle tables of 4 to 800 entries; the base pipeline declares 1024
     // descriptors for each and the per-draw writes of those arrays cost a third of the frame.
-    // Size each array to the next power of two of what is bound (4..1024), from the cap-free
-    // bound, so a variant sized for a small table steps up when the table grows.
+    // Size each array to 64, 256 or 1024 by what is bound (from the cap-free bound, so a variant
+    // sized for a small table steps up when the table grows). Three steps, not every power of
+    // two: each new size a shader meets is another pipeline to build while the player walks.
     std::array<u64, 2> packed{};
     if (key.unique_hashes[0] != 0) {
         return packed; // dual vertex programs: slot order differs, keep the base
@@ -767,8 +768,7 @@ std::array<u64, 2> GraphicsPipeline::TableBuckets(const Tegra::Engines::Maxwell3
                     bound = ((cbuf.size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1;
                 }
             }
-            bound = (std::min)(bound, u64{1024});
-            const u32 bucket{bound <= 4 ? 2u : std::bit_width(static_cast<u32>(bound) - 1)};
+            const u32 bucket{bound <= 64 ? 6u : bound <= 256 ? 8u : 10u};
             packed[slot / 16] |= u64{bucket} << (4 * (slot % 16));
             ++slot;
         }
