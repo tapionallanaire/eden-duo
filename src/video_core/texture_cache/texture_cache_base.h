@@ -59,6 +59,8 @@ struct ImageViewInOut {
     u32 index{};
     bool blacklist{};
     ImageViewId id{};
+    /// The id is already set (a handle table resolved earlier in the frame): FillImageViews skips it
+    bool resolved{};
 };
 
 struct AsyncDecodeContext {
@@ -187,6 +189,22 @@ public:
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
+    /// Changes when image view ids resolved earlier may no longer hold: every frame, when an image
+    /// or view is deleted and when the descriptor tables move.
+    [[nodiscard]] u64 ViewEpoch() const noexcept {
+        return view_epoch;
+    }
+
+    /// True when a view's image has aliases, which are synchronized every time it is bound
+    [[nodiscard]] bool HasAliases(ImageViewId id) const noexcept {
+        if (!id) {
+            return false;
+        }
+        const ImageViewBase& image_view = slot_image_views[id];
+        return !image_view.IsBuffer() && image_view.image_id &&
+               !slot_images[image_view.image_id].aliased_images.empty();
+    }
+
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
 
@@ -218,7 +236,23 @@ public:
     Framebuffer* GetFramebuffer();
 
     /// Mark images in a range as modified from the CPU
-    void WriteMemory(DAddr cpu_addr, size_t size);
+    /// gpu_thread: the write comes from a GPU engine, not from the guest CPU
+    void WriteMemory(DAddr cpu_addr, size_t size, bool gpu_thread = false);
+
+    /// Called around a software blit into dst (done: false before it, true after). When dst is a
+    /// loaded, unmodified texture, the blit's writes don't mark it for reload and only the rect
+    /// is uploaded afterwards: Hogwarts Legacy streams 34x34-block virtual texture tiles into
+    /// three 16 MiB textures this way, several a frame.
+    void SoftwareBlit(const Tegra::Engines::Fermi2D::Surface& dst,
+                      const Tegra::Engines::Fermi2D::Config& copy, bool done);
+
+    /// A 2D-engine copy of whole blocks from a texture the GPU wrote into loaded textures of
+    /// another format with the same block size (those virtual texture tiles, compressed into a
+    /// 16-byte-per-pixel staging texture): copies on the host, where the software blit would
+    /// first download the source and wait for the host GPU. False when it doesn't apply.
+    bool CopyBlocks(const Tegra::Engines::Fermi2D::Surface& dst,
+                    const Tegra::Engines::Fermi2D::Surface& src,
+                    const Tegra::Engines::Fermi2D::Config& copy);
 
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
@@ -478,6 +512,8 @@ private:
     DAddr virtual_invalid_space{};
 
     bool has_deleted_images = false;
+    /// Shared by every cache, so ids kept from an earlier one (the game before) never match
+    static inline u64 view_epoch = 0;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
     u64 minimum_memory;
@@ -534,6 +570,7 @@ private:
     ::Common::unordered_map<GPUVAddr, ImageAllocId> image_allocs_table;
 
     Common::ScratchBuffer<u8> swizzle_data_buffer;
+    std::vector<ImageId> software_blit_images; ///< textures SoftwareBlit keeps loaded during the blit
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
 
     u64 modification_tick = 0;

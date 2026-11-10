@@ -33,6 +33,10 @@ add_executable(composite_completion_test video_core/composite_completion_standal
 target_include_directories(composite_completion_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
 add_test(NAME composite_completion_test COMMAND composite_completion_test)
 
+add_executable(subrect_runs_test video_core/subrect_runs_standalone.cpp)
+target_include_directories(subrect_runs_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+add_test(NAME subrect_runs_test COMMAND subrect_runs_test)
+
 # needed for vma
 if (NOT MSVC)
     target_compile_options(tests PRIVATE

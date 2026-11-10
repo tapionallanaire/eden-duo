@@ -103,9 +103,7 @@ void BufferCache<P>::TickFrame() {
     channel_state->uniform_buffer_skip_cache_size = skip_preferred ? DEFAULT_SKIP_CACHE_SIZE : 0;
 
     // If we can obtain the memory info, use it instead of the estimate.
-    if (runtime.CanReportMemoryUsage()) {
-        total_used_memory = runtime.GetDeviceMemoryUsage();
-    }
+    // Own tally, not the device total (see TextureCache::TickFrame).
     if (total_used_memory >= minimum_memory) {
         RunGarbageCollector();
     }

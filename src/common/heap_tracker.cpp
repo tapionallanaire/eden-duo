@@ -217,6 +217,10 @@ void HeapTracker::RebuildSeparateHeapAddressSpace() {
     std::size_t const evict_count = m_resident_map_count - desired_count;
     auto it = m_resident_mappings.begin();
 
+    // Every rebuild is a hitch: the evicted maps fault back in one by one.
+    LOG_INFO(HW_Memory, "Separate heap rebuild: evicting {} of {} resident maps ({} total)",
+             evict_count, m_resident_map_count, m_map_count);
+
     for (size_t i = 0; i < evict_count && it != m_resident_mappings.end(); i++) {
         // Unmark and unmap.
         it->is_resident = false;

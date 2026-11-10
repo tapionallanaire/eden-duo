@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include "common/thread_worker.h"
@@ -35,6 +36,9 @@ namespace Vulkan {
 
 struct GraphicsPipelineCacheKey {
     std::array<u64, 6> unique_hashes;
+    /// Handle-table descriptor array sizes of this variant: 4 bits per table (log2, 2..10) in
+    /// stage/descriptor order, 32 tables; all zero = the base pipeline (every table at the cap).
+    std::array<u64, 2> table_buckets;
     FixedPipelineState state;
 
     size_t Hash() const noexcept;
@@ -46,7 +50,7 @@ struct GraphicsPipelineCacheKey {
     }
 
     size_t Size() const noexcept {
-        return sizeof(unique_hashes) + state.Size();
+        return sizeof(unique_hashes) + sizeof(table_buckets) + state.Size();
     }
 };
 static_assert(std::has_unique_object_representations_v<GraphicsPipelineCacheKey>);
@@ -116,13 +120,27 @@ public:
         return configure_func(this, is_indexed);
     }
 
+    [[nodiscard]] const GraphicsPipelineCacheKey& CacheKey() const noexcept {
+        return key;
+    }
+
+    /// A base pipeline with handle tables: only its shader infos exist (TableBuckets() picks the
+    /// variant that is drawn with), no layouts, modules or VkPipeline were built.
+    [[nodiscard]] bool IsTemplate() const noexcept {
+        return is_template;
+    }
+
+    /// The table_buckets key of the variant that fits the handle tables bound right now.
+    /// (The engine pointers are passed: a fresh pipeline has none until SetEngine.)
+    [[nodiscard]] std::array<u64, 2> TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
+                                                  Tegra::MemoryManager& gpu_memory_) const;
+
     [[nodiscard]] GraphicsPipeline* Next(const GraphicsPipelineCacheKey& current_key) noexcept {
         if (key == current_key) {
             return this;
         }
-        const auto it{std::find(transition_keys.begin(), transition_keys.end(), current_key)};
-        return it != transition_keys.end() ? transitions[std::distance(transition_keys.begin(), it)]
-                                           : nullptr;
+        const auto it{transitions.find(current_key)};
+        return it != transitions.end() ? it->second : nullptr;
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
@@ -167,8 +185,9 @@ private:
 
     bool (*configure_func)(GraphicsPipeline*, bool){};
 
-    std::vector<GraphicsPipelineCacheKey> transition_keys;
-    std::vector<GraphicsPipeline*> transitions;
+    /// Pipelines drawn right after this one. Hashed: the list search of their keys ran on every
+    /// draw that changed pipeline (a fifth of the GPU thread in Hogwarts Legacy).
+    std::unordered_map<GraphicsPipelineCacheKey, GraphicsPipeline*> transitions;
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
@@ -195,6 +214,7 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    bool is_template{};
     /// The build runs once, on whichever thread claims it first.
     std::function<void()> build_func;
     std::atomic_bool build_claimed{false};

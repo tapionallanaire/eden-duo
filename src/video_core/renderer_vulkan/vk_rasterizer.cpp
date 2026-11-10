@@ -878,7 +878,7 @@ void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::Cache
     }
     if (True(which & VideoCommon::CacheType::TextureCache)) {
         std::scoped_lock lock{texture_cache.mutex};
-        texture_cache.WriteMemory(addr, size);
+        texture_cache.WriteMemory(addr, size, true);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -1126,6 +1126,13 @@ bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surf
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
+}
+
+void RasterizerVulkan::SoftwareSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& dst,
+                                           const Tegra::Engines::Fermi2D::Config& copy_config,
+                                           bool done) {
+    std::scoped_lock lock{texture_cache.mutex};
+    texture_cache.SoftwareBlit(dst, copy_config, done);
 }
 
 Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() {

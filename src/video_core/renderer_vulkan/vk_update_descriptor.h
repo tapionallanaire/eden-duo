@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstring>
+#include <span>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -40,7 +42,9 @@ class UpdateDescriptorQueue final {
     static constexpr size_t FRAMES_IN_FLIGHT = 8;
 
 public:
-    static constexpr size_t GUEST_FRAME_PAYLOAD_SIZE = 0x80000;
+    // Hogwarts Legacy's entrance hall reached 523,703 of 524,288 entries in one frame (1,400
+    // draws with handle tables); an overflow resets the cursor and that frame binds garbage.
+    static constexpr size_t GUEST_FRAME_PAYLOAD_SIZE = 0xC0000;
     static constexpr size_t COMPUTE_FRAME_PAYLOAD_SIZE = 0x20000;
 
     explicit UpdateDescriptorQueue(const Device& device_, size_t frame_payload_size_,
@@ -65,6 +69,16 @@ public:
             .imageView = image_view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         };
+    }
+
+    /// Where the next entry goes; with AddEntries, lets a caller keep and replay a run of entries
+    [[nodiscard]] const DescriptorUpdateEntry* Cursor() const noexcept {
+        return payload_cursor;
+    }
+
+    void AddEntries(std::span<const DescriptorUpdateEntry> entries) {
+        std::memcpy(payload_cursor, entries.data(), entries.size_bytes());
+        payload_cursor += entries.size();
     }
 
     void AddImage(VkImageView image_view) {

@@ -23,6 +23,12 @@ namespace Vulkan {
 constexpr size_t SETS_GROW_RATE = 16;
 constexpr s32 SCORE_THRESHOLD = 3;
 
+// A descriptor pool is one driver allocation sized for every descriptor it can hold (Turnip: 64 bytes
+// each, 128 per combined image sampler), so a set with 1000-entry texture tables costs over 100 KiB.
+// At the usual 64 sets per pool Hogwarts Legacy held 1.3 GiB of pools, most of it never used: banks
+// of such sets get pools of one batch of sets.
+constexpr s32 BIG_SET_SCORE = 256;
+
 struct DescriptorBank {
     DescriptorBankInfo info;
     std::vector<vk::DescriptorPool> pools;
@@ -61,7 +67,8 @@ static DescriptorBankInfo MakeBankInfo(std::span<const Shader::Info> infos) {
 static void AllocatePool(const Device& device, DescriptorBank& bank) {
     std::array<VkDescriptorPoolSize, 6> pool_sizes;
     size_t pool_cursor{};
-    const u32 sets_per_pool = device.GetSetsPerPool();
+    const u32 sets_per_pool = bank.info.score > BIG_SET_SCORE ? static_cast<u32>(SETS_GROW_RATE)
+                                                              : device.GetSetsPerPool();
     const auto add = [&](VkDescriptorType type, u32 count) {
         if (count > 0) {
             pool_sizes[pool_cursor++] = {
@@ -106,10 +113,16 @@ vk::DescriptorSets DescriptorAllocator::AllocateDescriptors(size_t count) {
     VkDescriptorSetAllocateInfo allocate_info{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .pNext = nullptr,
-        .descriptorPool = *bank->pools.back(),
+        .descriptorPool = VK_NULL_HANDLE,
         .descriptorSetCount = static_cast<u32>(count),
         .pSetLayouts = layouts.data(),
     };
+    // The first pool is made here and not with the bank: a pipeline that is built (from the disk
+    // cache at boot) but never draws then costs no descriptor memory.
+    if (bank->pools.empty()) {
+        AllocatePool(*device, *bank);
+    }
+    allocate_info.descriptorPool = *bank->pools.back();
     vk::DescriptorSets new_sets = bank->pools.back().Allocate(allocate_info);
     if (!new_sets.IsOutOfPoolMemory()) {
         return new_sets;
@@ -155,7 +168,6 @@ DescriptorBank& DescriptorPool::Bank(const Device& device, const DescriptorBankI
 
     auto& bank = *banks.emplace_back(std::make_unique<DescriptorBank>());
     bank.info = reqs;
-    AllocatePool(device, bank);
     return bank;
 }
 
