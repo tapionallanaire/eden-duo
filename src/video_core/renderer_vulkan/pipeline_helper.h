@@ -350,16 +350,39 @@ public:
     std::array<f32, 4> words{};
 };
 
+/// One handle table's resolved bindings. Hogwarts Legacy binds about 1500 tables a frame outdoors
+/// (310,000 descriptors) and only 130 of them differ: the first draw of a frame that binds a table
+/// resolves it, the later ones copy the result.
+struct HandleTableBindings {
+    std::vector<VideoCommon::ImageViewInOut> views;
+    std::vector<VideoCommon::SamplerId> samplers;
+    std::vector<DescriptorUpdateEntry> entries; ///< what the first push wrote
+    bool is_rescaled{};
+    bool resolved{}; ///< views hold ids
+    bool pushed{};   ///< entries are filled
+};
+
+/// tables: one pointer per texture descriptor (null = not a reusable table), or null for none
 inline void PushImageDescriptors(TextureCache& texture_cache,
                                  GuestDescriptorQueue& guest_descriptor_queue,
                                  const Shader::Info& info, RescalingPushConstant& rescaling,
                                  const VideoCommon::SamplerId*& samplers,
-                                 const VideoCommon::ImageViewInOut*& views) {
+                                 const VideoCommon::ImageViewInOut*& views,
+                                 HandleTableBindings* const** tables = nullptr) {
     const u32 num_texture_buffers = Shader::NumDescriptors(info.texture_buffer_descriptors);
     const u32 num_image_buffers = Shader::NumDescriptors(info.image_buffer_descriptors);
     views += num_texture_buffers;
     views += num_image_buffers;
     for (const auto& desc : info.texture_descriptors) {
+        HandleTableBindings* const table{tables ? *((*tables)++) : nullptr};
+        if (table && table->pushed) {
+            guest_descriptor_queue.AddEntries(table->entries);
+            rescaling.PushTexture(table->is_rescaled);
+            views += desc.count;
+            samplers += desc.count;
+            continue;
+        }
+        const DescriptorUpdateEntry* const first_entry{guest_descriptor_queue.Cursor()};
         bool is_rescaled{};
         // Handle-table arrays are mostly empty slots past the end of their constant buffer
         // (Hogwarts Legacy: up to 1024 per table, a few dozen used). Write those as one cached
@@ -409,6 +432,11 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             is_rescaled |= element_rescaled;
         }
         rescaling.PushTexture(is_rescaled);
+        if (table) {
+            table->entries.assign(first_entry, guest_descriptor_queue.Cursor());
+            table->is_rescaled = is_rescaled;
+            table->pushed = true;
+        }
     }
     for (const auto& desc : info.image_descriptors) {
         bool is_rescaled{};

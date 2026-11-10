@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <unordered_map>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -20,6 +21,7 @@
 #include <bit>
 
 #include "common/alignment.h"
+#include "common/cityhash.h"
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -409,6 +411,27 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     texture_cache.SynchronizeDescriptors(false);
 
+    // Handle tables resolved earlier in the frame (see HandleTableBindings). Only the GPU thread
+    // configures draws, so a static cache (one per pipeline specialisation) needs no lock.
+    struct TableCache {
+        u64 epoch{~0ULL};
+        std::unordered_map<u64, HandleTableBindings> tables;
+    };
+    static TableCache table_cache;
+    if (table_cache.epoch != texture_cache.ViewEpoch()) {
+        table_cache.epoch = texture_cache.ViewEpoch();
+        table_cache.tables.clear();
+    }
+    struct PendingTable {
+        HandleTableBindings* table;
+        size_t first_view;
+        size_t first_sampler;
+        u32 count;
+    };
+    // One per texture descriptor, in the order PushImageDescriptors walks them
+    boost::container::small_vector<HandleTableBindings*, 32> stage_tables;
+    boost::container::small_vector<PendingTable, 8> pending_tables;
+
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
 
     const auto& regs{maxwell3d->regs};
@@ -501,6 +524,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            stage_tables.push_back(nullptr);
             if (desc.index_program != 0) {
                 // The table index is a per-draw constant: evaluate it and bind that element (one
                 // per Phi candidate) instead of the table.
@@ -558,6 +582,26 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
                                                       desc.secondary_cbuf_offset)
                                 << desc.secondary_shift_left;
+                }
+                const std::array<u32, 10> table_params{
+                    desc.count, bound, u32{desc.size_shift}, u32{desc.shift_left}, secondary,
+                    u32{desc.live_stride}, u32{desc.live_phase}, static_cast<u32>(desc.type),
+                    u32{desc.is_depth}, u32{via_header_index}};
+                const u64 table_key{Common::CityHash64WithSeed(
+                    reinterpret_cast<const char*>(table.data()), table.size() * sizeof(u32),
+                    Common::CityHash64(reinterpret_cast<const char*>(table_params.data()),
+                                       sizeof(table_params)))};
+                const auto [table_it, is_new_table]{table_cache.tables.try_emplace(table_key)};
+                HandleTableBindings& cached{table_it->second};
+                if (cached.resolved) {
+                    views.insert(views.end(), cached.views.begin(), cached.views.end());
+                    samplers.insert(samplers.end(), cached.samplers.begin(), cached.samplers.end());
+                    stage_tables.back() = &cached;
+                    continue;
+                }
+                if (is_new_table) { // else: bound twice by this draw, or holds an aliased image
+                    pending_tables.push_back({&cached, views.size(), samplers.size(), desc.count});
+                    stage_tables.back() = &cached;
                 }
                 u32 prev_raw{};
                 u32 prev_view{};
@@ -624,6 +668,36 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
+    if (table_cache.epoch != texture_cache.ViewEpoch()) {
+        // Resolving this draw's views deleted an image: the copied ids may be stale. Resolve
+        // them all again and start the cache over.
+        for (auto& view : views) {
+            view.resolved = false;
+        }
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
+        table_cache.epoch = texture_cache.ViewEpoch();
+        table_cache.tables.clear();
+        std::ranges::fill(stage_tables, nullptr);
+        pending_tables.clear();
+    }
+    for (const PendingTable& pending : pending_tables) {
+        HandleTableBindings& cached{*pending.table};
+        const auto first{views.begin() + pending.first_view};
+        // An aliased image is synchronized with its aliases each time it is bound: keep the
+        // per-draw path for tables holding one.
+        if (std::any_of(first, first + pending.count,
+                        [&](const auto& view) { return texture_cache.HasAliases(view.id); })) {
+            std::ranges::replace(stage_tables, &cached, static_cast<HandleTableBindings*>(nullptr));
+            continue;
+        }
+        cached.views.assign(first, first + pending.count);
+        for (auto& view : cached.views) {
+            view.resolved = true;
+        }
+        cached.samplers.assign(samplers.begin() + pending.first_sampler,
+                               samplers.begin() + pending.first_sampler + pending.count);
+        cached.resolved = true;
+    }
 
     VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
     const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
@@ -696,10 +770,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
+    HandleTableBindings* const* tables_it{stage_tables.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         buffer_cache.BindHostStageBuffers(stage);
         PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage], rescaling,
-                             samplers_it, views_it);
+                             samplers_it, views_it, &tables_it);
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
             render_area.uses_render_area = true;

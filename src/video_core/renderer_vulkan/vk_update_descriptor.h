@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <cstring>
+#include <span>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -67,6 +69,16 @@ public:
             .imageView = image_view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         };
+    }
+
+    /// Where the next entry goes; with AddEntries, lets a caller keep and replay a run of entries
+    [[nodiscard]] const DescriptorUpdateEntry* Cursor() const noexcept {
+        return payload_cursor;
+    }
+
+    void AddEntries(std::span<const DescriptorUpdateEntry> entries) {
+        std::memcpy(payload_cursor, entries.data(), entries.size_bytes());
+        payload_cursor += entries.size();
     }
 
     void AddImage(VkImageView image_view) {

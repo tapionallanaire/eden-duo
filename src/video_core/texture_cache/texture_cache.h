@@ -202,6 +202,7 @@ void TextureCache<P>::OnGuestMemoryWritten(DAddr addr, size_t size, ImageId exce
 
 template <class P>
 void TextureCache<P>::TickFrame() {
+    ++view_epoch;
     // The collector works from this cache's own tally (every image adds and removes its size),
     // not from the device's total: that total also holds the buffers, which no amount of texture
     // deletion lowers. Hogwarts Legacy on the AYN Thor sat at 1.7 GB of device memory, 1.2 GB
@@ -263,6 +264,9 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         ImageViewId prev_id{};
         bool have_prev{false};
         for (ImageViewInOut& view : views) {
+            if (view.resolved) {
+                continue;
+            }
             if (have_prev && !view.blacklist && view.index == prev_index) {
                 view.id = prev_id;
                 continue;
@@ -409,6 +413,7 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
             bindings_changed = true;
         if (bindings_changed) {
             ++texture_bindings_serial;
+            ++view_epoch;
         }
     }
 }
@@ -1423,6 +1428,7 @@ void TextureCache<P>::InvalidateScale(Image& image) {
         channel_info.compute_image_table.Invalidate();
     }
     has_deleted_images = true;
+    ++view_epoch;
 }
 
 template <class P>
@@ -2505,6 +2511,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         channel_info.compute_image_table.Invalidate();
     }
     has_deleted_images = true;
+    ++view_epoch;
 }
 
 template <class P>

@@ -59,6 +59,8 @@ struct ImageViewInOut {
     u32 index{};
     bool blacklist{};
     ImageViewId id{};
+    /// The id is already set (a handle table resolved earlier in the frame): FillImageViews skips it
+    bool resolved{};
 };
 
 struct AsyncDecodeContext {
@@ -186,6 +188,22 @@ public:
 
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
+
+    /// Changes when image view ids resolved earlier may no longer hold: every frame, when an image
+    /// or view is deleted and when the descriptor tables move.
+    [[nodiscard]] u64 ViewEpoch() const noexcept {
+        return view_epoch;
+    }
+
+    /// True when a view's image has aliases, which are synchronized every time it is bound
+    [[nodiscard]] bool HasAliases(ImageViewId id) const noexcept {
+        if (!id) {
+            return false;
+        }
+        const ImageViewBase& image_view = slot_image_views[id];
+        return !image_view.IsBuffer() && image_view.image_id &&
+               !slot_images[image_view.image_id].aliased_images.empty();
+    }
 
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
@@ -478,6 +496,8 @@ private:
     DAddr virtual_invalid_space{};
 
     bool has_deleted_images = false;
+    /// Shared by every cache, so ids kept from an earlier one (the game before) never match
+    static inline u64 view_epoch = 0;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
     u64 minimum_memory;
