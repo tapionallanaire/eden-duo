@@ -969,6 +969,9 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         // The base pipeline knows its tables: draw with the variant sized for them.
         // ponytail: the base is built too though never drawn with; translate-only base later.
         const auto want{found->second->TableBuckets(*maxwell3d, *gpu_memory)};
+        if (want == std::array<u64, 2>{} && found->second->IsTemplate()) {
+            return nullptr; // tables it can't size yet (no buffers bound): nothing to draw with
+        }
         if (want != std::array<u64, 2>{}) {
             graphics_key.table_buckets = want;
             auto variant{graphics_cache.find(graphics_key)};

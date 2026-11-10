@@ -33,6 +33,9 @@ class ShaderNotify;
 
 namespace Vulkan {
 
+// HLDIAG: per-frame time in Configure (GPU thread) and descriptor set updates (scheduler thread)
+extern std::atomic<u64> hl_ns_configure, hl_ns_update, hl_n_draws, hl_ns_tables, hl_ns_fill, hl_ns_push, hl_n_table_desc;
+
 struct GraphicsPipelineCacheKey {
     std::array<u64, 6> unique_hashes;
     /// Handle-table descriptor array sizes of this variant: 4 bits per table (log2, 2..10) in
@@ -123,6 +126,12 @@ public:
         return key;
     }
 
+    /// A base pipeline with handle tables: only its shader infos exist (TableBuckets() picks the
+    /// variant that is drawn with), no layouts, modules or VkPipeline were built.
+    [[nodiscard]] bool IsTemplate() const noexcept {
+        return is_template;
+    }
+
     /// The table_buckets key of the variant that fits the handle tables bound right now.
     /// (The engine pointers are passed: a fresh pipeline has none until SetEngine.)
     [[nodiscard]] std::array<u64, 2> TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
@@ -207,6 +216,7 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    bool is_template{};
     /// The build runs once, on whichever thread claims it first.
     std::function<void()> build_func;
     std::atomic_bool build_claimed{false};
