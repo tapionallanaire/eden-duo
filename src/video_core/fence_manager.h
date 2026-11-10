@@ -72,8 +72,11 @@ public:
     }
 
     void SignalFence(std::function<void()>&& func) {
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         const bool should_flush = ShouldFlush();
+        // An immediate fence still waits when a texture download is queued behind it: the guest
+        // reads that memory as soon as the fence signals (Hogwarts Legacy's ambient lighting
+        // came out black or blown out, differently on every boot).
+        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate() || HasUncommittedDownloads();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
@@ -237,6 +240,11 @@ private:
         std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
         return texture_cache.ShouldWaitAsyncFlushes() || buffer_cache.ShouldWaitAsyncFlushes() ||
                query_cache.ShouldWaitAsyncFlushes();
+    }
+
+    bool HasUncommittedDownloads() const {
+        std::scoped_lock lock{texture_cache.mutex};
+        return texture_cache.HasUncommittedFlushes();
     }
 
     bool ShouldFlush() const {
