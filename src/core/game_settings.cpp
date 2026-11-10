@@ -310,6 +310,8 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
     Settings::values.disable_macro_hle_by_title = false;
     Settings::values.skip_buffer_downloads_by_title = false;
     Settings::values.bindless_table_max_by_title = 0;
+    Settings::values.texture_cache_expected_mib_by_title = 0;
+    Settings::values.texture_cache_critical_mib_by_title = 0;
     switch (static_cast<TitleID>(program_id)) {
         case TitleID::NinjaGaidenRagebound:
             Settings::values.use_squashed_iterated_blend = true;
@@ -354,6 +356,11 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // table per draw cost most of the frame; now the arrays are sized per pipeline
             // variant and per-draw constant indices are resolved on the CPU, so 1024 is cheap.
             Settings::values.bindless_table_max_by_title = 1024;
+            // AYN Thor (11.5 GB): the device budget lets the texture cache grow to 3.2 GB next to
+            // the game's 4 GB guest RAM; Android killed the app at 3.7-4.3 GB RSS with 1.5 GB
+            // free (entrance hall, four times on 2026-11-10). Keep the cache near 1 GB.
+            Settings::values.texture_cache_expected_mib_by_title = 1024;
+            Settings::values.texture_cache_critical_mib_by_title = 1280;
             break;
         default:
             break;

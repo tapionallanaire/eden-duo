@@ -76,6 +76,17 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
         critical_memory = DEFAULT_CRITICAL_MEMORY + 1_GiB;
         minimum_memory = 0;
     }
+    // A title's own budget (Settings::texture_cache_*_mib_by_title): smaller than the device's
+    // when the device also holds the title's guest RAM (Android).
+    if (const u32 mib = Settings::values.texture_cache_critical_mib_by_title; mib != 0) {
+        critical_memory = (std::min)(critical_memory, u64{mib} << 20);
+        expected_memory = (std::min)(expected_memory, critical_memory - 256_MiB);
+        minimum_memory = (std::min)(minimum_memory, expected_memory / 2);
+    }
+    if (const u32 mib = Settings::values.texture_cache_expected_mib_by_title; mib != 0) {
+        expected_memory = (std::min)(expected_memory, u64{mib} << 20);
+        minimum_memory = (std::min)(minimum_memory, expected_memory / 2);
+    }
 
     const bool gpu_unswizzle_enabled = Settings::values.gpu_unswizzle_enabled.GetValue();
 
@@ -197,6 +208,11 @@ void TextureCache<P>::TickFrame() {
     }
     if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
+    }
+    if ((frame_tick % 120) == 0) { // HLDIAG
+        LOG_INFO(HW_GPU, "HLDIAG texture cache: used {} MiB (minimum {}, expected {}, critical {}), device {} MiB, {} images",
+                 total_used_memory >> 20, minimum_memory >> 20, expected_memory >> 20, critical_memory >> 20,
+                 runtime.CanReportMemoryUsage() ? runtime.GetDeviceMemoryUsage() >> 20 : 0, slot_images.size());
     }
     SentenceRemovedFramebuffers();
     sentenced_images.Tick();
