@@ -228,12 +228,17 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // High keeps the picture and still holds 30.
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
-            // Immediate fences (an earlier default, against a lockstep at 26-27 FPS on the cliff
-            // overlook) let the CPU read the exposure result before the GPU wrote it: menus and
-            // bright scenes washed out white, with reactive flushing on too (entrance hall, AYN
-            // Thor and desktop). The lockstep came from the handle-table writes on the GPU
-            // thread (see bindless_table_max_by_title), which are now cheap, so fences wait.
-            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Default);
+            // High accuracy also delays fences until the host GPU is done, and the game waits on
+            // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
+            // 26-27 FPS on the cliff overlook, and at a flat 20 FPS in the entrance hall with
+            // the GPU 37 % busy. Immediate fences keep High's rendering and release the chain:
+            // 30 FPS (AYN Thor, docked 1x).
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
+            // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
+            // (menus and bright scenes washed out white). Reactive flushing read-protects
+            // GPU-written pages, so that one read faults and downloads synchronously while the
+            // other 17 fences a frame stay free. (The white and yellow blowouts of 2026-11-10 were
+            // the truncated handle tables, see bindless_table_max_by_title, not the fences.)
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
             return true;
         case TitleID::FireEmblemEngage:
