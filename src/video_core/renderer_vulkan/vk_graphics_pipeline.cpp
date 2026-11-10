@@ -348,7 +348,12 @@ GraphicsPipeline::GraphicsPipeline(
                 emit_modules = nullptr;
             }
             MakePipeline(render_pass);
+            // Nothing reads the modules once the pipeline exists, and the driver keeps a copy of
+            // each one's SPIR-V: Hogwarts Legacy builds 7,000 cached pipelines at boot, and on the
+            // AYN Thor their modules held 270 MB of native heap.
+            spv_modules = {};
         } catch (const std::exception& exception) {
+            spv_modules = {};
             // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             std::scoped_lock lock{build_mutex};
