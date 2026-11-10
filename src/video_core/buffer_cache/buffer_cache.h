@@ -79,6 +79,12 @@ void BufferCache<P>::RunGarbageCollector() {
 
 template <class P>
 void BufferCache<P>::TickFrame() {
+    { // HLDIAG
+        static u32 frames{};
+        if ((++frames % 120) == 0) {
+            LOG_INFO(HW_GPU, "HLDIAG buffer cache: used {} MiB (critical {})", total_used_memory >> 20, critical_memory >> 20);
+        }
+    }
     // Homebrew console apps don't create or bind any channels, so this will be nullptr.
     if (!channel_state) {
         return;
@@ -103,9 +109,7 @@ void BufferCache<P>::TickFrame() {
     channel_state->uniform_buffer_skip_cache_size = skip_preferred ? DEFAULT_SKIP_CACHE_SIZE : 0;
 
     // If we can obtain the memory info, use it instead of the estimate.
-    if (runtime.CanReportMemoryUsage()) {
-        total_used_memory = runtime.GetDeviceMemoryUsage();
-    }
+    // Own tally, not the device total (see TextureCache::TickFrame).
     if (total_used_memory >= minimum_memory) {
         RunGarbageCollector();
     }

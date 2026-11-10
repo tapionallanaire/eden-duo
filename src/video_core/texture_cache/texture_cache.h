@@ -191,10 +191,11 @@ void TextureCache<P>::OnGuestMemoryWritten(DAddr addr, size_t size, ImageId exce
 
 template <class P>
 void TextureCache<P>::TickFrame() {
-    // If we can obtain the memory info, use it instead of the estimate.
-    if (runtime.CanReportMemoryUsage()) {
-        total_used_memory = runtime.GetDeviceMemoryUsage();
-    }
+    // The collector works from this cache's own tally (every image adds and removes its size),
+    // not from the device's total: that total also holds the buffers, which no amount of texture
+    // deletion lowers. Hogwarts Legacy on the AYN Thor sat at 1.7 GB of device memory, 1.2 GB
+    // of it buffers, above the 1.6 GB "expected" budget: the collector deleted 6500 textures,
+    // the number did not move, and every frame re-created them at 17 FPS.
     if (total_used_memory > minimum_memory) {
         RunGarbageCollector();
     }
