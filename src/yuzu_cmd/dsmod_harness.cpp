@@ -975,6 +975,26 @@ void OnGameLoaded(Session& session, Core::System& system) {
         Settings::values.vsync_mode.SetValue(static_cast<Settings::VSyncMode>(mode));
         LOG_INFO(Frontend, "vsync mode forced to {} by EDEN_VSYNC", mode);
     }
+    // Settings a title's defaults set at boot, forced afterwards for an A/B run (the config file
+    // cannot: title defaults replace global values). EDEN_FENCE 0-3 = Default/Immediate/Balanced/
+    // Accurate, EDEN_GPU_ACCURACY 0/1 = Low/High, EDEN_REACTIVE 0/1.
+    if (const char* const v = std::getenv("EDEN_FENCE"); v != nullptr) {
+        Settings::values.gpu_fence_behavior.SetValue(
+            static_cast<Settings::GpuFenceBehavior>(std::atoi(v)));
+        LOG_INFO(Frontend, "gpu fence behavior forced to {} by EDEN_FENCE", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_GPU_ACCURACY"); v != nullptr) {
+        Settings::values.gpu_accuracy.SetValue(static_cast<Settings::GpuAccuracy>(std::atoi(v)));
+        LOG_INFO(Frontend, "gpu accuracy forced to {} by EDEN_GPU_ACCURACY", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_BINDLESS_MAX"); v != nullptr) {
+        Settings::values.bindless_table_max_by_title = static_cast<u32>(std::atoi(v));
+        LOG_INFO(Frontend, "bindless table max forced to {} by EDEN_BINDLESS_MAX", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_REACTIVE"); v != nullptr) {
+        Settings::values.use_reactive_flushing.SetValue(std::atoi(v) != 0);
+        LOG_INFO(Frontend, "reactive flushing forced to {} by EDEN_REACTIVE", std::atoi(v));
+    }
     // Same reasoning for the video decoder: a title that dies inside a cutscene needs the CPU
     // path tried against the GPU one, and the config is not a reliable place to say so.
     // 0 = off, 1 = CPU, 2 = GPU.
