@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
+#include "common/alignment.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
@@ -74,6 +77,20 @@ Result MapPhysicalMemory(Core::System& system, u64 addr, u64 size) {
                   size);
         R_THROW(ResultInvalidMemoryRegion);
     }
+
+    // Every piece mapped here becomes a host mapping of its own under NCE, and Linux allows a
+    // process 65530 of them. A game that commits its heap in scattered 4 KiB pieces (UE4: over
+    // 100000) goes past that, and the heap tracker then evicts and re-faults half of them over and
+    // over (Hogwarts Legacy: a ~1 s freeze every minute). Map the whole 256 KiB windows around the
+    // request instead, so neighbouring pages share one physically contiguous mapping. The guest
+    // sees a little more memory mapped than it asked for (about 3 %); at the memory limit the
+    // exact request is the fallback.
+    constexpr u64 MapGranule = 0x40000;
+    const u64 alias_start = GetInteger(page_table.GetAliasRegionStart());
+    const u64 start = (std::max)(Common::AlignDown(addr, MapGranule), alias_start);
+    const u64 end = (std::min)(Common::AlignUp(addr + size, MapGranule),
+                               alias_start + page_table.GetAliasRegionSize());
+    R_SUCCEED_IF(page_table.MapPhysicalMemory(start, end - start).IsSuccess());
 
     R_RETURN(page_table.MapPhysicalMemory(addr, size));
 }
