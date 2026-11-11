@@ -962,6 +962,10 @@ struct Values {
     // Don't copy GPU-written buffers back to guest memory for the running title: it never
     // reads them on the CPU (set at load, never saved).
     bool skip_buffer_downloads_by_title{};
+    // Give the running title's multisampled render targets one sample per pixel. A title that
+    // reads the samples back through a single-sample texture of the same memory then samples
+    // the render target itself instead of a copy of it (set at load, never saved).
+    bool msaa_single_sample_by_title{};
     // Most slots a texture handle table indexed at run time gets for the running title (0: the
     // default, 1024). Every slot is written for every draw (set at load, never saved).
     u32 bindless_table_max_by_title{};

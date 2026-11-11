@@ -337,6 +337,17 @@ public:
         }
     }
 
+    /// A texture of a render target kept at one sample per pixel (ImageInfo::unroll_x/y):
+    /// its own bit halves texel-fetch x, the bit 64 places on halves y.
+    /// ponytail: 2 samples per axis and the first 64 textures only; wider modes need a shift
+    /// count in the push constants.
+    void PushTexture(bool is_rescaled, bool unroll_x, bool unroll_y) noexcept {
+        if (unroll_y && texture_ptr + 2 < words.data() + Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS) {
+            texture_ptr[2] |= texture_bit;
+        }
+        PushTexture(is_rescaled || unroll_x);
+    }
+
     void PushImage(bool is_rescaled) noexcept {
         *image_ptr |= is_rescaled ? image_bit : 0u;
         image_bit <<= 1u;
@@ -398,6 +409,8 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
         }
         const DescriptorUpdateEntry* const first_entry{guest_descriptor_queue.Cursor()};
         bool is_rescaled{};
+        bool unroll_x{};
+        bool unroll_y{};
         // Handle-table arrays are mostly empty slots past the end of their constant buffer
         // (Hogwarts Legacy: up to 1024 per table, a few dozen used). Write those as one cached
         // null pair instead of looking each one up.
@@ -444,8 +457,10 @@ inline void PushImageDescriptors(TextureCache& texture_cache,
             }
             const bool element_rescaled{texture_cache.IsRescaling(image_view)};
             is_rescaled |= element_rescaled;
+            unroll_x |= image_view.unroll_x != 0;
+            unroll_y |= image_view.unroll_y != 0;
         }
-        rescaling.PushTexture(is_rescaled);
+        rescaling.PushTexture(is_rescaled, unroll_x, unroll_y);
         if (table) {
             table->entries.assign(first_entry, guest_descriptor_queue.Cursor());
             table->is_rescaled = is_rescaled;

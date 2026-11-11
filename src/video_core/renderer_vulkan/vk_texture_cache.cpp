@@ -177,7 +177,7 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     if (info.type == ImageType::e3D) {
         flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     }
-    const auto [samples_x, samples_y] = VideoCommon::SamplesLog2(info.num_samples);
+    const auto [samples_x, samples_y] = VideoCommon::ExtentShift(info);
     const bool allow_storage =
         info.num_samples == 1 || device.IsStorageImageMultisampleSupported();
     return VkImageCreateInfo{

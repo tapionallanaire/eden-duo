@@ -102,8 +102,8 @@ struct LevelInfo {
     };
 }
 
-[[nodiscard]] Extent3D AdjustSamplesSize(Extent3D size, s32 num_samples) {
-    const auto [samples_x, samples_y] = SamplesLog2(num_samples);
+[[nodiscard]] Extent3D AdjustSamplesSize(Extent3D size, const ImageInfo& info) {
+    const auto [samples_x, samples_y] = ExtentShift(info);
     return Extent3D{
         .width = size.width >> samples_x,
         .height = size.height >> samples_y,
@@ -776,7 +776,7 @@ boost::container::small_vector<ImageCopy, 16> MakeShrinkImageCopies(const ImageI
             .z = is_dst_3d ? base.layer : 0,
         };
         const Extent3D mip_size = AdjustMipSize(dst.size, base.level + level);
-        copy.extent = AdjustSamplesSize(mip_size, dst.num_samples);
+        copy.extent = AdjustSamplesSize(mip_size, dst);
         if (is_dst_3d) {
             copy.extent.depth = src.size.depth;
         }
@@ -817,7 +817,7 @@ boost::container::small_vector<ImageCopy, 16> MakeReinterpretImageCopies(const I
             .z = 0,
         };
         const Extent3D mip_size = AdjustMipSize(src.size, level);
-        copy.extent = AdjustSamplesSize(mip_size, src.num_samples);
+        copy.extent = AdjustSamplesSize(mip_size, src);
         if (is_3d) {
             copy.extent.depth = src.size.depth;
         }
