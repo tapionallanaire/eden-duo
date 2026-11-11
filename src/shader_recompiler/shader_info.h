@@ -12,6 +12,7 @@
 
 #include "common/common_types.h"
 #include "shader_recompiler/frontend/ir/type.h"
+#include "shader_recompiler/index_program.h"
 #include "shader_recompiler/varying_state.h"
 
 #include <boost/container/small_vector.hpp>
@@ -223,10 +224,23 @@ struct TextureDescriptor {
     // live_phase, is a multiple of live_stride (0: every element).
     u32 live_stride;
     u32 live_phase;
+    // The table is behind a storage-buffer pointer: cbuf_index/cbuf_offset hold the 64-bit GPU
+    // address of a buffer whose 8-byte elements each start with a handle word (Hogwarts Legacy's
+    // per-instance material textures). Otherwise the table is the constant buffer itself.
+    bool storage_table;
+    // 1-based index into Info::index_programs when the table index is a per-draw constant the
+    // renderer evaluates: count is then the number of candidates bound, not a table size.
+    u16 index_program;
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };
 using TextureDescriptors = boost::container::small_vector<TextureDescriptor, 12>;
+using IndexPrograms = boost::container::small_vector<IndexProgram, 2>;
+
+/// A descriptor array filled from a handle table per draw (not a resolved index)
+inline bool IsHandleTable(const TextureDescriptor& desc) noexcept {
+    return desc.count > 1 && desc.index_program == 0;
+}
 
 struct ImageDescriptor {
     TextureType type;
@@ -342,6 +356,7 @@ struct Info {
     ImageBufferDescriptors image_buffer_descriptors;
     TextureDescriptors texture_descriptors;
     ImageDescriptors image_descriptors;
+    IndexPrograms index_programs;
 };
 
 template <typename Descriptors>

@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include <ranges>
+#include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -22,6 +23,15 @@ namespace Vulkan {
 // Prefer small grow rates to avoid saturating the descriptor pool with barely used pipelines
 constexpr size_t SETS_GROW_RATE = 16;
 constexpr s32 SCORE_THRESHOLD = 3;
+
+// A descriptor pool is one driver allocation sized for every descriptor it can hold (Turnip: 64 bytes
+// each, 128 per combined image sampler), so a set with 1000-entry texture tables costs over 100 KiB.
+// At the usual 64 sets per pool Hogwarts Legacy held 1.3 GiB of pools, most of it never used: banks
+// of such sets get pools of one batch of sets.
+constexpr s32 BIG_SET_SCORE = 256;
+// Most allocators of such sets never hold more than a few (AYN Thor: 133 of 160 never grew past
+// their first 16), so they grow by a few sets at a time.
+constexpr size_t BIG_SETS_GROW_RATE = 4;
 
 struct DescriptorBank {
     DescriptorBankInfo info;
@@ -61,7 +71,8 @@ static DescriptorBankInfo MakeBankInfo(std::span<const Shader::Info> infos) {
 static void AllocatePool(const Device& device, DescriptorBank& bank) {
     std::array<VkDescriptorPoolSize, 6> pool_sizes;
     size_t pool_cursor{};
-    const u32 sets_per_pool = device.GetSetsPerPool();
+    const u32 sets_per_pool = bank.info.score > BIG_SET_SCORE ? static_cast<u32>(SETS_GROW_RATE)
+                                                              : device.GetSetsPerPool();
     const auto add = [&](VkDescriptorType type, u32 count) {
         if (count > 0) {
             pool_sizes[pool_cursor++] = {
@@ -89,16 +100,22 @@ static void AllocatePool(const Device& device, DescriptorBank& bank) {
 
 DescriptorAllocator::DescriptorAllocator(const Device& device_, MasterSemaphore& master_semaphore_,
                                          DescriptorBank& bank_, VkDescriptorSetLayout layout_)
-    : ResourcePool(master_semaphore_, SETS_GROW_RATE), device{&device_}, bank{&bank_},
+    : ResourcePool(master_semaphore_,
+                   bank_.info.score > BIG_SET_SCORE ? BIG_SETS_GROW_RATE : SETS_GROW_RATE),
+      device{&device_}, bank{&bank_},
       layout{layout_} {}
 
 VkDescriptorSet DescriptorAllocator::Commit() {
     const size_t index = CommitResource();
-    return sets[index / SETS_GROW_RATE][index % SETS_GROW_RATE];
+    return handles[index];
 }
 
 void DescriptorAllocator::Allocate(size_t begin, size_t end) {
-    sets.push_back(AllocateDescriptors(end - begin));
+    vk::DescriptorSets new_sets = AllocateDescriptors(end - begin);
+    for (size_t i = 0; i < end - begin; ++i) {
+        handles.push_back(new_sets[i]);
+    }
+    sets.push_back(std::move(new_sets));
 }
 
 vk::DescriptorSets DescriptorAllocator::AllocateDescriptors(size_t count) {
@@ -106,10 +123,16 @@ vk::DescriptorSets DescriptorAllocator::AllocateDescriptors(size_t count) {
     VkDescriptorSetAllocateInfo allocate_info{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .pNext = nullptr,
-        .descriptorPool = *bank->pools.back(),
+        .descriptorPool = VK_NULL_HANDLE,
         .descriptorSetCount = static_cast<u32>(count),
         .pSetLayouts = layouts.data(),
     };
+    // The first pool is made here and not with the bank: a pipeline that is built (from the disk
+    // cache at boot) but never draws then costs no descriptor memory.
+    if (bank->pools.empty()) {
+        AllocatePool(*device, *bank);
+    }
+    allocate_info.descriptorPool = *bank->pools.back();
     vk::DescriptorSets new_sets = bank->pools.back().Allocate(allocate_info);
     if (!new_sets.IsOutOfPoolMemory()) {
         return new_sets;
@@ -140,6 +163,20 @@ DescriptorAllocator DescriptorPool::Allocator(const Device& device, Scheduler& s
     return DescriptorAllocator(device, scheduler.GetMasterSemaphore(), Bank(device, info), layout);
 }
 
+DescriptorAllocator& DescriptorPool::SharedAllocator(const Device& device, Scheduler& scheduler,
+                                                     const DescriptorLayoutBuilder& builder,
+                                                     std::span<const Shader::Info> infos) {
+    std::scoped_lock lock{shared_mutex};
+    auto [it, inserted] = shared_allocators.try_emplace(builder.LayoutKey());
+    SharedAllocatorEntry& entry = it->second;
+    if (inserted) {
+        entry.layout = builder.CreateDescriptorSetLayout(false);
+        entry.allocator = std::make_unique<DescriptorAllocator>(
+            Allocator(device, scheduler, *entry.layout, infos));
+    }
+    return *entry.allocator;
+}
+
 DescriptorBank& DescriptorPool::Bank(const Device& device, const DescriptorBankInfo& reqs) {
     std::shared_lock read_lock{banks_mutex};
     const auto it = std::ranges::find_if(bank_infos, [&reqs](const DescriptorBankInfo& bank) {
@@ -155,7 +192,6 @@ DescriptorBank& DescriptorPool::Bank(const Device& device, const DescriptorBankI
 
     auto& bank = *banks.emplace_back(std::make_unique<DescriptorBank>());
     bank.info = reqs;
-    AllocatePool(device, bank);
     return bank;
 }
 

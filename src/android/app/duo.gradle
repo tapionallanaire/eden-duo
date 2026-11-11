@@ -19,7 +19,7 @@ android {
         applicationId = 'com.tapionallanaire.duetplus'
         // Duet Plus release version (shown to users); versionCode stays upstream's time-based
         // value so every new build installs as an update.
-        versionName = '1.1.5'
+        versionName = '1.1.15'
 
         externalNativeBuild {
             cmake {
@@ -96,3 +96,38 @@ dependencies {
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20240303'
 }
+
+// Save sync runs Syncthing as a child process (duo/sync/SaveSync.kt). The arm64 binary comes from
+// Syncthing-Fork's release APK (github.com/researchxxl/syncthing-android, MPL-2.0; Syncthing source:
+// github.com/syncthing/syncthing), built for Android with its network-interface fixes. Pinned by
+// hash; bump the version and hash together. Calamansi pins the same APK.
+def syncthingApk = 'com.github.catfriend1.syncthingfork_release_v2.1.7.0_arm64-v8a.apk'
+def syncthingSha256 = '222a7860f2ad21f2bbf4782fcf16c2150b0c1dea60a1aae33f44e2f4d07371c1'
+def syncthingJniLibs = layout.buildDirectory.dir('syncthingJniLibs').get().asFile
+def fetchSyncthing = tasks.register('fetchSyncthing') {
+    def apk = layout.buildDirectory.file("tmp/$syncthingApk").get().asFile
+    inputs.property('sha256', syncthingSha256)
+    outputs.file(new File(syncthingJniLibs, 'arm64-v8a/libsyncthing.so'))
+    doLast {
+        if (!apk.isFile()) {
+            apk.parentFile.mkdirs()
+            new URL("https://github.com/researchxxl/syncthing-android/releases/download/v2.1.7.0/$syncthingApk")
+                .withInputStream { input -> apk.withOutputStream { it << input } }
+        }
+        def sha = java.security.MessageDigest.getInstance('SHA-256').digest(apk.bytes).encodeHex().toString()
+        if (sha != syncthingSha256) {
+            apk.delete()
+            throw new GradleException("$syncthingApk: SHA-256 $sha, expected $syncthingSha256")
+        }
+        project.copy {
+            from(zipTree(apk)) {
+                include 'lib/arm64-v8a/libsyncthingnative.so'
+                eachFile { it.relativePath = new RelativePath(true, 'arm64-v8a', 'libsyncthing.so') }
+                includeEmptyDirs = false
+            }
+            into syncthingJniLibs
+        }
+    }
+}
+android.sourceSets.getByName('main').jniLibs.srcDir(syncthingJniLibs)
+tasks.named('preBuild') { dependsOn fetchSyncthing }

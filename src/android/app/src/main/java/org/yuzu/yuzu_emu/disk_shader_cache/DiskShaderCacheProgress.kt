@@ -33,16 +33,39 @@ object DiskShaderCacheProgress {
         emulationActivity.runOnUiThread {
             when (LoadCallbackStage.values()[stage]) {
                 LoadCallbackStage.Prepare -> prepareViewModel()
-                LoadCallbackStage.Build -> emulationViewModel.updateProgress(
-                    emulationActivity.getString(R.string.building_shaders),
-                    progress,
-                    max
-                )
+                LoadCallbackStage.Build -> {
+                    // Eden Duo: the last report a compile run gives is its final built/total, which
+                    // is what its toast says (see EmulationFragment).
+                    org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt = progress
+                    org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal = max
+                    emulationViewModel.updateProgress(
+                        emulationActivity.getString(R.string.building_shaders),
+                        progress,
+                        max
+                    )
+                }
 
-                LoadCallbackStage.Complete -> {}
+                LoadCallbackStage.Complete -> {
+                    // Eden Duo: a compile run is over once the plan (and, with Compile max, the
+                    // shader combinations) is compiled and the driver cache is written; stop the
+                    // game, which has only shown its loading frames, through the normal stop path.
+                    if (org.yuzu.yuzu_emu.utils.ShaderRuns.compilingNow) {
+                        Log.info("[ShaderRuns] compile finished, stopping the run")
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                            { NativeLibrary.stopEmulation() },
+                            COMPILE_STOP_DELAY_MS
+                        )
+                    }
+                }
             }
         }
     }
+
+    /**
+     * Eden Duo: how long a compile run lets the game live after the plan is compiled. A few
+     * presented frames settle the GPU thread and the second screen, which their teardown expects.
+     */
+    private const val COMPILE_STOP_DELAY_MS = 1200L
 
     // Equivalent to VideoCore::LoadCallbackStage
     enum class LoadCallbackStage {

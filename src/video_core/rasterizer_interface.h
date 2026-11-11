@@ -191,6 +191,12 @@ public:
         return false;
     }
 
+    /// Called around a software surface copy into dst (done: false before it, true after), so
+    /// the rasterizer can update dst's texture in place instead of reloading it
+    virtual void SoftwareSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& dst,
+                                     const Tegra::Engines::Fermi2D::Config& copy_config,
+                                     bool done) {}
+
     [[nodiscard]] virtual Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() = 0;
 
     virtual void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,

@@ -181,6 +181,8 @@ class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInf
     static constexpr u32 CACHING_PAGEBITS = 16;
 #endif
     static constexpr u64 CACHING_PAGESIZE = u64{1} << CACHING_PAGEBITS;
+    /// Pages after a CPU write marked dirty with it (see WriteMemory)
+    static constexpr u64 CPU_WRITE_WINDOW_PAGES = 8;
 
     static constexpr bool IS_OPENGL = P::IS_OPENGL;
     static constexpr bool HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS =

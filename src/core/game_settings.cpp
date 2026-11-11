@@ -236,15 +236,27 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.use_asynchronous_gpu_emulation, true);
             // High accuracy also delays fences until the host GPU is done, and the game waits on
             // one per command list (18 a frame): guest, GPU thread and GPU ran in lockstep at
-            // 26-27 FPS on the cliff overlook with every thread under 60 % busy. Immediate fences
-            // keep High's rendering and release the chain: 30 FPS there, every frame 4 refreshes
-            // (AYN Thor, docked 1x).
+            // 26-27 FPS on the cliff overlook, and at a flat 20 FPS in the entrance hall with
+            // the GPU 37 % busy. Immediate fences keep High's rendering and release the chain:
+            // 30 FPS (AYN Thor, docked 1x).
             DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Immediate);
             // Immediate fences alone let the CPU read the exposure result before the GPU wrote it
             // (menus and bright scenes washed out white). Reactive flushing read-protects
             // GPU-written pages, so that one read faults and downloads synchronously while the
-            // other 17 fences a frame stay free: picture correct, 27-29 FPS on the overlook.
+            // other 17 fences a frame stay free. (The white and yellow blowouts of 2026-11-10 were
+            // the truncated handle tables, see bindless_table_max_by_title, not the fences.)
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            // AYN Thor (11.5 GB, zram swap, swappiness 100): the device budget lets the texture
+            // cache grow to 3.2 GB next to the game's 4 GB guest RAM and 0.5 GB of buffers; the
+            // kernel then swaps the guest to zram and lmkd kills the app on the stalls (seven
+            // times on 2026-11-10, at 3.4-4.7 GB RSS, once with 4 GB still free). Keep the
+            // cache near 1.3 GB; the collector works from the cache's own tally.
+            Settings::values.texture_cache_expected_mib_by_title = 1280;
+            Settings::values.texture_cache_critical_mib_by_title = 1536;
+            // Each 64 MB block the driver allocated while the game streamed cost the kernel a
+            // memory compaction storm (compact_stall +6,000-14,800 per 2 s) and lmkd killed the
+            // app on the stalls, twice within a minute of launching. Reserve the GPU memory once.
+            Settings::values.gpu_memory_pinned_mib_by_title = 1536;
             return true;
         case TitleID::FireEmblemEngage:
         case TitleID::DragonQuestVIIReimagined:
@@ -264,6 +276,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
 } // namespace
 
 void LoadBootOverrides(std::uint64_t program_id) {
+    // Read when the renderer is built (texture cache budgets, the pinned device memory pool),
+    // so they are set here, before it, unlike the *_by_title values of LoadOverrides.
+    Settings::values.texture_cache_expected_mib_by_title = 0;
+    Settings::values.texture_cache_critical_mib_by_title = 0;
+    Settings::values.gpu_memory_pinned_mib_by_title = 0;
     TitleSettings(program_id, false);
 #ifdef __ANDROID__
     if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && IsAdreno6xx()) {
@@ -354,10 +371,11 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             Settings::values.skip_buffer_downloads_by_title = true;
             break;
         case TitleID::HogwartsLegacy:
-            // Its materials index texture handle tables in 256-384 byte constant buffers (at most
-            // 48 handles). At 1024 slots per table the GPU thread spent most of each frame writing
-            // empty ones: 17-25 FPS uncapped in the opening cave on a desktop, 40-52 at 64.
-            Settings::values.bindless_table_max_by_title = 64;
+            // Its material handle tables hold up to 800 entries; a 64 cap truncated them (black
+            // roughness map, chrome world, blown-out reflection capture). Writing 1024 slots per
+            // table per draw cost most of the frame; now the arrays are sized per pipeline
+            // variant and per-draw constant indices are resolved on the CPU, so 1024 is cheap.
+            Settings::values.bindless_table_max_by_title = 1024;
             break;
         default:
             break;

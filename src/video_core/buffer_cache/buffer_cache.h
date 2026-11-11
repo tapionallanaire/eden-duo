@@ -103,9 +103,7 @@ void BufferCache<P>::TickFrame() {
     channel_state->uniform_buffer_skip_cache_size = skip_preferred ? DEFAULT_SKIP_CACHE_SIZE : 0;
 
     // If we can obtain the memory info, use it instead of the estimate.
-    if (runtime.CanReportMemoryUsage()) {
-        total_used_memory = runtime.GetDeviceMemoryUsage();
-    }
+    // Own tally, not the device total (see TextureCache::TickFrame).
     if (total_used_memory >= minimum_memory) {
         RunGarbageCollector();
     }
@@ -131,7 +129,23 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size) {
         ClearDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);
     }
-    memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+    // Games fill their per-frame buffers front to back, and every page of a tracked buffer the CPU
+    // touches costs a fault and a protection change (on the AYN Thor an mprotect with a TLB flush
+    // over all cores: bursts of them are 0.1-0.3 s hitches in Hogwarts Legacy). Mark the pages
+    // after the write dirty too, up to a small window inside the same buffer, unless the GPU wrote
+    // them: a page never written by the CPU is then uploaded once more than needed, but the next
+    // pages of a sequential write fault no more.
+    const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+    DAddr widened_end = page_end;
+    if (const BufferId buffer_id = page_table[device_addr >> CACHING_PAGEBITS]; buffer_id) {
+        const Buffer& buffer = slot_buffers[buffer_id];
+        widened_end = (std::min)(page_end + (CPU_WRITE_WINDOW_PAGES - 1) * DEVICE_PAGESIZE,
+                                 buffer.CpuAddr() + buffer.SizeBytes());
+        if (widened_end > page_end && memory_tracker.IsRegionGpuModified(page_end, widened_end - page_end)) {
+            widened_end = page_end;
+        }
+    }
+    memory_tracker.MarkRegionAsCpuModified(device_addr, (std::max)(widened_end, device_addr + size) - device_addr);
 }
 
 template <class P>

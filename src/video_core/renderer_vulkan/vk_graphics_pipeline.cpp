@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <unordered_map>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -15,6 +16,12 @@
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
+#include <array>
+#include <chrono>
+#include <bit>
+
+#include "common/alignment.h"
+#include "common/cityhash.h"
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
@@ -37,6 +44,8 @@
 #endif
 
 namespace Vulkan {
+
+
 namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;
@@ -281,6 +290,26 @@ GraphicsPipeline::GraphicsPipeline(
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
 
+    // The base pipeline of shaders with handle tables is never drawn with: the variant sized to
+    // the bound tables is (PipelineCache::CurrentGraphicsPipelineSlowPath). Keep its infos only;
+    // building it too doubled the pipelines of Hogwarts Legacy (memory and compile time).
+    if (key.table_buckets == std::array<u64, 2>{} && key.unique_hashes[0] == 0) {
+        for (const auto& info : stage_infos) {
+            is_template |= std::ranges::any_of(info.texture_descriptors, Shader::IsHandleTable);
+        }
+    }
+    if (is_template) {
+        is_built = true;
+        // The deferred emit owns the translated IR of every stage (pools included): nothing
+        // will run it, so release it here or each template keeps megabytes alive for good.
+        emit_modules = nullptr;
+        spv_modules = {};
+        if (shader_notify) {
+            shader_notify->MarkShaderComplete();
+        }
+        return;
+    }
+
     DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
     uses_push_descriptor = builder.CanUsePushDescriptor();
     uses_descriptor_buffer = builder.CanUseDescriptorBuffer() && descriptor_buffer_ring.IsValid();
@@ -306,7 +335,7 @@ GraphicsPipeline::GraphicsPipeline(
             builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
         if (!uses_push_descriptor) {
             descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, stage_infos);
+                &descriptor_pool.SharedAllocator(device, scheduler, builder, stage_infos);
         }
     }
 
@@ -319,7 +348,12 @@ GraphicsPipeline::GraphicsPipeline(
                 emit_modules = nullptr;
             }
             MakePipeline(render_pass);
+            // Nothing reads the modules once the pipeline exists, and the driver keeps a copy of
+            // each one's SPIR-V: Hogwarts Legacy builds 7,000 cached pipelines at boot, and on the
+            // AYN Thor their modules held 270 MB of native heap.
+            spv_modules = {};
         } catch (const std::exception& exception) {
+            spv_modules = {};
             // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             std::scoped_lock lock{build_mutex};
@@ -369,8 +403,7 @@ void GraphicsPipeline::BuildUrgently(Common::ThreadWorker& worker) {
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
-    transition_keys.push_back(transition->key);
-    transitions.push_back(transition);
+    transitions.emplace(transition->key, transition);
 }
 
 template <typename Spec>
@@ -381,6 +414,27 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     samplers.reserve(num_textures);
 
     texture_cache.SynchronizeDescriptors(false);
+
+    // Handle tables resolved earlier in the frame (see HandleTableBindings). Only the GPU thread
+    // configures draws, so a static cache (one per pipeline specialisation) needs no lock.
+    struct TableCache {
+        u64 epoch{~0ULL};
+        std::unordered_map<u64, HandleTableBindings> tables;
+    };
+    static TableCache table_cache;
+    if (table_cache.epoch != texture_cache.ViewEpoch()) {
+        table_cache.epoch = texture_cache.ViewEpoch();
+        table_cache.tables.clear();
+    }
+    struct PendingTable {
+        HandleTableBindings* table;
+        size_t first_view;
+        size_t first_sampler;
+        u32 count;
+    };
+    // One per texture descriptor, in the order PushImageDescriptors walks them
+    boost::container::small_vector<HandleTableBindings*, 32> stage_tables;
+    boost::container::small_vector<PendingTable, 8> pending_tables;
 
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
 
@@ -424,9 +478,26 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         // get an out-of-range index, which the texture cache turns into a null view without a
         // lookup. Hogwarts Legacy indexes per-instance tables of a few hundred bytes, and resolving
         // all 1024 possible elements per draw held the GPU thread at 86 % (30 -> 20 FPS, Thor).
+        // A storage table: the constant buffer holds the table's 64-bit address; its elements are
+        // 8 bytes, the first word a handle. Base and alignment match the shader's storage offset.
+        const auto storage_table_base{[&](const Shader::TextureDescriptor& desc) -> GPUVAddr {
+            const GPUVAddr pointer{
+                gpu_memory->Read<u64>(cbufs[desc.cbuf_index].address + desc.cbuf_offset)};
+            return Common::AlignDown(pointer, static_cast<GPUVAddr>(device.GetStorageBufferAlignment()));
+        }};
         const auto bound_count{[&](const auto& desc) -> u32 {
             if (desc.count <= 1) {
                 return desc.count;
+            }
+            if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&>) {
+                if (desc.storage_table) {
+                    const GPUVAddr base{storage_table_base(desc)};
+                    if (base == 0) {
+                        return 0;
+                    }
+                    const u64 bytes{gpu_memory->GetMemoryLayoutSize(base)};
+                    return static_cast<u32>((std::min)(u64{desc.count}, bytes >> desc.size_shift));
+                }
             }
             const u32 size{cbufs[desc.cbuf_index].size};
             if (desc.cbuf_offset + sizeof(u32) > size) {
@@ -457,6 +528,47 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
         for (const auto& desc : info.texture_descriptors) {
+            stage_tables.push_back(nullptr);
+            if (desc.index_program != 0) {
+                // The table index is a per-draw constant: evaluate it and bind that element (one
+                // per Phi candidate) instead of the table.
+                const auto& table_cbuf{cbufs[desc.cbuf_index]};
+                const auto read_cbuf{[&](u32 cbuf_index, u32 offset) -> u32 {
+                    if (cbuf_index >= cbufs.size()) {
+                        return 0;
+                    }
+                    const auto& cbuf{cbufs[cbuf_index]};
+                    if (!cbuf.enabled || offset + sizeof(u32) > cbuf.size) {
+                        return 0;
+                    }
+                    return gpu_memory->Read<u32>(cbuf.address + offset);
+                }};
+                const u32 table_bound{
+                    table_cbuf.enabled && desc.cbuf_offset + sizeof(u32) <= table_cbuf.size
+                        ? ((table_cbuf.size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1
+                        : 0u};
+                u32 secondary{};
+                if (desc.has_secondary) {
+                    secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
+                                                      desc.secondary_cbuf_offset)
+                                << desc.secondary_shift_left;
+                }
+                const auto& index_program{info.index_programs[desc.index_program - 1]};
+                for (u32 candidate = 0; candidate < desc.count; ++candidate) {
+                    const u32 element{Shader::EvaluateIndexProgram(index_program, candidate, read_cbuf)};
+                    if (element >= table_bound) {
+                        views.push_back({OUT_OF_RANGE});
+                        samplers.push_back(VideoCommon::NULL_SAMPLER_ID);
+                        continue;
+                    }
+                    const u32 word{gpu_memory->Read<u32>(table_cbuf.address + desc.cbuf_offset +
+                                                         (element << desc.size_shift))};
+                    const auto handle{TexturePair((word << desc.shift_left) | secondary, via_header_index)};
+                    views.push_back({handle.first});
+                    samplers.push_back(texture_cache.GetSamplerId(handle.second, false));
+                }
+                continue;
+            }
             const u32 bound{bound_count(desc)};
             if (desc.count > 1 && bound > 0) {
                 // A handle table: read it in one block, skip the elements the shader's offset
@@ -465,13 +577,35 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 static thread_local std::vector<u32> table;
                 const u32 stride_words{(1u << desc.size_shift) / static_cast<u32>(sizeof(u32))};
                 table.resize(static_cast<size_t>(bound) * stride_words);
-                gpu_memory->ReadBlockUnsafe(cbufs[desc.cbuf_index].address + desc.cbuf_offset,
-                                            table.data(), table.size() * sizeof(u32));
+                const GPUVAddr table_addr{desc.storage_table
+                                              ? storage_table_base(desc)
+                                              : cbufs[desc.cbuf_index].address + desc.cbuf_offset};
+                gpu_memory->ReadBlockUnsafe(table_addr, table.data(), table.size() * sizeof(u32));
                 u32 secondary{};
                 if (desc.has_secondary) {
                     secondary = gpu_memory->Read<u32>(cbufs[desc.secondary_cbuf_index].address +
                                                       desc.secondary_cbuf_offset)
                                 << desc.secondary_shift_left;
+                }
+                const std::array<u32, 10> table_params{
+                    desc.count, bound, u32{desc.size_shift}, u32{desc.shift_left}, secondary,
+                    u32{desc.live_stride}, u32{desc.live_phase}, static_cast<u32>(desc.type),
+                    u32{desc.is_depth}, u32{via_header_index}};
+                const u64 table_key{Common::CityHash64WithSeed(
+                    reinterpret_cast<const char*>(table.data()), table.size() * sizeof(u32),
+                    Common::CityHash64(reinterpret_cast<const char*>(table_params.data()),
+                                       sizeof(table_params)))};
+                const auto [table_it, is_new_table]{table_cache.tables.try_emplace(table_key)};
+                HandleTableBindings& cached{table_it->second};
+                if (cached.resolved) {
+                    views.insert(views.end(), cached.views.begin(), cached.views.end());
+                    samplers.insert(samplers.end(), cached.samplers.begin(), cached.samplers.end());
+                    stage_tables.back() = &cached;
+                    continue;
+                }
+                if (is_new_table) { // else: bound twice by this draw, or holds an aliased image
+                    pending_tables.push_back({&cached, views.size(), samplers.size(), desc.count});
+                    stage_tables.back() = &cached;
                 }
                 u32 prev_raw{};
                 u32 prev_view{};
@@ -538,6 +672,36 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
     texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
+    if (table_cache.epoch != texture_cache.ViewEpoch()) {
+        // Resolving this draw's views deleted an image: the copied ids may be stale. Resolve
+        // them all again and start the cache over.
+        for (auto& view : views) {
+            view.resolved = false;
+        }
+        texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);
+        table_cache.epoch = texture_cache.ViewEpoch();
+        table_cache.tables.clear();
+        std::ranges::fill(stage_tables, nullptr);
+        pending_tables.clear();
+    }
+    for (const PendingTable& pending : pending_tables) {
+        HandleTableBindings& cached{*pending.table};
+        const auto first{views.begin() + pending.first_view};
+        // An aliased image is synchronized with its aliases each time it is bound: keep the
+        // per-draw path for tables holding one.
+        if (std::any_of(first, first + pending.count,
+                        [&](const auto& view) { return texture_cache.HasAliases(view.id); })) {
+            std::ranges::replace(stage_tables, &cached, static_cast<HandleTableBindings*>(nullptr));
+            continue;
+        }
+        cached.views.assign(first, first + pending.count);
+        for (auto& view : cached.views) {
+            view.resolved = true;
+        }
+        cached.samplers.assign(samplers.begin() + pending.first_sampler,
+                               samplers.begin() + pending.first_sampler + pending.count);
+        cached.resolved = true;
+    }
 
     VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
     const auto bind_stage_info{[&](size_t stage) LAMBDA_FORCEINLINE {
@@ -610,10 +774,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
+    HandleTableBindings* const* tables_it{stage_tables.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         buffer_cache.BindHostStageBuffers(stage);
         PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage], rescaling,
-                             samplers_it, views_it);
+                             samplers_it, views_it, &tables_it);
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
             render_area.uses_render_area = true;
@@ -647,6 +812,47 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         return false;
     }
     return ConfigureDraw(rescaling, render_area);
+}
+
+std::array<u64, 2> GraphicsPipeline::TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
+                                                  Tegra::MemoryManager& gpu_memory_) const {
+    // Hogwarts Legacy binds handle tables of 4 to 800 entries; the base pipeline declares 1024
+    // descriptors for each and the per-draw writes of those arrays cost a third of the frame.
+    // Size each array to 64, 256 or 1024 by what is bound (from the cap-free bound, so a variant
+    // sized for a small table steps up when the table grows). Three steps, not every power of
+    // two: each new size a shader meets is another pipeline to build while the player walks.
+    std::array<u64, 2> packed{};
+    if (key.unique_hashes[0] != 0) {
+        return packed; // dual vertex programs: slot order differs, keep the base
+    }
+    u32 slot{};
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        const auto& cbufs{maxwell3d_.state.shader_stages[stage].const_buffers};
+        for (const auto& desc : stage_infos[stage].texture_descriptors) {
+            if (!Shader::IsHandleTable(desc)) {
+                continue;
+            }
+            if (slot >= 32) {
+                return packed;
+            }
+            u64 bound{};
+            const auto& cbuf{cbufs[desc.cbuf_index]};
+            if (cbuf.enabled) {
+                if (desc.storage_table) {
+                    const GPUVAddr pointer{gpu_memory_.Read<u64>(cbuf.address + desc.cbuf_offset)};
+                    const GPUVAddr base{Common::AlignDown(
+                        pointer, static_cast<GPUVAddr>(device.GetStorageBufferAlignment()))};
+                    bound = base != 0 ? gpu_memory_.GetMemoryLayoutSize(base) >> desc.size_shift : 0;
+                } else if (desc.cbuf_offset + sizeof(u32) <= cbuf.size) {
+                    bound = ((cbuf.size - desc.cbuf_offset - u32{sizeof(u32)}) >> desc.size_shift) + 1;
+                }
+            }
+            const u32 bucket{bound <= 64 ? 6u : bound <= 256 ? 8u : 10u};
+            packed[slot / 16] |= u64{bucket} << (4 * (slot % 16));
+            ++slot;
+        }
+    }
+    return packed;
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
@@ -758,7 +964,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);
         } else if (update_descriptors) {
-            const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
+            const VkDescriptorSet descriptor_set{descriptor_allocator->Commit()};
             const vk::Device& dev{device.GetLogical()};
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout, 0,

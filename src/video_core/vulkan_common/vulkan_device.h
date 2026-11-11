@@ -20,6 +20,7 @@
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 VK_DEFINE_HANDLE(VmaAllocator)
+VK_DEFINE_HANDLE(VmaPool)
 
 // Define all features which may be used by the implementation here.
 // Vulkan version in the macro describes the minimum version required for feature availability.
@@ -262,6 +263,11 @@ public:
     /// Returns the VMA allocator.
     VmaAllocator GetAllocator() const {
         return allocator;
+    }
+
+    /// Pool of device-local memory reserved at start for the running title, or null
+    VmaPool GetPinnedPool() const {
+        return pinned_pool;
     }
 
     /// Returns the logical device.
@@ -1152,6 +1158,7 @@ private:
 private:
     VkInstance instance;         ///< Vulkan instance.
     VmaAllocator allocator;      ///< VMA allocator.
+    VmaPool pinned_pool{};       ///< Settings::gpu_memory_pinned_mib_by_title
     vk::DeviceDispatch dld;      ///< Device function pointers.
     vk::PhysicalDevice physical; ///< Physical device.
     vk::Device logical;          ///< Logical device.

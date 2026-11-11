@@ -766,6 +766,44 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 
     vk::Check(vmaCreateAllocator(&allocator_info, &allocator));
 
+    // A title's reserved device-local memory (Settings::gpu_memory_pinned_mib_by_title): the
+    // blocks exist from here on and are never freed, so the driver asks the kernel for large
+    // allocations once, at start, not while the title streams textures.
+    if (const u32 pinned_mib = Settings::values.gpu_memory_pinned_mib_by_title; pinned_mib != 0) {
+        const VmaAllocationCreateInfo find_ci{
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        };
+        u32 memory_type{};
+        const VkBufferCreateInfo probe_ci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = 1_MiB,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        if (vmaFindMemoryTypeIndexForBufferInfo(allocator, &probe_ci, &find_ci, &memory_type) ==
+            VK_SUCCESS) {
+            constexpr VkDeviceSize BLOCK_SIZE = 128_MiB;
+            const VmaPoolCreateInfo pool_ci{
+                .memoryTypeIndex = memory_type,
+                .flags = 0,
+                .blockSize = BLOCK_SIZE,
+                .minBlockCount = (pinned_mib * 1_MiB + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                .maxBlockCount = 0,
+                .priority = 1.0f,
+                .minAllocationAlignment = 0,
+                .pMemoryAllocateNext = nullptr,
+            };
+            if (vmaCreatePool(allocator, &pool_ci, &pinned_pool) != VK_SUCCESS) {
+                LOG_WARNING(Render_Vulkan, "Could not reserve {} MiB of device memory", pinned_mib);
+                pinned_pool = nullptr;
+            } else {
+                LOG_INFO(Render_Vulkan, "Reserved {} MiB of device memory (type {}) for the title",
+                         pool_ci.minBlockCount * (BLOCK_SIZE >> 20), memory_type);
+            }
+        }
+    }
+
     owns_static_pipeline_cache = surface != VkSurfaceKHR{};
     LoadStaticPipelineCache();
 
@@ -776,6 +814,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 Device::~Device() {
     SaveStaticPipelineCache();
     ShutdownGPULogging();
+    if (pinned_pool != nullptr) {
+        vmaDestroyPool(allocator, pinned_pool);
+    }
     vmaDestroyAllocator(allocator);
 }
 

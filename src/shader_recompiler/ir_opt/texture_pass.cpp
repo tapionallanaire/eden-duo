@@ -5,9 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <functional>
 #include <bit>
 #include <numeric>
 #include <optional>
+#include <string>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <limits>
@@ -40,6 +42,190 @@ constexpr u32 DESCRIPTOR_MAX_COUNT = 1024;
 u32 MaxTableDescriptors() {
     const u32 by_title = Settings::values.bindless_table_max_by_title;
     return by_title != 0 ? (std::min)(by_title, DESCRIPTOR_MAX_COUNT) : DESCRIPTOR_MAX_COUNT;
+}
+
+static bool IsMemoryLoad(IR::Opcode opcode);
+
+/// The block holding inst, or nullptr
+IR::Block* BlockOf(IR::Program& program, const IR::Inst* inst) {
+    for (IR::Block* const block : program.blocks) {
+        for (const IR::Inst& candidate : *block) {
+            if (&candidate == inst) {
+                return block;
+            }
+        }
+    }
+    return nullptr;
+}
+
+/// A table index the shader computes from constant buffers and immediates alone, as a program
+/// the renderer evaluates per draw (IndexProgram); its result is the element index, size_shift and
+/// base_elements folded in. A Phi at the root gives one candidate per operand. nullopt: the index
+/// depends on per-vertex, per-instance or memory data, or is too large.
+std::optional<IndexProgram> CompileIndexProgram(const IR::Value& offset, u32 size_shift,
+                                                u32 base_elements) {
+    IndexProgram program{};
+    size_t n{};
+    const auto push{[&](IndexOp op, u32 imm = 0) {
+        if (n >= IndexProgram::MAX_INSNS) {
+            return false;
+        }
+        program.insns[n++] = IndexInsn{op, imm};
+        return true;
+    }};
+    std::function<bool(const IR::Value&, int)> emit{[&](const IR::Value& value, int depth) -> bool {
+        if (depth > 24) {
+            return false;
+        }
+        if (value.IsImmediate()) {
+            switch (value.Type()) {
+            case IR::Type::U32:
+                return push(IndexOp::Imm, value.U32());
+            case IR::Type::F32:
+                return push(IndexOp::Imm, std::bit_cast<u32>(value.F32()));
+            default:
+                return false;
+            }
+        }
+        const IR::Inst* const inst{value.InstRecursive()};
+        const auto unary{[&](IndexOp op) { return emit(inst->Arg(0), depth + 1) && push(op); }};
+        const auto binary{[&](IndexOp op) {
+            return emit(inst->Arg(0), depth + 1) && emit(inst->Arg(1), depth + 1) && push(op);
+        }};
+        const auto ternary{[&](IndexOp op) {
+            return emit(inst->Arg(0), depth + 1) && emit(inst->Arg(1), depth + 1) &&
+                   emit(inst->Arg(2), depth + 1) && push(op);
+        }};
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::GetCbufU32:
+        case IR::Opcode::GetCbufF32:
+            if (!inst->Arg(0).IsImmediate()) {
+                return false;
+            }
+            return emit(inst->Arg(1), depth + 1) && push(IndexOp::CbufU32, inst->Arg(0).U32());
+        case IR::Opcode::BitCastU32F32:
+        case IR::Opcode::BitCastF32U32:
+            return emit(inst->Arg(0), depth + 1);
+        case IR::Opcode::PackUint2x32: {
+            if (inst->Arg(0).IsImmediate()) {
+                return false;
+            }
+            const IR::Inst* const pair{inst->Arg(0).InstRecursive()};
+            if (pair->GetOpcode() != IR::Opcode::CompositeConstructU32x2) {
+                return false;
+            }
+            return emit(pair->Arg(0), depth + 1) && emit(pair->Arg(1), depth + 1) &&
+                   push(IndexOp::Pack64);
+        }
+        case IR::Opcode::CompositeExtractU32x2: {
+            if (inst->Arg(0).IsImmediate() || !inst->Arg(1).IsImmediate()) {
+                return false;
+            }
+            const IR::Inst* const unpack{inst->Arg(0).InstRecursive()};
+            if (unpack->GetOpcode() != IR::Opcode::UnpackUint2x32) {
+                return false;
+            }
+            return emit(unpack->Arg(0), depth + 1) && push(IndexOp::Word, inst->Arg(1).U32());
+        }
+        case IR::Opcode::IAdd32:
+            return binary(IndexOp::IAdd);
+        case IR::Opcode::ISub32:
+            return binary(IndexOp::ISub);
+        case IR::Opcode::IMul32:
+            return binary(IndexOp::IMul);
+        case IR::Opcode::ShiftLeftLogical32:
+            return binary(IndexOp::Shl);
+        case IR::Opcode::ShiftRightLogical32:
+            return binary(IndexOp::Shr);
+        case IR::Opcode::ShiftRightArithmetic32:
+            return binary(IndexOp::Sar);
+        case IR::Opcode::BitwiseAnd32:
+            return binary(IndexOp::And);
+        case IR::Opcode::BitwiseOr32:
+            return binary(IndexOp::Or);
+        case IR::Opcode::BitwiseXor32:
+            return binary(IndexOp::Xor);
+        case IR::Opcode::UMin32:
+            return binary(IndexOp::UMin);
+        case IR::Opcode::UMax32:
+            return binary(IndexOp::UMax);
+        case IR::Opcode::SMin32:
+            return binary(IndexOp::SMin);
+        case IR::Opcode::SMax32:
+            return binary(IndexOp::SMax);
+        case IR::Opcode::ShiftLeftLogical64:
+            return binary(IndexOp::Shl64);
+        case IR::Opcode::ShiftRightLogical64:
+            return binary(IndexOp::Shr64);
+        case IR::Opcode::IAdd64:
+            return binary(IndexOp::Add64);
+        case IR::Opcode::FPTrunc32:
+            return unary(IndexOp::FTrunc);
+        case IR::Opcode::FPFloor32:
+            return unary(IndexOp::FFloor);
+        case IR::Opcode::FPCeil32:
+            return unary(IndexOp::FCeil);
+        case IR::Opcode::FPAbs32:
+            return unary(IndexOp::FAbs);
+        case IR::Opcode::FPNeg32:
+            return unary(IndexOp::FNeg);
+        case IR::Opcode::FPSaturate32:
+            return unary(IndexOp::FSat);
+        case IR::Opcode::FPAdd32:
+            return binary(IndexOp::FAdd);
+        case IR::Opcode::FPMul32:
+            return binary(IndexOp::FMul);
+        case IR::Opcode::FPMin32:
+            return binary(IndexOp::FMin);
+        case IR::Opcode::FPMax32:
+            return binary(IndexOp::FMax);
+        case IR::Opcode::FPClamp32:
+            return ternary(IndexOp::FClamp);
+        case IR::Opcode::ConvertU32F32:
+            return unary(IndexOp::U32F32);
+        case IR::Opcode::ConvertS32F32:
+            return unary(IndexOp::S32F32);
+        case IR::Opcode::ConvertF32U32:
+            return unary(IndexOp::F32U32);
+        case IR::Opcode::ConvertF32S32:
+            return unary(IndexOp::F32S32);
+        case IR::Opcode::BitFieldUExtract:
+            return ternary(IndexOp::BfeU);
+        case IR::Opcode::BitFieldSExtract:
+            return ternary(IndexOp::BfeS);
+        default:
+            return false;
+        }
+    }};
+    const auto candidate{[&](const IR::Value& value) {
+        if (program.num_candidates >= IndexProgram::MAX_CANDIDATES) {
+            return false;
+        }
+        program.starts[program.num_candidates] = static_cast<u8>(n);
+        // byte offset -> element index, then the rebase (texture pass base_elements)
+        if (!emit(value, 0) || !push(IndexOp::Imm, size_shift) || !push(IndexOp::Shr) ||
+            !push(IndexOp::Imm, base_elements) || !push(IndexOp::IAdd)) {
+            return false;
+        }
+        ++program.num_candidates;
+        program.starts[program.num_candidates] = static_cast<u8>(n);
+        return true;
+    }};
+    const IR::Inst* const root{offset.IsImmediate() ? nullptr : offset.InstRecursive()};
+    if (root != nullptr && root->GetOpcode() == IR::Opcode::Phi) {
+        for (size_t i = 0; i < root->NumArgs(); ++i) {
+            const IR::Value arg{root->Arg(i)};
+            if (!arg.IsImmediate() && arg.InstRecursive()->GetOpcode() == IR::Opcode::Phi) {
+                return std::nullopt;
+            }
+            if (!candidate(arg)) {
+                return std::nullopt;
+            }
+        }
+    } else if (!candidate(offset)) {
+        return std::nullopt;
+    }
+    return program;
 }
 
 u32 DynamicDescriptorSizeShift(const IR::U32& dynamic_offset) {
@@ -339,15 +525,25 @@ static inline u32 GetTextureHandleCached(Environment& env, const ConstBufferAddr
 }
 
 // Cached variants of existing helpers
+// A run-time handle names no descriptor here: a 2D colour texture, as for attribute handles.
 static inline TextureType ReadTextureTypeCached(Environment& env, const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return TextureType::Color2D;
+    }
     return env.ReadTextureType(GetTextureHandleCached(env, cbuf));
 }
 static inline TexturePixelFormat ReadTexturePixelFormatCached(Environment& env,
                                                                 const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return TexturePixelFormat::A8B8G8R8_UNORM;
+    }
     return env.ReadTexturePixelFormat(GetTextureHandleCached(env, cbuf));
 }
 static inline bool IsTexturePixelFormatIntegerCached(Environment& env,
                                                         const ConstBufferAddr& cbuf) {
+    if (cbuf.dynamic_handle) {
+        return false;
+    }
     return env.IsTexturePixelFormatInteger(GetTextureHandleCached(env, cbuf));
 }
 
@@ -365,10 +561,130 @@ static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Env
 
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info);
 
+// A value loaded from memory is not known when the shader is compiled, and the load's operands are
+// its address, not the value: a handle must never be tracked through one. Hogwarts Legacy ORs a
+// texture index loaded from a storage buffer with a sampler word (LoadStorage32(ssbo, base +
+// i * 8) | c2[0x578]); searching the load's address found the storage buffer's own address in
+// c0[0x270] and took (address << 4) as the texture: a descriptor far past the end of the TIC, so
+// the shader was compiled with whatever type and format that memory held (format 90/105 asserts).
+static bool IsMemoryLoad(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::LoadGlobalU8:
+    case IR::Opcode::LoadGlobalS8:
+    case IR::Opcode::LoadGlobalU16:
+    case IR::Opcode::LoadGlobalS16:
+    case IR::Opcode::LoadGlobal32:
+    case IR::Opcode::LoadGlobal64:
+    case IR::Opcode::LoadGlobal128:
+    case IR::Opcode::LoadStorageU8:
+    case IR::Opcode::LoadStorageS8:
+    case IR::Opcode::LoadStorageU16:
+    case IR::Opcode::LoadStorageS16:
+    case IR::Opcode::LoadStorage32:
+    case IR::Opcode::LoadStorage64:
+    case IR::Opcode::LoadStorage128:
+    case IR::Opcode::LoadLocal:
+    case IR::Opcode::LoadSharedU8:
+    case IR::Opcode::LoadSharedS8:
+    case IR::Opcode::LoadSharedU16:
+    case IR::Opcode::LoadSharedS16:
+    case IR::Opcode::LoadSharedU32:
+    case IR::Opcode::LoadSharedU64:
+    case IR::Opcode::LoadSharedU128:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// True when the value is computed from a memory load (searched to a bounded depth).
+static bool DependsOnMemoryLoad(const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return false;
+    }
+    boost::container::small_vector<const IR::Inst*, 16> visited;
+    std::queue<const IR::Inst*> queue;
+    queue.push(value.InstRecursive());
+    while (!queue.empty() && visited.size() < 256) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (IsMemoryLoad(inst->GetOpcode())) {
+            return true;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            const IR::Value arg_value{inst->Arg(arg)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (std::ranges::find(visited, arg_inst) == visited.end()) {
+                visited.push_back(arg_inst);
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return false;
+}
+
+/// A handle table in storage memory: value is LoadStorage32(ssbo, offset); word is the tracked
+/// sampler word it is ORed with. Elements are 8 bytes (two words, the handle first). A load merged
+/// by a Phi with another path is not one: binding the table there blacked out the lit materials.
+std::optional<ConstBufferAddr> StorageTable(const IR::Value& value, const std::optional<ConstBufferAddr>& word) {
+    if (value.IsImmediate() || !word || word->count != 1 || word->has_secondary ||
+        word->dynamic_handle) {
+        return std::nullopt;
+    }
+    const IR::Inst* const load{value.InstRecursive()};
+    if (load->GetOpcode() != IR::Opcode::LoadStorage32 || !load->Arg(0).IsImmediate()) {
+        return std::nullopt;
+    }
+    constexpr u32 STORAGE_ELEMENT_SHIFT{3};
+    return ConstBufferAddr{
+        .index = word->index,
+        .offset = word->offset,
+        .shift_left = 0,
+        .secondary_index = word->index,
+        .secondary_offset = word->offset,
+        .secondary_shift_left = word->shift_left,
+        .dynamic_offset = IR::U32{load->Arg(1)},
+        .count = DynamicDescriptorCount(0, STORAGE_ELEMENT_SHIFT, MaxTableDescriptors()),
+        .has_secondary = true,
+        .dynamic_handle = true,
+        .storage_table = true,
+        .storage_index = load->Arg(0).U32(),
+    };
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info) {
-    return IR::BreadthFirstSearch(value, [&env, &host_info](const IR::Inst* inst) {
-        return TryGetConstBuffer(inst, env, host_info);
-    });
+    if (value.IsImmediate()) {
+        return std::nullopt;
+    }
+    // IR::BreadthFirstSearch, except that it does not descend into memory loads.
+    boost::container::small_vector<const IR::Inst*, 8> visited;
+    std::queue<const IR::Inst*> queue;
+    queue.push(value.InstRecursive());
+    while (!queue.empty()) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (IsMemoryLoad(inst->GetOpcode())) {
+            continue;
+        }
+        if (const std::optional result = TryGetConstBuffer(inst, env, host_info)) {
+            return result;
+        }
+        for (size_t arg = inst->NumArgs(); arg--;) {
+            const IR::Value arg_value{inst->Arg(arg)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (std::ranges::find(visited, arg_inst) == visited.end()) {
+                visited.push_back(arg_inst);
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
@@ -400,6 +716,22 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         std::optional lhs{TrackCached(inst->Arg(0), env, host_info)};
         std::optional rhs{TrackCached(inst->Arg(1), env, host_info)};
         if (!lhs || !rhs) {
+            // Hogwarts Legacy: a texture handle loaded from a storage buffer (8-byte elements
+            // indexed per instance) ORed with a sampler word from a constant buffer. The table is
+            // bound as a descriptor array and the shader indexes it with the load's offset.
+            if (const auto table = StorageTable(lhs ? inst->Arg(1) : inst->Arg(0), lhs ? lhs : rhs)) {
+                return table;
+            }
+            // Other loads: bind by the word it can see, and mark the handle run-time only so its
+            // type and format are not read from whatever descriptor that word alone names.
+            if (lhs && !rhs && DependsOnMemoryLoad(inst->Arg(1))) {
+                lhs->dynamic_handle = true;
+                return lhs;
+            }
+            if (rhs && !lhs && DependsOnMemoryLoad(inst->Arg(0))) {
+                rhs->dynamic_handle = true;
+                return rhs;
+            }
             return std::nullopt;
         }
         if (lhs->has_secondary || rhs->has_secondary) {
@@ -444,6 +776,7 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .dynamic_offset = lhs->dynamic_offset,
             .count = lhs->count,
             .has_secondary = true,
+            .dynamic_handle = lhs->dynamic_handle || rhs->dynamic_handle,
         };
     }
     case IR::Opcode::ShiftLeftLogical32: {
@@ -550,7 +883,6 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
         const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info)};
-
         if (!track_addr) {
             throw NotImplementedException("Failed to track bindless texture constant buffer");
         } else {
@@ -602,10 +934,12 @@ public:
     explicit Descriptors(TextureBufferDescriptors& texture_buffer_descriptors_,
                          ImageBufferDescriptors& image_buffer_descriptors_,
                          TextureDescriptors& texture_descriptors_,
-                         ImageDescriptors& image_descriptors_)
+                         ImageDescriptors& image_descriptors_,
+                         IndexPrograms& index_programs_)
         : texture_buffer_descriptors{texture_buffer_descriptors_},
           image_buffer_descriptors{image_buffer_descriptors_},
-          texture_descriptors{texture_descriptors_}, image_descriptors{image_descriptors_} {}
+          texture_descriptors{texture_descriptors_}, image_descriptors{image_descriptors_},
+          index_programs{index_programs_} {}
 
     u32 Add(const TextureBufferDescriptor& desc) {
         return Add(texture_buffer_descriptors, desc, [&desc](const auto& existing) {
@@ -642,7 +976,12 @@ public:
                    desc.secondary_cbuf_index == existing.secondary_cbuf_index &&
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
                    desc.secondary_shift_left == existing.secondary_shift_left &&
-                   desc.count == existing.count && desc.size_shift == existing.size_shift &&
+                   desc.index_program == existing.index_program &&
+                   // One table, one array: a variant's cap applies to the first use (see
+                   // HostTranslateInfo::table_buckets); later uses take its count.
+                   (desc.count == existing.count ||
+                    (IsHandleTable(desc) && IsHandleTable(existing))) &&
+                   desc.size_shift == existing.size_shift &&
                    desc.live_stride == existing.live_stride &&
                    desc.live_phase == existing.live_phase;
         })};
@@ -650,6 +989,26 @@ public:
         texture_descriptors[index].is_multisample |= desc.is_multisample;
         texture_descriptors[index].is_integer |= desc.is_integer;
         return index;
+    }
+
+    /// Handle tables so far: the slot of the next one in HostTranslateInfo::table_buckets
+    u32 NumTables() const noexcept {
+        return static_cast<u32>(
+            std::count_if(texture_descriptors.begin(), texture_descriptors.end(), IsHandleTable));
+    }
+
+    /// 1-based index of the program (shared when equal)
+    u32 AddIndexProgram(const IndexProgram& program) {
+        const auto it{std::find(index_programs.begin(), index_programs.end(), program)};
+        if (it != index_programs.end()) {
+            return static_cast<u32>(std::distance(index_programs.begin(), it)) + 1;
+        }
+        index_programs.push_back(program);
+        return static_cast<u32>(index_programs.size());
+    }
+
+    u32 TextureCount(u32 index) const noexcept {
+        return texture_descriptors[index].count;
     }
 
     u32 Add(const ImageDescriptor& desc) {
@@ -681,6 +1040,7 @@ private:
     ImageBufferDescriptors& image_buffer_descriptors;
     TextureDescriptors& texture_descriptors;
     ImageDescriptors& image_descriptors;
+    IndexPrograms& index_programs;
 };
 
 void PatchImageSampleImplicitLod(IR::Block& block, IR::Inst& inst) {
@@ -770,6 +1130,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         program.info.image_buffer_descriptors,
         program.info.texture_descriptors,
         program.info.image_descriptors,
+        program.info.index_programs,
     };
     const u32 sampled_dynamic_cap = DynamicSampledTextureCap(program.info, host_info, DynamicSampledTextureArrayCount(to_replace));
     bool has_last_is_integer{false};
@@ -832,6 +1193,32 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         u32 index;
         u32 size_shift = cbuf.count > 1 ? DynamicDescriptorSizeShift(cbuf.dynamic_offset) : DESCRIPTOR_SIZE_SHIFT;
         u32 count = cbuf.count;
+        // A storage table's cbuf_index/cbuf_offset name the buffer's 64-bit pointer, which the
+        // storage buffer descriptor already resolved; its elements are 8 bytes.
+        u32 table_cbuf_index{cbuf.index};
+        u32 table_cbuf_offset{cbuf.offset};
+        if (cbuf.storage_table) {
+            const auto& ssbo{program.info.storage_buffers_descriptors.at(cbuf.storage_index)};
+            table_cbuf_index = ssbo.cbuf_index;
+            table_cbuf_offset = ssbo.cbuf_offset;
+            size_shift = 3;
+        }
+        // Hogwarts Legacy reads one material table at nine constant bases (c7[0x0 + i*8] ..
+        // c7[0x48 + i*8]): nine descriptor arrays of the same table, each written in full per
+        // draw. Rebase such reads onto the table's first element so they share one array; the
+        // instruction adds its base to the index.
+        u16 index_program{}; // a per-draw constant index, resolved by the renderer
+        u32 base_elements{};
+        if (count > 1 && !cbuf.storage_table) {
+            const u32 element{1u << size_shift};
+            const u32 phase{table_cbuf_offset % element};
+            base_elements = (table_cbuf_offset - phase) / element;
+            if (base_elements < count / 4) {
+                table_cbuf_offset = phase;
+            } else {
+                base_elements = 0;
+            }
+        }
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageRead:
         case IR::Opcode::ImageAtomicIAdd32:
@@ -911,14 +1298,39 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                         }
                     }
                 }
+                if (live_stride != 0) {
+                    live_phase = (live_phase + (base_elements << size_shift)) % live_stride;
+                }
+                // An index the CPU can compute per draw (Hogwarts Legacy: a material slot read
+                // from two constant buffers): bind that element alone, or one per Phi operand with
+                // the shader's own control flow choosing among them.
+                if (count > 1 && !cbuf.storage_table && program.stage != Stage::Compute) {
+                    if (const auto compiled{CompileIndexProgram(IR::Value{cbuf.dynamic_offset},
+                                                                size_shift, base_elements)}) {
+                        const bool phi{compiled->num_candidates > 1};
+                        if (!phi || BlockOf(program, cbuf.dynamic_offset.InstRecursive()) != nullptr) {
+                            index_program = static_cast<u16>(descriptors.AddIndexProgram(*compiled));
+                            count = compiled->num_candidates;
+                            live_stride = 0;
+                            live_phase = 0;
+                        }
+                    }
+                }
+                // A pipeline variant sized to the bound tables (GraphicsPipeline::TableBuckets)
+                if (count > 1 && index_program == 0) {
+                    const u32 slot{descriptors.NumTables()};
+                    if (slot < host_info.table_buckets.size() && host_info.table_buckets[slot] != 0) {
+                        count = (std::min)(count, 1u << host_info.table_buckets[slot]);
+                    }
+                }
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
                     .is_multisample = is_multisample,
                     .is_integer = is_integer,
                     .has_secondary = cbuf.has_secondary,
-                    .cbuf_index = cbuf.index,
-                    .cbuf_offset = cbuf.offset,
+                    .cbuf_index = table_cbuf_index,
+                    .cbuf_offset = table_cbuf_offset,
                     .shift_left = cbuf.shift_left,
                     .secondary_cbuf_index = cbuf.secondary_index,
                     .secondary_cbuf_offset = cbuf.secondary_offset,
@@ -927,7 +1339,10 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .size_shift = size_shift,
                     .live_stride = live_stride,
                     .live_phase = live_phase,
+                    .storage_table = cbuf.storage_table,
+                    .index_program = index_program,
                 });
+                count = descriptors.TextureCount(index);
                 flags.is_integer.Assign(is_integer ? 1 : 0);
             }
             break;
@@ -935,11 +1350,28 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         flags.descriptor_index.Assign(index);
         inst->SetFlags(flags);
 
-        if (count > 1) {
+        if (index_program != 0 && count > 1) {
+            // One descriptor per Phi operand: a Phi of immediates picks the one this path took
+            IR::Inst* const phi{cbuf.dynamic_offset.InstRecursive()};
+            IR::Block* const phi_block{BlockOf(program, phi)};
+            const auto it{phi_block->PrependNewInst(IR::Block::InstructionList::s_iterator_to(*phi),
+                                                    IR::Opcode::Phi, {},
+                                                    static_cast<u32>(IR::Type::U32))};
+            for (size_t j = 0; j < phi->NumArgs(); ++j) {
+                it->AddPhiOperand(phi->PhiBlock(j), IR::Value{static_cast<u32>(j)});
+            }
+            inst->SetArg(0, IR::Value{&*it});
+        } else if (index_program != 0) {
+            inst->SetArg(0, IR::Value{});
+        } else if (count > 1) {
             const auto insert_point{IR::Block::InstructionList::s_iterator_to(*inst)};
             IR::IREmitter ir{*texture_inst.block, insert_point};
             const IR::U32 shift{ir.Imm32(size_shift)};
-            inst->SetArg(0, ir.UMin(ir.ShiftRightLogical(cbuf.dynamic_offset, shift), ir.Imm32(count - 1)));
+            IR::U32 element_index{ir.ShiftRightLogical(cbuf.dynamic_offset, shift)};
+            if (base_elements != 0) {
+                element_index = ir.IAdd(element_index, ir.Imm32(base_elements));
+            }
+            inst->SetArg(0, ir.UMin(element_index, ir.Imm32(count - 1)));
         } else {
             inst->SetArg(0, IR::Value{});
         }
@@ -960,6 +1392,7 @@ void JoinTextureInfo(Info& base, Info& source) {
         base.image_buffer_descriptors,
         base.texture_descriptors,
         base.image_descriptors,
+        base.index_programs,
     };
     for (auto& desc : source.texture_buffer_descriptors) {
         descriptors.Add(desc);
@@ -967,7 +1400,11 @@ void JoinTextureInfo(Info& base, Info& source) {
     for (auto& desc : source.image_buffer_descriptors) {
         descriptors.Add(desc);
     }
-    for (auto& desc : source.texture_descriptors) {
+    for (TextureDescriptor desc : source.texture_descriptors) {
+        if (desc.index_program != 0) {
+            desc.index_program = static_cast<u16>(
+                descriptors.AddIndexProgram(source.index_programs[desc.index_program - 1]));
+        }
         descriptors.Add(desc);
     }
     for (auto& desc : source.image_descriptors) {

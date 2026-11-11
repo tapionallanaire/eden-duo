@@ -111,7 +111,9 @@ void Fermi2D::Blit() {
 
     memory_manager.FlushCaching();
     if (!rasterizer->AccelerateSurfaceCopy(src, regs.dst, config)) {
+        rasterizer->SoftwareSurfaceCopy(regs.dst, config, false);
         sw_blitter->Blit(src, regs.dst, config);
+        rasterizer->SoftwareSurfaceCopy(regs.dst, config, true);
     }
 }
 

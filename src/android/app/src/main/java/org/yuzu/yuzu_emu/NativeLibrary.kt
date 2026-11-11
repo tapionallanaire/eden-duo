@@ -164,6 +164,13 @@ object NativeLibrary {
      */
     external fun run(path: String?, programIndex: Int, frontendInitiated: Boolean)
 
+    /**
+     * Eden Duo: set before [run]. `record` writes this session's newly built pipelines to the
+     * title's recording; `compile` makes this run load and build the title's plan and stop;
+     * `compileMax` also builds every vertex/fragment shader combination the plan knows.
+     */
+    external fun setShaderRunMode(record: Boolean, compile: Boolean, compileMax: Boolean)
+
     // Surface Handling
     external fun surfaceChanged(surf: Surface?)
 

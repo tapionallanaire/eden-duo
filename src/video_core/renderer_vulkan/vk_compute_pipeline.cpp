@@ -23,6 +23,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "common/alignment.h"
 #include "common/logging.h"
 #include "common/settings.h"
 
@@ -75,8 +76,8 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         descriptor_update_template =
             builder.CreateTemplate(*descriptor_set_layout, *pipeline_layout, uses_push_descriptor);
         if (!uses_push_descriptor) {
-            descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, info);
+            descriptor_allocator = &descriptor_pool.SharedAllocator(device, scheduler, builder,
+                                                                    std::span{&info, 1});
         }
     }
 
@@ -113,7 +114,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         };
         try {
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            spv_module = {}; // only the pipeline creation reads it
         } catch (const vk::Exception& exception) {
+            spv_module = {};
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
             std::scoped_lock lock{build_mutex};
@@ -228,19 +231,30 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             // bound constant buffer and reachable by the shader are looked up, read in one block,
             // and a repeated handle reuses the previous slot's result.
             constexpr u32 OUT_OF_RANGE{~0u};
-            const u32 size{cbufs[desc.cbuf_index].size.Value()};
-            const u32 bound{desc.cbuf_offset + sizeof(u32) > size
-                                ? 0u
-                                : (std::min)(desc.count,
-                                             ((size - desc.cbuf_offset - u32{sizeof(u32)}) >>
-                                              desc.size_shift) +
-                                                 1)};
+            // A storage table (see GraphicsPipeline::ConfigureImpl): the constant buffer holds
+            // the table's address; 8-byte elements, a handle word first.
+            GPUVAddr table_addr{cbufs[desc.cbuf_index].Address() + desc.cbuf_offset};
+            u32 bound{};
+            if (desc.storage_table) {
+                const GPUVAddr pointer{gpu_memory.Read<u64>(table_addr)};
+                table_addr = Common::AlignDown(pointer, static_cast<GPUVAddr>(device.GetStorageBufferAlignment()));
+                if (table_addr != 0) {
+                    const u64 bytes{gpu_memory.GetMemoryLayoutSize(table_addr)};
+                    bound = static_cast<u32>((std::min)(u64{desc.count}, bytes >> desc.size_shift));
+                }
+            } else {
+                const u32 size{cbufs[desc.cbuf_index].size.Value()};
+                bound = desc.cbuf_offset + sizeof(u32) > size
+                            ? 0u
+                            : (std::min)(desc.count, ((size - desc.cbuf_offset - u32{sizeof(u32)}) >>
+                                                      desc.size_shift) +
+                                                         1);
+            }
             static thread_local std::vector<u32> table;
             const u32 stride_words{(1u << desc.size_shift) / static_cast<u32>(sizeof(u32))};
             table.resize(static_cast<size_t>(bound) * stride_words);
             if (bound > 0) {
-                gpu_memory.ReadBlockUnsafe(cbufs[desc.cbuf_index].Address() + desc.cbuf_offset,
-                                           table.data(), table.size() * sizeof(u32));
+                gpu_memory.ReadBlockUnsafe(table_addr, table.data(), table.size() * sizeof(u32));
             }
             u32 secondary{};
             if (desc.has_secondary) {
@@ -391,7 +405,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);
         } else {
-            const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
+            const VkDescriptorSet descriptor_set{descriptor_allocator->Commit()};
             const vk::Device& dev{device.GetLogical()};
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline_layout, 0,
