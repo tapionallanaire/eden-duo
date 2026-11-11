@@ -1848,7 +1848,10 @@ void RasterizerVulkan::UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& re
         regs.polygon_offset_fill_enable,
     };
     const u32 topology_index = u32(maxwell3d->draw_manager.draw_state.topology);
-    const u32 enable = enabled_lut[POLYGON_OFFSET_ENABLE_LUT[topology_index]];
+    const size_t offset_class = topology_index < POLYGON_OFFSET_ENABLE_LUT.size()
+                                    ? POLYGON_OFFSET_ENABLE_LUT[topology_index]
+                                    : POLYGON;
+    const u32 enable = enabled_lut[offset_class];
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthBiasEnableEXT(enable != 0); });
 }
 

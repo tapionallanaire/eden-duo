@@ -126,7 +126,9 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     patch_control_points_minus_one.Assign(regs.patch_vertices - 1);
     const bool can_collapse_topology_class =
         features.has_extended_dynamic_state && features.has_extended_dynamic_state_2;
-    topology.Assign(can_collapse_topology_class
+    // The guest's topology field is wider than the enum: an unknown value stays as it is.
+    topology.Assign(can_collapse_topology_class &&
+                            static_cast<size_t>(topology_) < TOPOLOGY_CLASS_REPRESENTATIVE_LUT.size()
                         ? TOPOLOGY_CLASS_REPRESENTATIVE_LUT[static_cast<size_t>(topology_)]
                         : topology_);
     // One sample per pixel when the title's multisampled targets are kept single-sampled.
@@ -360,7 +362,12 @@ void FixedPipelineState::DynamicState::Refresh2(const Maxwell& regs,
 
     rasterize_enable.Assign(regs.rasterize_enable != 0 ? 1 : 0);
     primitive_restart_enable.Assign(regs.primitive_restart.enabled != 0 ? 1 : 0);
-    depth_bias_enable.Assign(enabled_lut[POLYGON_OFFSET_ENABLE_LUT[topology_index]] != 0 ? 1 : 0);
+    // The guest's topology field is wider than the enum; an unknown value counts as a polygon
+    // (Kingdom Hearts HD 1.5+2.5 draws with one: the unchecked index read past the table).
+    const size_t offset_class = topology_index < POLYGON_OFFSET_ENABLE_LUT.size()
+                                    ? POLYGON_OFFSET_ENABLE_LUT[topology_index]
+                                    : POLYGON;
+    depth_bias_enable.Assign(enabled_lut[offset_class] != 0 ? 1 : 0);
 }
 
 void FixedPipelineState::DynamicState::Refresh3(const Maxwell& regs,
