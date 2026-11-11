@@ -111,8 +111,11 @@ void MaxwellDMA::Launch() {
             };
             const auto src_kind = memory_manager.GetPageKind(regs.offset_in);
             const auto dst_kind = memory_manager.GetPageKind(regs.offset_out);
-            const bool is_src_pitch = IsPitchKind(src_kind);
-            const bool is_dst_pitch = IsPitchKind(dst_kind);
+            // An unmapped end (kind INVALID) has no tiling to undo: copy it linearly. Kingdom
+            // Hearts 1.5+2.5 copies 8 bytes a frame from address 0 into a sync ring; the
+            // block-linear path wrote 16 swizzled bytes over the ring's neighbouring slots.
+            const bool is_src_pitch = IsPitchKind(src_kind) || src_kind == PTEKind::INVALID;
+            const bool is_dst_pitch = IsPitchKind(dst_kind) || dst_kind == PTEKind::INVALID;
             if (!is_src_pitch && is_dst_pitch) {
                 UNIMPLEMENTED_IF(regs.line_length_in % 16 != 0);
                 UNIMPLEMENTED_IF(regs.offset_in % 16 != 0);
