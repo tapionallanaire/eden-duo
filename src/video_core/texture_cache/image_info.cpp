@@ -165,6 +165,12 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::RenderTargetConfig& ct,
     layer_stride = ct.array_pitch * 4;
     maybe_unaligned_layer_stride = layer_stride;
     num_samples = NumSamples(msaa_mode);
+    if (num_samples > 1 && Settings::values.msaa_single_sample_by_title) {
+        const auto [samples_x, samples_y] = SamplesLog2(static_cast<int>(num_samples));
+        unroll_x = static_cast<u8>(samples_x);
+        unroll_y = static_cast<u8>(samples_y);
+        num_samples = 1;
+    }
     block = Extent3D{
         .width = ct.tile_mode.block_width,
         .height = ct.tile_mode.block_height,
@@ -195,6 +201,12 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::Zeta& zt, const Maxwell3D::Regs::Zet
     layer_stride = zt.array_pitch * 4;
     maybe_unaligned_layer_stride = layer_stride;
     num_samples = NumSamples(msaa_mode);
+    if (num_samples > 1 && Settings::values.msaa_single_sample_by_title) {
+        const auto [samples_x, samples_y] = SamplesLog2(static_cast<int>(num_samples));
+        unroll_x = static_cast<u8>(samples_x);
+        unroll_y = static_cast<u8>(samples_y);
+        num_samples = 1;
+    }
     block = Extent3D{
         .width = zt.tile_mode.block_width,
         .height = zt.tile_mode.block_height,

@@ -10,6 +10,8 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/engines/fermi_2d.h"
@@ -67,11 +69,22 @@ void Puller::ProcessBindMethod(DmaPusher& dma_pusher, const MethodCall& method_c
 
 void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     switch (regs.fence_action.op) {
-    case Puller::FenceOperation::Acquire:
-        // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
-        // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
+    case Puller::FenceOperation::Acquire: {
+        // The GPU channel waits for a host1x syncpoint (nvdec/VIC work) before consuming its
+        // output. Without the wait the GPU reported the frame drawn while the VIC was still
+        // about to write the surface; Kingdom Hearts 1.5+2.5 freed and reused that memory and the
+        // late write corrupted its heap at the end of its opening video. Bounded, so a syncpoint
+        // this channel itself increments later cannot deadlock the GPU thread.
+        auto& syncpoint_manager = dma_pusher.system.Host1x().GetSyncpointManager();
+        const u32 syncpoint_id = regs.fence_action.syncpoint_id;
+        const u32 value = regs.fence_value;
+        if (!syncpoint_manager.WaitHostFor(syncpoint_id, value, std::chrono::milliseconds{200})) {
+            LOG_WARNING(HW_GPU, "Fence acquire on syncpoint {} value {} timed out (host at {})",
+                        syncpoint_id, value, syncpoint_manager.GetHostSyncpointValue(syncpoint_id));
+        }
         dma_pusher.rasterizer->ReleaseFences();
         break;
+    }
     case Puller::FenceOperation::Increment:
         dma_pusher.rasterizer->SignalSyncPoint(regs.fence_action.syncpoint_id);
         break;

@@ -129,7 +129,10 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     topology.Assign(can_collapse_topology_class
                         ? TOPOLOGY_CLASS_REPRESENTATIVE_LUT[static_cast<size_t>(topology_)]
                         : topology_);
-    msaa_mode.Assign(regs.anti_alias_samples_mode);
+    // One sample per pixel when the title's multisampled targets are kept single-sampled.
+    msaa_mode.Assign(Settings::values.msaa_single_sample_by_title
+                         ? Tegra::Texture::MsaaMode::Msaa1x1
+                         : regs.anti_alias_samples_mode);
     attachment0_dual_source_blend.Assign(ComputeAttachment0DualSourceBlend(regs) ? 1 : 0);
 
     raw2 = 0;

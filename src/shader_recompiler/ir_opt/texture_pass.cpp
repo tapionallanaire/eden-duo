@@ -1173,6 +1173,14 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (flags.type == TextureType::Color2D || flags.type == TextureType::Color2DRect ||
                 flags.type == TextureType::ColorArray2D) {
                 is_multisample = !inst->Arg(4).IsEmpty();
+                if (is_multisample && Settings::values.msaa_single_sample_by_title) {
+                    // The title's multisampled targets hold one sample per pixel: fetch the
+                    // pixel whatever the sample index. has_bias (unused by fetches) tells
+                    // MsaaSingleSamplePass these coordinates are already in pixels.
+                    inst->SetArg(4, IR::U32{});
+                    flags.has_bias.Assign(1);
+                    is_multisample = false;
+                }
             } else {
                 inst->SetArg(4, IR::U32{});
             }

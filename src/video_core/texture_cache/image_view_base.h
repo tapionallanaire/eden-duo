@@ -42,6 +42,9 @@ struct ImageViewBase {
     SubresourceRange range;
     Extent3D size{0, 0, 0};
     ImageViewFlagBits flags{};
+    /// The image's ImageInfo::unroll_x/unroll_y
+    u8 unroll_x{};
+    u8 unroll_y{};
 
     u64 invalidation_tick = 0;
     u64 modification_tick = 0;
