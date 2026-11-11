@@ -194,6 +194,20 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         return true;
     }
 
+    // An access to unmapped guest memory. Dynarmic reads such memory as zeros and drops the
+    // write; skipping the instruction instead leaves a load's destination register untouched,
+    // and a game that walks a stale pointer (Kingdom Hearts 1.5+2.5 at the end of its opening
+    // video) then spins on the same garbage forever. Run the one instruction through the
+    // interpreter, whose memory accessor has dynarmic's unmapped semantics.
+    auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+    if (host_ctx.pc != reinterpret_cast<u64>(info->si_addr)) {
+        auto* fpctx = GetFloatingPointState(host_ctx);
+        if (const auto next_pc = MatchAndExecuteOneInstruction(memory, &host_ctx, fpctx)) {
+            host_ctx.pc = *next_pc;
+            return true;
+        }
+    }
+
     // We couldn't handle the access.
     return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
 }
