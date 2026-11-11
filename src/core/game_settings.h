@@ -57,6 +57,8 @@ enum class TitleID : std::uint64_t {
     XenobladeChronicles2 = 0x0100E95004038000ULL,
     XenobladeChronicles3 = 0x010074F013262000ULL,
     HogwartsLegacy = 0x0100F7E00C70E000ULL,
+    /// The launcher; its games are programs 1 to 3 of the same application.
+    KingdomHearts1525 = 0x010090C022978000ULL,
 };
 
 struct EnvironmentInfo {

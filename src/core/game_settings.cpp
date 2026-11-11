@@ -125,16 +125,17 @@ EnvironmentInfo DetectEnvironment(const VideoCore::RendererBase& renderer) {
 
 namespace {
 #ifdef __ANDROID__
-/// The GPU's family from the kernel driver, readable before any Vulkan device exists.
-bool IsAdreno6xx() {
+/// The GPU's family from the kernel driver ('6' for an Adreno 6xx, 0 when unknown), readable
+/// before any Vulkan device exists.
+char AdrenoFamily() {
     std::FILE* const file = std::fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "r");
     if (file == nullptr) {
-        return false;
+        return 0;
     }
     char model[32]{};
     const bool read = std::fgets(model, sizeof(model), file) != nullptr;
     std::fclose(file);
-    return read && std::strncmp(model, "Adreno6", 7) == 0;
+    return read && std::strncmp(model, "Adreno", 6) == 0 ? model[6] : 0;
 }
 #endif
 
@@ -283,7 +284,22 @@ void LoadBootOverrides(std::uint64_t program_id) {
     Settings::values.gpu_memory_pinned_mib_by_title = 0;
     TitleSettings(program_id, false);
 #ifdef __ANDROID__
-    if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && IsAdreno6xx()) {
+    Settings::values.msaa_single_sample_by_title = false;
+    // Kingdom Hearts HD 1.5+2.5 (every program of the application), Adreno 7xx only. Its games
+    // draw to a multisampled target and read the samples back through a single-sample texture
+    // of the same memory about ten times a frame; each read cost a per-sample conversion of
+    // the whole target (3840x2160 docked) and KH2's first street ran at 20 FPS with the GPU
+    // 91-99 % busy (AYN Thor, docked 1x). With one sample per pixel the reads are plain
+    // copies: 59 FPS docked with 1 % of frames late, and no late frame in 720 handheld with
+    // the GPU 44 % busy, so handheld is the default here. The cost is the game's own edge
+    // anti-aliasing. Read when shaders and images are built, so it is set before the GPU.
+    if ((program_id & ~0xFFFULL) == static_cast<std::uint64_t>(TitleID::KingdomHearts1525) &&
+        AdrenoFamily() == '7') {
+        Settings::values.msaa_single_sample_by_title = true;
+        DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Handheld, false);
+        LOG_INFO(Core, "Title defaults: single-sample render targets, handheld");
+    }
+    if (static_cast<TitleID>(program_id) == TitleID::FinalFantasyResonance && AdrenoFamily() == '6') {
         // Turnip's binned (GMEM) rendering hangs the Adreno 6xx in this game's post-processing
         // passes: the GPU sits in vertex fetch and visibility-stream decode until KGSL resets it
         // (VK_ERROR_DEVICE_LOST within minutes on the Retroid Pocket Flip 2, Adreno 650).

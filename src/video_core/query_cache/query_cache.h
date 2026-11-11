@@ -258,15 +258,23 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,
                                         static_cast<u32>(cur_addr & Core::DEVICE_PAGEMASK));
     };
-    u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
-    u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
+    // Reports are written through the GPU address space, page by page, as the hardware does: a
+    // report that runs past the end of its mapping must not spill into the guest memory that
+    // happens to follow the buffer. KINGDOM HEARTS FINAL MIX ends a query table with a 16-byte
+    // report 12 bytes before the end of its buffer; the last 4 bytes landed in the game's heap.
+    const auto write_report = [memory_manager = gpu_memory, addr](u64 value, bool long_report,
+                                                                  u64 timestamp) {
+        const std::array<u64, 2> report{value, timestamp};
+        memory_manager->WriteBlockUnsafe(addr, report.data(),
+                                         long_report ? sizeof(report) : sizeof(u32));
+    };
     // Fence reports are normally released on the CPU straight away. A title flagged for it reads
     // query reports once its fence signals, so its fence write is queued behind them and runs
     // only after the GPU has executed the work and they have been written.
     const bool delay_fence = is_fence && Settings::values.delay_fence_reports_by_title;
     bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence && !delay_fence;
     std::function<void()> operation([this, is_synced, delay_fence, streamer, query_base = query,
-                                     query_location, pointer, pointer_timestamp] {
+                                     query_location, write_report] {
         // A delayed fence still has to be written once the GPU gets there, as the hardware would,
         // even if the guest touched that memory meanwhile; the game waits for that value. Only a
         // newer report to the same address supersedes it.
@@ -288,14 +296,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         }
         query_base->value += streamer->GetAmendValue();
         streamer->SetAccumulationValue(query_base->value);
-        if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
-            u64 timestamp = impl->gpu.GetTicks();
-            std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
-            std::memcpy(pointer, &query_base->value, sizeof(query_base->value));
-        } else {
-            u32 value = static_cast<u32>(query_base->value);
-            std::memcpy(pointer, &value, sizeof(value));
-        }
+        const bool long_report = True(query_base->flags & QueryFlagBits::HasTimestamp);
+        write_report(query_base->value, long_report, long_report ? impl->gpu.GetTicks() : 0);
         if (!is_synced) [[likely]] {
             impl->pending_unregister.push_back(query_location);
         }
@@ -307,14 +309,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->rasterizer.SignalFence(std::move(operation));
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
-            if (has_timestamp) {
-                u64 timestamp = impl->gpu.GetTicks();
-                u64 value = static_cast<u64>(payload);
-                std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
-                std::memcpy(pointer, &value, sizeof(value));
-            } else {
-                std::memcpy(pointer, &payload, sizeof(payload));
-            }
+            write_report(payload, has_timestamp, has_timestamp ? impl->gpu.GetTicks() : 0);
             streamer->Free(new_query_id);
             return;
         }

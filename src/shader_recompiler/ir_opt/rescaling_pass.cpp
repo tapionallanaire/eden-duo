@@ -340,6 +340,53 @@ void Visit(const IR::Program& program, IR::Block& block, IR::Inst& inst) {
 }
 } // Anonymous namespace
 
+void MsaaSingleSamplePass(IR::Program& program) {
+    // Textures of render targets kept at one sample per pixel hold one texel where the guest
+    // addresses two: halve texel-fetch coordinates per axis and double the reported size.
+    // The host flags x in the texture's rescaling bit and y in the bit 64 places on.
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            const IR::Opcode opcode{inst.GetOpcode()};
+            if (opcode != IR::Opcode::ImageFetch && opcode != IR::Opcode::ImageQueryDimensions) {
+                continue;
+            }
+            const auto info{inst.Flags<IR::TextureInstInfo>()};
+            if (info.type != TextureType::Color2D && info.type != TextureType::Color2DRect &&
+                info.type != TextureType::ColorArray2D) {
+                continue;
+            }
+            const auto it{IR::Block::InstructionList::s_iterator_to(inst)};
+            IR::IREmitter ir{*block, it};
+            const IR::U1 half_x{ir.IsTextureScaled(ir.Imm32(info.descriptor_index))};
+            const IR::U1 half_y{ir.IsTextureScaled(ir.Imm32(info.descriptor_index + 64))};
+            if (opcode == IR::Opcode::ImageFetch && info.has_bias != 0) {
+                continue; // was a multisample fetch: pixel coordinates
+            }
+            if (opcode == IR::Opcode::ImageQueryDimensions) {
+                const IR::Value new_inst{&*block->PrependNewInst(it, inst)};
+                const IR::U32 w{ir.CompositeExtract(new_inst, 0)};
+                const IR::U32 h{ir.CompositeExtract(new_inst, 1)};
+                const IR::U32 width{ir.Select(half_x, ir.ShiftLeftLogical(w, ir.Imm32(1)), w)};
+                const IR::U32 height{ir.Select(half_y, ir.ShiftLeftLogical(h, ir.Imm32(1)), h)};
+                inst.ReplaceUsesWith(ir.CompositeConstruct(width, height,
+                                                           ir.CompositeExtract(new_inst, 2),
+                                                           ir.CompositeExtract(new_inst, 3)));
+                continue;
+            }
+            const IR::Value coord{inst.Arg(1)};
+            const IR::U32 cx{ir.CompositeExtract(coord, 0)};
+            const IR::U32 cy{ir.CompositeExtract(coord, 1)};
+            const IR::U32 x{ir.Select(half_x, ir.ShiftRightArithmetic(cx, ir.Imm32(1)), cx)};
+            const IR::U32 y{ir.Select(half_y, ir.ShiftRightArithmetic(cy, ir.Imm32(1)), cy)};
+            if (info.type == TextureType::ColorArray2D) {
+                inst.SetArg(1, ir.CompositeConstruct(x, y, IR::U32{ir.CompositeExtract(coord, 2)}));
+            } else {
+                inst.SetArg(1, ir.CompositeConstruct(x, y));
+            }
+        }
+    }
+}
+
 void RescalingPass(IR::Program& program) {
     const bool is_fragment_shader{program.stage == Stage::Fragment};
     if (is_fragment_shader) {

@@ -672,6 +672,9 @@ bool TextureCache<P>::IsDownloadable(const ImageBase& image) const noexcept {
     if (!image.IsSafeGpuCopy()) {
         return false;
     }
+    if ((image.info.unroll_x | image.info.unroll_y) != 0) {
+        return false;
+    }
     if (image.info.num_samples == 1) {
         return true;
     }
@@ -840,7 +843,7 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     const SubresourceRange src_range{.base = src_base.value(), .extent = {1, 1}};
     const ImageViewInfo src_view_info(ImageViewType::e2D, images.src_format, src_range);
     const auto [src_framebuffer_id, src_view_id] = RenderTargetFromImage(src_id, src_view_info);
-    const auto [src_samples_x, src_samples_y] = SamplesLog2(src_image.info.num_samples);
+    const auto [src_samples_x, src_samples_y] = ExtentShift(src_image.info);
     Region2D src_region{
         Offset2D{.x = copy.src_x0 >> src_samples_x, .y = copy.src_y0 >> src_samples_y},
         Offset2D{.x = copy.src_x1 >> src_samples_x, .y = copy.src_y1 >> src_samples_y},
@@ -853,7 +856,7 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
     const SubresourceRange dst_range{.base = dst_base.value(), .extent = {1, 1}};
     const ImageViewInfo dst_view_info(ImageViewType::e2D, images.dst_format, dst_range);
     const auto [dst_framebuffer_id, dst_view_id] = RenderTargetFromImage(dst_id, dst_view_info);
-    const auto [dst_samples_x, dst_samples_y] = SamplesLog2(dst_image.info.num_samples);
+    const auto [dst_samples_x, dst_samples_y] = ExtentShift(dst_image.info);
     Region2D dst_region{
         Offset2D{.x = copy.dst_x0 >> dst_samples_x, .y = copy.dst_y0 >> dst_samples_y},
         Offset2D{.x = copy.dst_x1 >> dst_samples_x, .y = copy.dst_y1 >> dst_samples_y},
@@ -1229,6 +1232,12 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     TrackImage(image, image_id);
 
+    if ((image.info.unroll_x | image.info.unroll_y) != 0) {
+        // A render target kept at one sample per pixel: guest memory holds samples, the image
+        // holds pixels, and its content only ever comes from rendering.
+        runtime.TransitionImageLayout(image);
+        return;
+    }
     if (image.info.num_samples > 1 && !runtime.CanUploadMSAA()) {
         LOG_WARNING(HW_GPU, "MSAA image uploads are not implemented");
         runtime.TransitionImageLayout(image);
@@ -1667,6 +1676,16 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             join_ignore_textures.insert(overlap_id);
             return;
         }
+        if ((overlap.info.unroll_x | overlap.info.unroll_y) != 0 &&
+            (new_info.unroll_x | new_info.unroll_y) == 0 && overlap.gpu_addr == gpu_addr &&
+            info.type == ImageType::e2D && info.num_samples == 1 && info.resources.levels == 1 &&
+            info.size.width == overlap.info.size.width) {
+            // The single-sample texture a title reads a multisampled target's samples through,
+            // when that target holds one sample per pixel: it holds the same pixels, so the
+            // copies that keep the two in step are plain texel copies.
+            new_info.unroll_x = overlap.info.unroll_x;
+            new_info.unroll_y = overlap.info.unroll_y;
+        }
         const bool overlap_is_linear = overlap.info.type == ImageType::Linear;
         if (this_is_linear != overlap_is_linear) {
             return;
@@ -1690,7 +1709,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             join_copies_to_do.emplace_back(JoinCopy{false, overlap_id});
             return;
         }
-        constexpr auto options = RelaxedOptions::Size | RelaxedOptions::Format;
+        // Samples relaxed: a multisampled render target and the single-sample texture a game
+        // reads it back through (the same memory, samples unrolled 2x2) alias each other and are
+        // kept in step with sample-converting copies (Kingdom Hearts 1.5+2.5's whole frame).
+        constexpr auto options =
+            RelaxedOptions::Size | RelaxedOptions::Format | RelaxedOptions::Samples;
         const ImageBase new_image_base(new_info, gpu_addr, cpu_addr);
         if (IsSubresource(new_info, overlap, gpu_addr, options, broken_views, native_bgr)) {
             join_left_aliased_ids.push_back(overlap_id);
@@ -1818,9 +1841,6 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         Image& overlap = slot_images[copy_object.id];
         if (copy_object.is_alias) {
             if (!overlap.IsSafeGpuCopy()) {
-                continue;
-            }
-            if (overlap.info.num_samples != new_image.info.num_samples) {
                 continue;
             }
             const auto alias_pointer = join_alias_indices.find(copy_object.id);
@@ -2826,6 +2846,31 @@ template <class P>
 void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
     Image& dst = slot_images[dst_id];
     Image& src = slot_images[src_id];
+    if (dst.info.unroll_x != src.info.unroll_x || dst.info.unroll_y != src.info.unroll_y) {
+        // Texel grids differ (samples against pixels); such a pair is never kept in step.
+        return;
+    }
+    if ((dst.info.unroll_x | dst.info.unroll_y) != 0) {
+        // Copies are sized in samples, both images hold pixels.
+        for (auto& copy : copies) {
+            copy.src_offset.x >>= src.info.unroll_x;
+            copy.dst_offset.x >>= dst.info.unroll_x;
+            copy.extent.width = std::max<u32>(copy.extent.width >> dst.info.unroll_x, 1);
+            copy.src_offset.y >>= src.info.unroll_y;
+            copy.dst_offset.y >>= dst.info.unroll_y;
+            copy.extent.height = std::max<u32>(copy.extent.height >> dst.info.unroll_y, 1);
+        }
+    }
+    if (dst.info.num_samples != src.info.num_samples) {
+        // Aliases between a multisampled image and its single-sample twin: the alias copies are
+        // sized in unrolled texels, the sample-converting copy wants destination texels.
+        const auto [samples_x, samples_y] = SamplesLog2(dst.info.num_samples);
+        for (auto& copy : copies) {
+            copy.extent.width = std::max<u32>(copy.extent.width >> samples_x, 1);
+            copy.extent.height = std::max<u32>(copy.extent.height >> samples_y, 1);
+        }
+        return runtime.CopyImageMSAA(dst, src, copies);
+    }
     const bool is_rescaled = True(src.flags & ImageFlagBits::Rescaled);
     if (is_rescaled) {
         ASSERT(True(dst.flags & ImageFlagBits::Rescaled));
@@ -2942,8 +2987,7 @@ std::pair<FramebufferId, ImageViewId> TextureCache<P>::RenderTargetFromImage(
             extent.height = resolution.ScaleUp(extent.height);
         }
     }
-    const u32 num_samples = image.info.num_samples;
-    const auto [samples_x, samples_y] = SamplesLog2(num_samples);
+    const auto [samples_x, samples_y] = ExtentShift(image.info);
     const FramebufferId framebuffer_id = GetFramebufferId(RenderTargets{
         .color_buffer_ids = {color_view_id},
         .depth_buffer_id = depth_view_id,
