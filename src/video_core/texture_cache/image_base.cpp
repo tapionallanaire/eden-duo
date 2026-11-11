@@ -155,7 +155,10 @@ void ImageBase::CheckAliasState() {
 }
 
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id) {
-    static constexpr auto OPTIONS = RelaxedOptions::Size | RelaxedOptions::Format;
+    // Samples relaxed as in TextureCache::JoinImages: a multisampled image aliases the
+    // single-sample texture that reads its memory back.
+    static constexpr auto OPTIONS =
+        RelaxedOptions::Size | RelaxedOptions::Format | RelaxedOptions::Samples;
     ASSERT(lhs.info.type == rhs.info.type);
     std::optional<SubresourceBase> base;
     if (lhs.info.type == ImageType::Linear) {
