@@ -335,7 +335,7 @@ GraphicsPipeline::GraphicsPipeline(
             builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
         if (!uses_push_descriptor) {
             descriptor_allocator =
-                descriptor_pool.Allocator(device, scheduler, set_layout, stage_infos);
+                &descriptor_pool.SharedAllocator(device, scheduler, builder, stage_infos);
         }
     }
 
@@ -348,7 +348,12 @@ GraphicsPipeline::GraphicsPipeline(
                 emit_modules = nullptr;
             }
             MakePipeline(render_pass);
+            // Nothing reads the modules once the pipeline exists, and the driver keeps a copy of
+            // each one's SPIR-V: Hogwarts Legacy builds 7,000 cached pipelines at boot, and on the
+            // AYN Thor their modules held 270 MB of native heap.
+            spv_modules = {};
         } catch (const std::exception& exception) {
+            spv_modules = {};
             // vk::Exception from the driver, or Shader::Exception from SPIR-V emitted here.
             LOG_CRITICAL(Render_Vulkan, "Graphics pipeline build failed: {}", exception.what());
             std::scoped_lock lock{build_mutex};
@@ -959,7 +964,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.PushDescriptorSetWithTemplateKHR(*descriptor_update_template, *pipeline_layout,
                                                     0, descriptor_data);
         } else if (update_descriptors) {
-            const VkDescriptorSet descriptor_set{descriptor_allocator.Commit()};
+            const VkDescriptorSet descriptor_set{descriptor_allocator->Commit()};
             const vk::Device& dev{device.GetLogical()};
             dev.UpdateDescriptorSet(descriptor_set, *descriptor_update_template, descriptor_data);
             cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline_layout, 0,
