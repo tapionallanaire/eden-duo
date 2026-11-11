@@ -395,22 +395,26 @@ static int KeyCodeForButton(const std::string& name) {
     return param.Get("code", -1);
 }
 
-static InputCommon::VirtualGamepad::VirtualButton ButtonFromName(const std::string& name) {
+static InputCommon::VirtualGamepad::VirtualButton ButtonFromName(const std::string& raw_name) {
     using VB = InputCommon::VirtualGamepad::VirtualButton;
+    // Script names are upper case ("DDOWN", "PLUS"); matching them case-sensitively here made
+    // every non-A button also press A on the virtual pad.
+    std::string name = raw_name;
+    std::ranges::transform(name, name.begin(), [](unsigned char c) { return std::toupper(c); });
     if (name == "B") return VB::ButtonB;
     if (name == "X") return VB::ButtonX;
     if (name == "Y") return VB::ButtonY;
-    if (name == "Plus") return VB::ButtonPlus;
-    if (name == "Minus") return VB::ButtonMinus;
-    if (name == "DUp") return VB::ButtonUp;
-    if (name == "DDown") return VB::ButtonDown;
-    if (name == "DLeft") return VB::ButtonLeft;
-    if (name == "DRight") return VB::ButtonRight;
+    if (name == "PLUS") return VB::ButtonPlus;
+    if (name == "MINUS") return VB::ButtonMinus;
+    if (name == "DUP") return VB::ButtonUp;
+    if (name == "DDOWN") return VB::ButtonDown;
+    if (name == "DLEFT") return VB::ButtonLeft;
+    if (name == "DRIGHT") return VB::ButtonRight;
     if (name == "L") return VB::TriggerL;
     if (name == "R") return VB::TriggerR;
     if (name == "ZL") return VB::TriggerZL;
     if (name == "ZR") return VB::TriggerZR;
-    if (name == "Home") return VB::ButtonHome;
+    if (name == "HOME") return VB::ButtonHome;
     return VB::ButtonA;
 }
 
