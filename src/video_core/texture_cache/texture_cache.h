@@ -1690,7 +1690,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             join_copies_to_do.emplace_back(JoinCopy{false, overlap_id});
             return;
         }
-        constexpr auto options = RelaxedOptions::Size | RelaxedOptions::Format;
+        // Samples relaxed: a multisampled render target and the single-sample texture a game
+        // reads it back through (the same memory, samples unrolled 2x2) alias each other and are
+        // kept in step with sample-converting copies (Kingdom Hearts 1.5+2.5's whole frame).
+        constexpr auto options =
+            RelaxedOptions::Size | RelaxedOptions::Format | RelaxedOptions::Samples;
         const ImageBase new_image_base(new_info, gpu_addr, cpu_addr);
         if (IsSubresource(new_info, overlap, gpu_addr, options, broken_views, native_bgr)) {
             join_left_aliased_ids.push_back(overlap_id);
@@ -1818,9 +1822,6 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         Image& overlap = slot_images[copy_object.id];
         if (copy_object.is_alias) {
             if (!overlap.IsSafeGpuCopy()) {
-                continue;
-            }
-            if (overlap.info.num_samples != new_image.info.num_samples) {
                 continue;
             }
             const auto alias_pointer = join_alias_indices.find(copy_object.id);
@@ -2826,6 +2827,16 @@ template <class P>
 void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
     Image& dst = slot_images[dst_id];
     Image& src = slot_images[src_id];
+    if (dst.info.num_samples != src.info.num_samples) {
+        // Aliases between a multisampled image and its single-sample twin: the alias copies are
+        // sized in unrolled texels, the sample-converting copy wants destination texels.
+        const auto [samples_x, samples_y] = SamplesLog2(dst.info.num_samples);
+        for (auto& copy : copies) {
+            copy.extent.width = std::max<u32>(copy.extent.width >> samples_x, 1);
+            copy.extent.height = std::max<u32>(copy.extent.height >> samples_y, 1);
+        }
+        return runtime.CopyImageMSAA(dst, src, copies);
+    }
     const bool is_rescaled = True(src.flags & ImageFlagBits::Rescaled);
     if (is_rescaled) {
         ASSERT(True(dst.flags & ImageFlagBits::Rescaled));
