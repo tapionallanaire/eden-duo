@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <iostream>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <regex>
@@ -163,7 +164,88 @@ struct SdlState {
     InputCommon::InputSubsystem input_subsystem{};
     std::unique_ptr<EmuWindow_SDL3> emu_window;
     DSModHarness::Session dsmod; // Duo: eden-cli harness state
+    FileSys::ManualContentProvider manual_provider; // the loaded file's programs and control data
+    // ExecuteProgram (multi-program titles: Kingdom Hearts 1.5+2.5's launcher starting a game):
+    // the guest asks from a service thread; the main loop restarts the file at that index.
+    std::string filepath;
+    int program_index{0};
+    std::atomic<int> next_program_index{-1};
 };
+
+// What follows a successful Load: GPU start, shader cache, the core's frontend callbacks, Run.
+static void StartLoadedSystem(SdlState* state) {
+    DSModHarness::OnGameLoaded(state->dsmod, state->system);
+
+    // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
+    state->system.GPU().Start();
+    state->system.GetCpuManager().OnGpuReady();
+
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
+            state->system.GetApplicationProcessProgramID(), std::stop_token{},
+            [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});
+    }
+
+    // don't do anything, SDL3 already exists for us :D
+    state->system.RegisterExitCallback([] {});
+
+    state->system.RegisterExecuteProgramCallback([state](std::size_t program_index) {
+        LOG_INFO(Frontend, "ExecuteProgram: program index {} requested", program_index);
+        state->next_program_index = static_cast<int>(program_index);
+    });
+
+    // QLaunch launched applications (should) now reload shader cache.
+    static std::mutex shader_cache_reload_mutex;
+    state->system.RegisterApplicationChangedCallback([state](u64 changed_program_id) {
+        if (!Settings::values.use_disk_shader_cache.GetValue()) {
+            return;
+        }
+
+        std::scoped_lock lk{shader_cache_reload_mutex};
+
+        LOG_INFO(Frontend, "Reloading disk shader cache for {:016X}", changed_program_id);
+
+        state->system.Pause();
+        state->system.GPU().WaitForIdle();
+        state->system.GPU().ObtainContext();
+
+        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
+            changed_program_id, std::stop_token{},
+            [](VideoCore::LoadCallbackStage, size_t, size_t) {});
+
+        state->system.GPU().ReleaseContext();
+        state->system.Run();
+    });
+
+    void(state->system.Run());
+}
+
+// Restarts the loaded file at the program index the guest asked for (ExecuteProgram).
+static bool SwitchProgram(SdlState* state, int program_index) {
+    LOG_INFO(Frontend, "ExecuteProgram: switching from program index {} to {}", state->program_index,
+             program_index);
+    state->system.DetachDebugger();
+    void(state->system.Pause());
+    state->system.ShutdownMainProcess();
+    Service::AM::FrontendAppletParameters params{
+        .applet_id = Service::AM::AppletId::Application,
+        .program_index = program_index,
+        .previous_program_index = state->program_index,
+    };
+    const Core::SystemResultStatus result =
+        state->system.Load(*state->emu_window, state->filepath, params);
+    if (result != Core::SystemResultStatus::Success) {
+        LOG_CRITICAL(Frontend, "ExecuteProgram: loading program index {} failed ({})", program_index,
+                     static_cast<int>(result));
+        return false;
+    }
+    state->program_index = program_index;
+    StartLoadedSystem(state);
+    if (state->system.DebuggerEnabled()) {
+        state->system.InitializeDebugger(); // ShutdownMainProcess dropped the previous one
+    }
+    return true;
+}
 
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     SdlState* state = new SdlState();
@@ -242,7 +324,15 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     state->system.SetInputSubsystem(&state->input_subsystem);
     state->system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    state->system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+                                          &state->manual_provider);
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    // Register every program of the file (as the Android frontend does): a multi-program title
+    // such as Kingdom Hearts 1.5+2.5 opens the launcher's data storage (program index 0) from
+    // inside a game, which fails and panics the game when only the booted program is known.
+    if (const auto file = state->system.GetFilesystem()->OpenFile(lp.filepath, FileSys::OpenMode::Read)) {
+        void(state->manual_provider.AddEntriesFromContainer(file));
+    }
     // eden-cli reads no external content folders from its config; EDEN_EXTERNAL_CONTENT names one
     // (a folder of update and DLC packages, as the Android frontend registers beside its games).
     if (const char* const ext = std::getenv("EDEN_EXTERNAL_CONTENT"); ext != nullptr) {
@@ -254,6 +344,11 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
     };
+    // EDEN_PROGRAM_INDEX=<n> boots program n of a multi-program file directly (testing).
+    if (const char* const idx = std::getenv("EDEN_PROGRAM_INDEX"); idx != nullptr) {
+        load_parameters.program_index = std::atoi(idx);
+        state->program_index = load_parameters.program_index;
+    }
     const Core::SystemResultStatus load_result = state->system.Load(*state->emu_window, lp.filepath, load_parameters);
     switch (load_result) {
     case Core::SystemResultStatus::Success:
@@ -295,51 +390,19 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         }
     }
 
-    DSModHarness::OnGameLoaded(state->dsmod, state->system);
-
-    // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
-    state->system.GPU().Start();
-    state->system.GetCpuManager().OnGpuReady();
-
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
-        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
-            state->system.GetApplicationProcessProgramID(), std::stop_token{},
-            [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});
-    }
-
-    // don't do anything, SDL3 already exists for us :D
-    state->system.RegisterExitCallback([] {});
-
-    // QLaunch launched applications (should) now reload shader cache.
-    static std::mutex shader_cache_reload_mutex;
-    state->system.RegisterApplicationChangedCallback([state](u64 changed_program_id) {
-        if (!Settings::values.use_disk_shader_cache.GetValue()) {
-            return;
-        }
-
-        std::scoped_lock lk{shader_cache_reload_mutex};
-
-        LOG_INFO(Frontend, "Reloading disk shader cache for {:016X}", changed_program_id);
-
-        state->system.Pause();
-        state->system.GPU().WaitForIdle();
-        state->system.GPU().ObtainContext();
-
-        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
-            changed_program_id, std::stop_token{},
-            [](VideoCore::LoadCallbackStage, size_t, size_t) {});
-
-        state->system.GPU().ReleaseContext();
-        state->system.Run();
-    });
-
-    void(state->system.Run());
+    state->filepath = lp.filepath;
+    StartLoadedSystem(state);
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;
 }
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
+    if (const int next = state->next_program_index.exchange(-1); next >= 0) {
+        if (!SwitchProgram(state, next)) {
+            return SDL_APP_FAILURE;
+        }
+    }
     DSModHarness::Iterate(state->system, state->input_subsystem);
     return state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }

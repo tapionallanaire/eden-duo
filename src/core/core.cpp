@@ -342,6 +342,11 @@ struct System::Impl {
         // registration wins. A previous load that failed after registering (or a previous game in
         // the same process) must not leave its build id and main base behind for this one.
         ResetPendingDualScreenMod();
+        // ShutdownMainProcess leaves the shutting-down flag set. A load that follows it in the
+        // same System (a multi-program title's ExecuteProgram, Kingdom Hearts 1.5+2.5's launcher
+        // starting a game) must clear it, or the VI conductor never produces another vsync and
+        // the new program waits on its first frame forever.
+        SetShuttingDown(false);
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
