@@ -592,6 +592,8 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
 
     if (Settings::values.resolution_info.active) {
         Optimization::RescalingPass(program);
+    } else if (Settings::values.msaa_single_sample_by_title) {
+        Optimization::MsaaSingleSamplePass(program);
     }
     Optimization::DeadCodeEliminationPass(program);
     TightenOutputVertices(program);
