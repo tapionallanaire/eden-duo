@@ -64,6 +64,14 @@ void MaxwellDMA::Launch() {
     const LaunchDMA& launch = regs.launch_dma;
     ASSERT(launch.interrupt_type == LaunchDMA::InterruptType::NONE);
 
+    // A launch without a data transfer only releases its semaphore. Kingdom Hearts 1.5+2.5
+    // issues one per frame with offset_in 0 and offset_out at the semaphore address; copying
+    // for it wrote zeros over the semaphore the release then had to win a race against.
+    if (launch.data_transfer_type == LaunchDMA::DataTransferType::NONE) {
+        ReleaseSemaphore();
+        return;
+    }
+
     if (launch.multi_line_enable) {
         const bool is_src_pitch = launch.src_memory_layout == LaunchDMA::MemoryLayout::PITCH;
         const bool is_dst_pitch = launch.dst_memory_layout == LaunchDMA::MemoryLayout::PITCH;
