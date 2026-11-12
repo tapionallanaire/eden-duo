@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include <QAbstractButton>
 #include <QCheckBox>
@@ -41,6 +41,7 @@
 #include "yuzu/configuration/configure_graphics_advanced.h"
 #include "yuzu/configuration/configure_graphics_extensions.h"
 #include "yuzu/configuration/configure_input_per_game.h"
+#include "yuzu/configuration/configure_modern_per_game.h"
 #include "yuzu/configuration/configure_network.h"
 #include "yuzu/configuration/configure_per_game.h"
 #include "yuzu/configuration/configure_per_game_addons.h"
@@ -56,7 +57,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
       tab_group{std::make_shared<std::vector<ConfigurationShared::Tab*>>()} {
     const auto file_path = std::filesystem::path(Common::FS::ToU8String(file_name));
     const auto config_file_name = title_id == 0 ? Common::FS::PathToUTF8String(file_path.filename())
-                                                : fmt::format("{:016X}", title_id);
+                                                : std::format("{:016X}", title_id);
     game_config = std::make_unique<QtConfig>(config_file_name, Config::ConfigType::PerGameConfig);
     addons_tab = std::make_unique<ConfigurePerGameAddons>(system_, this);
     audio_tab = std::make_unique<ConfigureAudio>(system_, tab_group, *builder, this);
@@ -72,6 +73,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     system_tab = std::make_unique<ConfigureSystem>(system_, tab_group, *builder, this);
     network_tab = std::make_unique<ConfigureNetwork>(system_, this);
     applets_tab = std::make_unique<ConfigureApplets>(system_, tab_group, *builder, this);
+    modern_tab = std::make_unique<ConfigureModernPerGame>(system_, tab_group, *builder, this);
 
     ui->setupUi(this);
 
@@ -85,6 +87,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
     ui->tabWidget->addTab(input_tab.get(), tr("Input Profiles"));
     ui->tabWidget->addTab(network_tab.get(), tr("Network"));
     ui->tabWidget->addTab(applets_tab.get(), tr("Applets"));
+    ui->tabWidget->addTab(modern_tab.get(), tr("Modern Console"));
 
     setFocusPolicy(Qt::ClickFocus);
     setWindowTitle(tr("Properties"));

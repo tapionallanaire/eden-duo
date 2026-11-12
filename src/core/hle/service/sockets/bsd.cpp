@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/logging.h"
 #include "common/socket_types.h"

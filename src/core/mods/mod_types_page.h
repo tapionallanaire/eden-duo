@@ -48,6 +48,14 @@ struct HapticsConfig {
 /// A per-widget / per-action override: -1 = none, else a HapticStrength value.
 using HapticOverride = s8;
 
+/// Runtime 23: the strength a refused tap uses on a widget with `widget` override. A refusal keeps
+/// the manifest's "refused" strength (a "click" widget does not turn refusals into clicks), but an
+/// explicit "off" on the widget silences it too -- a package's touch-feedback-off setting is built
+/// from paired widgets with "haptic": "off", and must also stop the refusal buzz.
+[[nodiscard]] constexpr HapticOverride RefusalHapticOverride(HapticOverride widget) {
+    return widget == static_cast<HapticOverride>(HapticStrength::Off) ? widget : HapticOverride{-1};
+}
+
 /// Animation timing curves (cubic).
 enum class Easing : u8 { Linear, EaseIn, EaseOut, EaseInOut };
 [[nodiscard]] inline float ApplyEasing(Easing easing, float t) {
@@ -249,6 +257,12 @@ struct MapWidgetExtras {
         std::string src;      ///< a fixed image key
         std::string src_bind; ///< a text point naming the image key (wins when non-empty)
         std::string src_detail_bind;    ///< optional higher-detail image for the same world box
+        /// Runtime 24: a text point naming an image whose alpha, stretched (bilinear) over the
+        /// overlay's box, multiplies the overlay's alpha -- a dynamic mask such as a fog of war a
+        /// module reads back off the GPU. While the named mask is still loading the overlay is
+        /// not drawn; an empty / missing point draws it unmasked. Unturned views only (a turned
+        /// view, view_rotate_bind, skips a masked overlay).
+        std::string mask_bind;
         float detail_threshold{210.0f}; ///< projected edge length above which detail is requested
         float x0{}, y0{}, x1{}, y1{};
         PointGate show;

@@ -131,10 +131,16 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
                             static_cast<size_t>(topology_) < TOPOLOGY_CLASS_REPRESENTATIVE_LUT.size()
                         ? TOPOLOGY_CLASS_REPRESENTATIVE_LUT[static_cast<size_t>(topology_)]
                         : topology_);
-    // One sample per pixel when the title's multisampled targets are kept single-sampled.
-    msaa_mode.Assign(Settings::values.msaa_single_sample_by_title
-                         ? Tegra::Texture::MsaaMode::Msaa1x1
-                         : regs.anti_alias_samples_mode);
+    if (Settings::values.msaa_single_sample_by_title) {
+        // One sample per pixel when the title's multisampled targets are kept single-sampled.
+        msaa_mode.Assign(Tegra::Texture::MsaaMode::Msaa1x1);
+    } else if (regs.tir_mode == Maxwell::TIRMode::RasterNTargetM &&
+               regs.anti_alias_raster != Maxwell::AntiAliasRaster::Mode1x1) {
+        // Target-independent rasterization rasterizes (and depth tests) at the raster sample count
+        msaa_mode.Assign(static_cast<Tegra::Texture::MsaaMode>(regs.anti_alias_raster));
+    } else {
+        msaa_mode.Assign(regs.anti_alias_samples_mode);
+    }
     attachment0_dual_source_blend.Assign(ComputeAttachment0DualSourceBlend(regs) ? 1 : 0);
 
     raw2 = 0;
@@ -370,19 +376,27 @@ void FixedPipelineState::DynamicState::Refresh2(const Maxwell& regs,
     depth_bias_enable.Assign(enabled_lut[offset_class] != 0 ? 1 : 0);
 }
 
+DepthClampClip MaxwellDepthClampClip(const Maxwell& regs, bool has_depth_clip_enable) {
+    using GeometryClip = Maxwell::ViewportClipControl::GeometryClip;
+    const auto& control = regs.viewport_clip_control;
+    const bool clips_z = control.geometry_clip == GeometryClip::Passthrough ||
+                         control.geometry_clip == GeometryClip::FrustumXYZ ||
+                         control.geometry_clip == GeometryClip::FrustumZ;
+    if (!has_depth_clip_enable) {
+        return {.clamp = !clips_z, .clip = clips_z};
+    }
+    const bool clamp = control.pixel_min_z != 0 || control.pixel_max_z != 0;
+    return {.clamp = clamp, .clip = clips_z};
+}
+
 void FixedPipelineState::DynamicState::Refresh3(const Maxwell& regs,
                                                 const DynamicFeatures& features) {
     if (!features.has_dynamic_state3_logic_op_enable) {
         logic_op_enable.Assign(regs.logic_op.enable != 0 ? 1 : 0);
     }
-    if (!features.has_dynamic_state3_depth_clamp_enable) {
-        depth_clamp_disabled.Assign(regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::Passthrough ||
-                                    regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::FrustumXYZ ||
-                                    regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::FrustumZ);
-    }
+    const auto depth = MaxwellDepthClampClip(regs, features.has_depth_clip_enable);
+    depth_clamp_disabled.Assign(depth.clamp ? 0 : 1);
+    depth_clip_disabled.Assign(depth.clip ? 0 : 1);
     if (!features.has_dynamic_state3_line_stipple_enable) {
         line_stipple_enable.Assign(regs.line_stipple_enable);
     }

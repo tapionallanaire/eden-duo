@@ -1,5 +1,5 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
-    <!-- Published companions as of 2026-10-20, used before the first online catalog refresh. -->
+    <!-- Published companions as of Eden Duo 1.3.5 (2026-11-08), used before the first online catalog refresh. -->
     <string-array name="dual_screen_supported_title_ids" translatable="false">
         <item>01005CA01580E000</item>
         <item>010093801237C000</item>
@@ -18,6 +18,17 @@
         <item>010086500D3C8000</item>
         <item>0100C2901153C000</item>
         <item>0100D04004176000</item>
+        <item>01007EF00011E000</item>
+        <item>0100BA4026E94000</item>
+        <item>0100000000010000</item>
+        <item>01008CF01BAAC000</item>
+        <item>010097F018538000</item>
+        <item>0100DCD01525A000</item>
+        <item>0100A6301214E000</item>
+        <item>01005270232F2000</item>
+        <item>0100ABF008968000</item>
+        <item>01008DB008C2C000</item>
+        <item>01002E7016C46000</item>
     </string-array>
 
     <style name="Widget.Eden.DualScreenBadge" parent="">

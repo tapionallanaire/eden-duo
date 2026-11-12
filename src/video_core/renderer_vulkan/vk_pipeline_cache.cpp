@@ -64,7 +64,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 20;
+constexpr u32 CACHE_VERSION = 21;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -450,7 +450,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                        driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
                                        driver_id == VK_DRIVER_ID_MESA_RADV ||
                                        driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS ||
-                                       driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA,
+                                       driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+                                       driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
+                                       driver_id == VK_DRIVER_ID_MESA_TURNIP,
 
         .has_broken_spirv_clamp = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS,
         .has_broken_spirv_position_input = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
@@ -495,6 +497,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .support_geometry_shader_passthrough = device.IsNvGeometryShaderPassthroughSupported(),
         .support_conditional_barrier = device.SupportsConditionalBarriers(),
         .single_lane_geometry_subgroups = !profile.SupportsSubgroupStage(Shader::Stage::Geometry),
+        .support_attribute_texture_handle = true,
     };
     host_info.ApplyDescriptorLimitPolicy();
 
@@ -538,6 +541,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     dynamic_features.has_dynamic_state3_depth_clamp_enable =
         dynamic_features.has_extended_dynamic_state_3_enables &&
         device.SupportsDynamicState3DepthClampEnable();
+    dynamic_features.has_depth_clip_enable = device.IsExtDepthClipEnableSupported();
     dynamic_features.has_dynamic_state3_logic_op_enable =
         dynamic_features.has_extended_dynamic_state_3_enables &&
         device.SupportsDynamicState3LogicOpEnable();
@@ -628,7 +632,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
 
     const auto shader_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir)};
-    const auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
+    const auto base_dir{shader_dir / std::format("{:016x}", title_id)};
     if (!Common::FS::CreateDir(shader_dir) || !Common::FS::CreateDir(base_dir)) {
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
@@ -1003,6 +1007,27 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
         pipeline->BuildUrgently(urgent_workers);
         return pipeline;
     }
+    {
+        const auto& rt0 = maxwell3d->regs.rt[0];
+        const u64 area = u64{rt0.width} * u64{rt0.height};
+        if (rt0.width != 0 && area < u64{640} * 360) {
+            return pipeline;
+        }
+    }
+    // A draw that writes memory (vertex data computed in a vertex shader, transform feedback, a
+    // draw with the rasterizer off) is used by later draws: skipping it breaks them for the
+    // session, not one frame (Super Mario Party Jamboree's characters after a fresh shader cache).
+    const auto& regs = maxwell3d->regs;
+    const bool side_effects{pipeline->HasSideEffects() || regs.transform_feedback_enabled != 0 ||
+                            regs.rasterize_enable == 0};
+    if (side_effects) {
+        return pipeline;
+    }
+    // If something is using depth, we can assume that games are not rendering anything which
+    // will be used one time.
+    if (regs.zeta_enable) {
+        return nullptr;
+    }
     // If games are using a small index count, we can assume these are full screen quads.
     // Usually these shaders are only used once for building textures so we can assume they
     // can't be built async
@@ -1302,9 +1327,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     const bool should_log = GPU::Logging::IsActive();
     const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
     if (should_log || should_dump) {
-        const std::string shader_name = fmt::format("shader_{:016x}_compute", key.unique_hash);
+        const std::string shader_name = std::format("shader_{:016x}_compute", key.unique_hash);
         if (should_log) {
-            const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
+            const std::string shader_info = std::format("SPIR-V size: {} bytes, hash: {:016x}",
                 code.size() * sizeof(u32), key.unique_hash);
             GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
         }
@@ -1315,7 +1340,7 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     }
 
     if (device.HasDebuggingToolAttached()) {
-        const auto name{fmt::format("Shader {:016x}", key.unique_hash)};
+        const auto name{std::format("Shader {:016x}", key.unique_hash)};
         spv_module.SetObjectNameEXT(name.c_str());
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};

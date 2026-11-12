@@ -51,6 +51,7 @@ target_link_libraries(yuzu-cmd PRIVATE SDL3::SDL3)
 if (MSVC)
     target_link_libraries(yuzu-cmd PRIVATE getopt)
 endif()
+target_link_libraries(yuzu-cmd PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if(UNIX AND NOT APPLE)
     install(TARGETS yuzu-cmd)

@@ -34,6 +34,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/composite_completion.h"
+#include "video_core/dsmod/texture_readback.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/host1x/host1x.h"
@@ -315,6 +316,10 @@ struct GPU::Impl {
         return rasterizer->OnCPUWrite(addr, size);
     }
 
+    bool MustFlushRegion(DAddr addr, u64 size) {
+        return renderer->ReadRasterizer()->MustFlushRegion(addr, size);
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
     void FlushAndInvalidateRegion(DAddr addr, u64 size) {
         gpu_thread.FlushAndInvalidateRegion(addr, size, is_async);
@@ -397,6 +402,27 @@ struct GPU::Impl {
         });
         return completed_composites.IsDone(composite_id) &&
                !shutting_down.load(std::memory_order_relaxed);
+    }
+
+    bool DSModTextureReadbackAvailable() const {
+        return is_async && renderer && !shutting_down.load(std::memory_order_relaxed) &&
+               renderer->ReadRasterizer()->DSModSupportsTextureReadback();
+    }
+
+    bool DSModRequestTextureReadback(const VideoCore::DSMod::ReadbackRequest& request,
+                                     VideoCore::DSMod::ReadbackCallback&& callback) {
+        if (!DSModTextureReadbackAvailable()) {
+            return false;
+        }
+        (void)RequestSyncOperation([this, request, callback = std::move(callback)]() mutable {
+            if (!renderer->ReadRasterizer()->DSModReadbackTexture(request, callback)) {
+                VideoCore::DSMod::ReadbackResult result;
+                result.status = VideoCore::DSMod::ReadbackStatus::Unsupported;
+                callback(std::move(result));
+            }
+        });
+        gpu_thread.TickGPU(is_async);
+        return true;
     }
 
     std::vector<u8> GetAppletCaptureBuffer() {
@@ -565,6 +591,16 @@ VideoCore::DSMod::AuxRouting& GPU::DSModAux() {
     return impl->dsmod_aux;
 }
 
+bool GPU::DSModTextureReadbackAvailable() const {
+    return impl->DSModTextureReadbackAvailable();
+}
+
+bool GPU::DSModRequestTextureReadback(
+    const VideoCore::DSMod::ReadbackRequest& request,
+    std::function<void(VideoCore::DSMod::ReadbackResult&&)> callback) {
+    return impl->DSModRequestTextureReadback(request, std::move(callback));
+}
+
 const VideoCore::RendererBase& GPU::Renderer() const {
     return *impl->renderer;
 }
@@ -652,6 +688,10 @@ void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
 
 bool GPU::OnCPUWrite(DAddr addr, u64 size) {
     return impl->OnCPUWrite(addr, size);
+}
+
+bool GPU::MustFlushRegion(DAddr addr, u64 size) {
+    return impl->MustFlushRegion(addr, size);
 }
 
 void GPU::FlushAndInvalidateRegion(DAddr addr, u64 size) {

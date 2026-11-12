@@ -180,6 +180,15 @@ public:
         return slot_images[id];
     }
 
+    /// Eden Duo (runtime 24): visit every live image as (id, image), to find the one a module
+    /// texture readback names. Call with `mutex` held.
+    template <typename Func>
+    void DSModForEachImage(Func&& func) {
+        for (auto [id, image] : slot_images) {
+            func(id, *image);
+        }
+    }
+
     /// Get the imageview from the graphics descriptor table in the specified index
     [[nodiscard]] ImageView& GetImageView(u32 index) noexcept;
 
@@ -459,6 +468,10 @@ private:
 
     /// Prepare an image view to be used
     void PrepareImageView(ImageViewId image_view_id, bool is_modification, bool invalidate);
+
+    /// Eden Duo: colour-target history flags (ImageFlagBits::ColorTarget / ColorTargetRedrawn)
+    void DSModMarkColorTarget(ImageViewId image_view_id) noexcept;
+    void DSModInheritColorTarget(ImageBase& image, const ImageBase& from) noexcept;
 
     /// Execute copies from one image to the other, even if they are incompatible
     void CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies);

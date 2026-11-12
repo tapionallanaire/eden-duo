@@ -151,6 +151,13 @@ public:
     void BindChannel(Tegra::Control::ChannelState& channel) override;
 
     void ReleaseChannel(s32 channel_id) override;
+
+    /// Eden Duo (runtime 24): module texture readback (vk_dsmod_texture_readback.cpp).
+    bool DSModSupportsTextureReadback() const override {
+        return true;
+    }
+    bool DSModReadbackTexture(const VideoCore::DSMod::ReadbackRequest& request,
+                              VideoCore::DSMod::ReadbackCallback& callback) override;
     std::optional<FramebufferTextureInfo> AccelerateDisplay(const Tegra::FramebufferConfig& config,
                                                             VAddr framebuffer_addr,
                                                             u32 pixel_stride);
@@ -172,9 +179,37 @@ private:
     /// Eden Duo developer probes, run once per draw (vk_dsmod_rt_probe.cpp).
     struct DSModProbeState;
     void DSModProbeRenderTargets(DSModProbeState*& state);
+    /// Hands every module texture readback whose copy the GPU has finished to its callback.
+    /// GPU thread: from TickFrame and before each new readback.
+    void DSModCompleteTextureReadbacks();
+    void DSModLogReadbackMiss(const VideoCore::DSMod::ReadbackRequest& request, int status,
+                              u32 ambiguous = 0);
+    struct DSModPendingReadback {
+        StagingBufferRef staging;
+        u64 tick;
+        size_t row_bytes;
+        VideoCore::Surface::PixelFormat guest_format;
+        VideoCore::DSMod::ReadbackFormat format;
+        VideoCore::DSMod::ReadbackResult result; ///< everything but the pixels
+        VideoCore::DSMod::ReadbackCallback callback;
+    };
 
     template <typename Func>
     void PrepareDraw(bool is_indexed, bool is_indirect, Func&&);
+
+    /// A stretch of a draw whose vertices all carry the same texture handle.
+    struct AttributeHandleRun {
+        u32 first;
+        u32 count;
+        u32 handle;
+    };
+
+    /// Splits the current draw wherever the texture handle carried in the vertex data changes.
+    void CollectAttributeHandleRuns(bool is_indexed);
+
+    std::vector<AttributeHandleRun> attribute_handle_runs;
+    GraphicsPipeline* attribute_handle_pipeline{};
+    bool split_attribute_handles{};
 
     void FlushWork();
 
@@ -226,6 +261,7 @@ private:
     StagingBufferPool staging_pool;
     VideoCommon::ImageViewId rt_pick_view{};
     bool rt_pick_pending{false};
+    std::vector<DSModPendingReadback> dsmod_readbacks; ///< in flight, GPU thread only
     DescriptorPool descriptor_pool;
     GuestDescriptorQueue guest_descriptor_queue;
     ComputePassDescriptorQueue compute_pass_descriptor_queue;

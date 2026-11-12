@@ -4,16 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono>
-#include <fmt/ranges.h>
-#include <string_view>
-#include <thread>
+#include <format>
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/hle/ipc.h"
-#include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/service.h"
@@ -27,9 +23,9 @@ namespace Service {
 [[maybe_unused]] static std::string MakeFunctionString(std::string_view name, std::string_view port_name, const u32* cmd_buf) {
     // Number of params == bits 0-5 + bits 6-11
     int num_params = (cmd_buf[0] & 0x3F) + ((cmd_buf[0] >> 6) & 0x3F);
-    std::string function_string = fmt::format("fn '{}': port={}", name, port_name);
+    std::string function_string = std::format("fn '{}': port={}", name, port_name);
     for (int i = 1; i <= num_params; ++i)
-        function_string += fmt::format(", cmd_buf[{}]={:#x}", i, cmd_buf[i]);
+        function_string += std::format(", cmd_buf[{}]={:#x}", i, cmd_buf[i]);
     return function_string;
 }
 
@@ -37,7 +33,6 @@ ServiceFrameworkBase::ServiceFrameworkBase(Core::System& system_, const char* se
     : SessionRequestHandler(system_.Kernel(), service_name_)
     , system{system_}
     , service_name{service_name_}
-    , is_i_storage{std::string_view{service_name_} == "IStorage"}
     , handler_invoker{handler_invoker_}
     , max_sessions{max_sessions_}
 {}
@@ -66,14 +61,16 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(HLERequestContext& ctx,
     auto cmd_buf = ctx.CommandBuffer();
     std::string function_name = info == nullptr ? "<unknown>" : info->name;
 
-    fmt::memory_buffer buf;
-    fmt::format_to(std::back_inserter(buf), "function '{}({})': port='{}' cmd_buf={{[0]={:#x}", ctx.GetCommand(), function_name, service_name, cmd_buf[0]);
+    std::string buf;
+    buf.reserve(256);
+
+    std::format_to(std::back_inserter(buf), "function '{}({})': port='{}' cmd_buf={{[0]={:#x}", ctx.GetCommand(), function_name, service_name, cmd_buf[0]);
     for (int i = 1; i <= 8; ++i)
-        fmt::format_to(std::back_inserter(buf), ", [{}]={:#x}", i, cmd_buf[i]);
+        std::format_to(std::back_inserter(buf), ", [{}]={:#x}", i, cmd_buf[i]);
     buf.push_back('}');
 
     system.GetReporter().SaveUnimplementedFunctionReport(ctx, ctx.GetCommand(), function_name, service_name);
-    UNIMPLEMENTED_MSG("Unknown / unimplemented {}", fmt::to_string(buf));
+    UNIMPLEMENTED_MSG("Unknown / unimplemented {}", buf);
     if (Settings::values.use_auto_stub) {
         LOG_WARNING(Service, "Using auto stub fallback!");
         IPC::ResponseBuilder rb{ctx, 2};
@@ -82,22 +79,13 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(HLERequestContext& ctx,
 }
 
 void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
-    const auto command = ctx.GetCommand();
-    auto it = handlers.find(command);
-    const bool is_cmd_read = command == 0;
+    auto it = handlers.find(ctx.GetCommand());
     FunctionInfoBase const* info = it == handlers.end() ? nullptr : &it->second;
     if (info == nullptr || info->handler_callback == nullptr)
         return ReportUnimplementedFunction(ctx, info);
 
     LOG_TRACE(Service, "{}", MakeFunctionString(info->name, GetServiceName(), ctx.CommandBuffer()));
     handler_invoker(this, info->handler_callback, ctx);
-
-    if (is_i_storage && is_cmd_read) {
-        const auto* const process = ctx.GetThread().GetOwnerProcess();
-        if (process != nullptr && system.IsNVDECActiveForProcess(process->GetId())) {
-            std::this_thread::sleep_for(std::chrono::microseconds{600});
-        }
-    }
 }
 
 void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {

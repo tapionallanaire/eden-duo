@@ -26,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <limits>
 #include <optional>
 #include <string>
@@ -503,6 +504,7 @@ u64 ModRuntime::WidgetDependencyHash(const Widget& w, const StateSnapshot& s,
         for (const auto& ov : w.map_extras->overlays) {
             add(ov.src_bind);
             add(ov.src_detail_bind);
+            add(ov.mask_bind); // runtime 24
             add(ov.show.point);
         }
     }
@@ -1180,7 +1182,7 @@ void ModRuntime::PublishUi(const StateSnapshot& snapshot) {
             if (g->second.settle_pending) {
                 g->second.settle_pending = false;
                 const std::string line =
-                    fmt::format("DSMod anim group '{}' {} after {} frame(s): {} redraw avg {:.2f} "
+                    std::format("DSMod anim group '{}' {} after {} frame(s): {} redraw avg {:.2f} "
                                 "ms max {:.2f} ms "
                                 "(box {}x{})",
                                 rg.key, g->second.open ? "shown" : "hidden", g->second.frames,
@@ -1198,7 +1200,7 @@ void ModRuntime::PublishUi(const StateSnapshot& snapshot) {
             if (dl == nullptr) {
                 const float e = ApplyEasing(Easing::Linear, g->second.pos);
                 DumpAnimFrame(canvas.Pixels(), canvas.Width(), canvas.Height(),
-                              fmt::format("group_{}_f{:02}_p{:03}", rg.key, g->second.frames,
+                              std::format("group_{}_f{:02}_p{:03}", rg.key, g->second.frames,
                                           static_cast<int>(e * 1000.0f)));
             }
         }

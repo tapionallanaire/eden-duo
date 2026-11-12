@@ -47,7 +47,7 @@ QString GetGameListCachedObject(const std::string& filename, const std::string& 
 
     const auto path =
         Common::FS::PathToUTF8String(Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) /
-                                     "game_list" / fmt::format("{}.{}", filename, ext));
+                                     "game_list" / std::format("{}.{}", filename, ext));
 
     void(Common::FS::CreateParentDirs(path));
 
@@ -79,8 +79,8 @@ std::pair<std::vector<u8>, std::string> GetGameListCachedObject(
 
     const auto game_list_dir =
         Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "game_list";
-    const auto jpeg_name = fmt::format("{}.jpeg", filename);
-    const auto app_name = fmt::format("{}.appname.txt", filename);
+    const auto jpeg_name = std::format("{}.jpeg", filename);
+    const auto app_name = std::format("{}.appname.txt", filename);
 
     const auto path1 = Common::FS::PathToUTF8String(game_list_dir / jpeg_name);
     const auto path2 = Common::FS::PathToUTF8String(game_list_dir / app_name);
@@ -141,7 +141,7 @@ std::pair<std::vector<u8>, std::string> GetGameListCachedObject(
 void GetMetadataFromControlNCA(const FileSys::PatchManager& patch_manager, const FileSys::NCA& nca,
                                std::vector<u8>& icon, std::string& name) {
     std::tie(icon, name) = GetGameListCachedObject(
-        fmt::format("{:016X}", patch_manager.GetTitleID()), {}, [&patch_manager, &nca] {
+        std::format("{:016X}", patch_manager.GetTitleID()), {}, [&patch_manager, &nca] {
             const auto [nacp, icon_f] = patch_manager.ParseControlNCA(nca);
             return std::make_pair(icon_f->ReadAllBytes(), nacp->GetApplicationName());
         });
@@ -208,7 +208,7 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
     auto const file_type_string = QString::fromStdString(Loader::GetFileTypeString(file_type));
 
     QString patch_versions = GetGameListCachedObject(
-        fmt::format("{:016X}", patch.GetTitleID()), "pv.txt", [&patch, &loader] {
+        std::format("{:016X}", patch.GetTitleID()), "pv.txt", [&patch, &loader] {
             return FormatPatchNameVersions(patch, loader, loader.IsRomFSUpdatable());
         });
 
@@ -360,7 +360,8 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::string& dir_pa
             }
 
             if (target == ScanTarget::PopulateGameList &&
-                (file_type == Loader::FileType::XCI || file_type == Loader::FileType::NSP) &&
+                (file_type == Loader::FileType::XCI || file_type == Loader::FileType::XCZ ||
+                 file_type == Loader::FileType::NSP || file_type == Loader::FileType::NSZ) &&
                 !Loader::IsBootableGameContainer(file, file_type)) {
                 return true;
             }
@@ -375,7 +376,9 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::string& dir_pa
                                        program_id, file);
                 } else if (Settings::values.ext_content_from_game_dirs.GetValue() &&
                            (file_type == Loader::FileType::XCI ||
-                            file_type == Loader::FileType::NSP)) {
+                            file_type == Loader::FileType::XCZ ||
+                            file_type == Loader::FileType::NSP ||
+                            file_type == Loader::FileType::NSZ)) {
                     void(provider->AddEntriesFromContainer(file));
                 }
             } else {
@@ -402,7 +405,8 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::string& dir_pa
                 };
 
                 if (res2 == Loader::ResultStatus::Success && program_ids.size() > 1 &&
-                    (file_type == Loader::FileType::XCI || file_type == Loader::FileType::NSP)) {
+                    (file_type == Loader::FileType::XCI || file_type == Loader::FileType::XCZ ||
+                     file_type == Loader::FileType::NSP || file_type == Loader::FileType::NSZ)) {
                     for (const auto id : program_ids) {
                         // dravee suggested this, only viable way to
                         // not show sub-games in qlaunch for now.
