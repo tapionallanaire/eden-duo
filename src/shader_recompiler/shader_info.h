@@ -191,6 +191,8 @@ struct TextureBufferDescriptor {
     u32 secondary_shift_left;
     u32 count;
     u32 size_shift;
+    u32 mask = 0xffffffff;
+    u32 secondary_mask = 0xffffffff;
 
     auto operator<=>(const TextureBufferDescriptor&) const = default;
 };
@@ -235,6 +237,13 @@ struct TextureDescriptor {
     // 1-based index into Info::index_programs when the table index is a per-draw constant the
     // renderer evaluates: count is then the number of candidates bound, not a table size.
     u16 index_program;
+    /// The handle offset is moved by a constant buffer value read when drawing
+    bool has_index_cbuf;
+    u32 index_cbuf_index;
+    u32 index_cbuf_offset;
+    u32 index_shift;
+    u32 mask = 0xffffffff;
+    u32 secondary_mask = 0xffffffff;
 
     auto operator<=>(const TextureDescriptor&) const = default;
 };

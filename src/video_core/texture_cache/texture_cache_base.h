@@ -263,6 +263,12 @@ public:
                     const Tegra::Engines::Fermi2D::Surface& src,
                     const Tegra::Engines::Fermi2D::Config& copy);
 
+    /// Replaces the contents of the images fully inside a range that a GPU buffer wrote, with the
+    /// data of that buffer
+    template <typename BufferHandle>
+    void UpdateImagesFromBuffer(DAddr cpu_addr, size_t size, BufferHandle buffer,
+                                u64 buffer_offset);
+
     /// Download contents of host images to guest memory in a region
     void DownloadMemory(DAddr cpu_addr, size_t size);
 

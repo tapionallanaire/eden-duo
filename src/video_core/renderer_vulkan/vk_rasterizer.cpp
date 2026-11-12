@@ -844,6 +844,12 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
 
+    const auto update_images_written_by_buffers = [this] {
+        buffer_cache.ForEachWrittenComputeStorageBuffer(
+            [this](auto& buffer, u32 offset, DAddr device_addr, u32 size) {
+                texture_cache.UpdateImagesFromBuffer(device_addr, size, buffer.Handle(), offset);
+            });
+    };
     auto indirect_address = kepler_compute->GetIndirectComputeAddress();
     if (indirect_address) {
         // DispatchIndirect
@@ -860,6 +866,7 @@ void RasterizerVulkan::DispatchCompute() {
             cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
         });
         compute_writes_need_graphics_barrier = true;
+        update_images_written_by_buffers();
         return;
     }
     const std::array<u32, 3> dim{qmd.grid_dim_x, qmd.grid_dim_y, qmd.grid_dim_z};
@@ -883,6 +890,7 @@ void RasterizerVulkan::DispatchCompute() {
         cmdbuf.Dispatch(dim[0], dim[1], dim[2]);
     });
     compute_writes_need_graphics_barrier = true;
+    update_images_written_by_buffers();
 
     // Log compute dispatch
     if (GPU::Logging::IsActive() &&
