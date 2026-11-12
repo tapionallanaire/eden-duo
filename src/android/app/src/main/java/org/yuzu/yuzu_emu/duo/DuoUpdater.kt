@@ -63,6 +63,14 @@ object DuoUpdater {
     /** The published app id; dev builds (.dev) cannot install a release over themselves. */
     private const val RELEASE_PACKAGE = "dev.igawa6.edenduo"
 
+    /**
+     * Duet Plus: these are Eden Duo's releases, another app under another signature. Only Eden
+     * Duo's own packages (release and .dev) may show, check or install them; Duet Plus updates
+     * through DuoUpdates.
+     */
+    internal fun appliesTo(packageName: String): Boolean =
+        packageName == RELEASE_PACKAGE || packageName == "$RELEASE_PACKAGE.dev"
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -97,6 +105,7 @@ object DuoUpdater {
 
     /** The App Settings items (SettingsFragmentPresenter): the switch and "Check now". */
     fun addTo(sl: ArrayList<SettingsItem>, activity: FragmentActivity?) {
+        if (!appliesTo(YuzuApplication.appContext.packageName)) return
         sl.add(
             SwitchSetting(
                 setting,
@@ -132,6 +141,7 @@ object DuoUpdater {
     }
 
     private fun check(activity: FragmentActivity, manual: Boolean) {
+        if (!appliesTo(activity.packageName)) return
         if (!busy.compareAndSet(false, true)) return
         activity.lifecycleScope.launch {
             try {
@@ -358,6 +368,7 @@ object DuoUpdater {
      * the "Install unknown apps" permission the user is sent to that setting first.
      */
     private fun install(activity: FragmentActivity, apk: File) {
+        if (!appliesTo(activity.packageName)) return
         if (activity.packageManager.canRequestPackageInstalls()) {
             commitSession(activity, apk)
             return

@@ -45,4 +45,12 @@ class DuoUpdatesTest {
         assertFalse(DuoUpdates.isNewer("1.1.9", "1.1.10"))
         assertFalse(DuoUpdates.isNewer("1.1.1", "1.1.1"))
     }
+
+    @Test fun edenDuosUpdaterIsOffInDuetPlus() {
+        // Eden Duo's releases are another app: only its own packages may see or install them.
+        assertFalse(DuoUpdater.appliesTo(DuoUpdates.PACKAGE))
+        assertFalse(DuoUpdater.appliesTo(DuoUpdates.PACKAGE + ".dev"))
+        assertTrue(DuoUpdater.appliesTo("dev.igawa6.edenduo"))
+        assertTrue(DuoUpdater.appliesTo("dev.igawa6.edenduo.dev"))
+    }
 }
