@@ -230,7 +230,7 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
     // EDEN_NX2_MACRO_COPY=1: always use the vector (for comparisons).
     static const bool always_copy = std::getenv("EDEN_NX2_MACRO_COPY") != nullptr;
     if (is_last_call && macro_params.empty() && amount <= 64 && !always_copy &&
-        !Settings::IsGPULevelHigh()) {
+        !Settings::IsGPULevelHigh() && !current_macro_dirty) {
         std::array<u32, 64> parameters;
         std::copy_n(base_start, amount, parameters.begin());
         ConsumeSink(system);
