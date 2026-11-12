@@ -293,16 +293,23 @@ private:
                 texture_pops += (released.flushes & TextureFlushes) != 0 ? 1 : 0;
                 buffer_pops += (released.flushes & BufferFlushes) != 0 ? 1 : 0;
             }
-            if (texture_pops != 0) {
+            if (buffer_pops != 0) {
+                // The buffer pop tells the texture cache what it wrote back (texture mutex),
+                // and the GPU thread takes texture then buffer: both at once, as in Duet Plus
+                // 1.1.18, each fence's texture pop before its buffer pop.
+                std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+                for (const Released& released : batch) {
+                    if ((released.flushes & TextureFlushes) != 0) {
+                        texture_cache.PopAsyncFlushes();
+                    }
+                    if ((released.flushes & BufferFlushes) != 0) {
+                        buffer_cache.PopAsyncFlushes();
+                    }
+                }
+            } else if (texture_pops != 0) {
                 std::scoped_lock lock{texture_cache.mutex};
                 for (size_t i = 0; i < texture_pops; ++i) {
                     texture_cache.PopAsyncFlushes();
-                }
-            }
-            if (buffer_pops != 0) {
-                std::scoped_lock lock{buffer_cache.mutex};
-                for (size_t i = 0; i < buffer_pops; ++i) {
-                    buffer_cache.PopAsyncFlushes();
                 }
             }
             // Queries and operations keep their per-fence order.
@@ -338,13 +345,16 @@ private:
 
     /// committed: what CommitAsyncFlushes returned for this fence.
     void PopAsyncFlushes(u8 committed) {
-        if (committed & TextureFlushes) {
+        if (committed & BufferFlushes) {
+            // Both locks at once: see ReleaseThreadFunc.
+            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+            if (committed & TextureFlushes) {
+                texture_cache.PopAsyncFlushes();
+            }
+            buffer_cache.PopAsyncFlushes();
+        } else if (committed & TextureFlushes) {
             std::scoped_lock lock{texture_cache.mutex};
             texture_cache.PopAsyncFlushes();
-        }
-        if (committed & BufferFlushes) {
-            std::scoped_lock lock{buffer_cache.mutex};
-            buffer_cache.PopAsyncFlushes();
         }
         query_cache.PopAsyncFlushes();
     }
