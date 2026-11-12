@@ -51,7 +51,9 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
     if (core_id == IdealCoreUseProcessValue) {
         core_id = process.GetIdealCoreId();
     }
-    core_id = FoldExtraCoreId(core_id);
+    if (process.IsSwitch2()) {
+        core_id = FoldExtraCoreId(core_id);
+    }
 
     // Validate arguments.
     R_UNLESS(IsValidVirtualCoreId(core_id), ResultInvalidCoreId);
@@ -308,8 +310,10 @@ Result SetThreadCoreMask(Core::System& system, Handle thread_handle, s32 core_id
         R_UNLESS(affinity_mask != 0, ResultInvalidCombination);
 
         // Validated against the real mask above; fold to the emulated cores from here on.
-        affinity_mask = FoldExtraCoreMask(affinity_mask);
-        core_id = FoldExtraCoreId(core_id);
+        if (GetCurrentProcess(system.Kernel()).IsSwitch2()) {
+            affinity_mask = FoldExtraCoreMask(affinity_mask);
+            core_id = FoldExtraCoreId(core_id);
+        }
 
         // Validate the core id.
         if (IsValidVirtualCoreId(core_id)) {
