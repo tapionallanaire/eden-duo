@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 
 #include "game_settings.h"
@@ -328,12 +329,30 @@ struct System::Impl {
         }
     }
 
-    void SetNVDECActive(bool is_nvdec_active) {
-        nvdec_active = is_nvdec_active;
+    void NotifyNVDECChannelOpen(u64 process_id) {
+        std::scoped_lock lock{nvdec_active_mutex};
+        ++nvdec_active_channels[process_id];
+    }
+
+    void NotifyNVDECChannelClose(u64 process_id) {
+        std::scoped_lock lock{nvdec_active_mutex};
+        const auto it = nvdec_active_channels.find(process_id);
+        if (it == nvdec_active_channels.end()) {
+            return;
+        }
+        if (--it->second == 0) {
+            nvdec_active_channels.erase(it);
+        }
     }
 
     bool GetNVDECActive() {
-        return nvdec_active;
+        std::scoped_lock lock{nvdec_active_mutex};
+        return !nvdec_active_channels.empty();
+    }
+
+    bool IsNVDECActiveForProcess(u64 process_id) {
+        std::scoped_lock lock{nvdec_active_mutex};
+        return nvdec_active_channels.contains(process_id);
     }
 
     void InitializeDebugger(System& system, u16 port) {
@@ -719,6 +738,8 @@ struct System::Impl {
 
     mutable std::mutex suspend_guard;
     std::mutex general_channel_mutex;
+    std::mutex nvdec_active_mutex;
+    std::unordered_map<u64, u32> nvdec_active_channels;
     std::atomic_bool is_paused{};
     std::atomic_bool is_shutting_down{};
     std::atomic_bool is_powered_on{};
@@ -726,7 +747,6 @@ struct System::Impl {
     bool extended_memory_layout : 1 = false;
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
-    bool nvdec_active : 1 = false;
     /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
     std::unique_ptr<Nx2Debug::Service> debug_service;
 
@@ -796,12 +816,20 @@ bool System::RunWithGuestThreadsSuspended(const std::function<void()>& fn) {
     return impl->RunWithGuestThreadsSuspended(fn);
 }
 
-void System::SetNVDECActive(bool is_nvdec_active) {
-    impl->SetNVDECActive(is_nvdec_active);
+void System::NotifyNVDECChannelOpen(u64 process_id) {
+    impl->NotifyNVDECChannelOpen(process_id);
+}
+
+void System::NotifyNVDECChannelClose(u64 process_id) {
+    impl->NotifyNVDECChannelClose(process_id);
 }
 
 bool System::GetNVDECActive() {
     return impl->GetNVDECActive();
+}
+
+bool System::IsNVDECActiveForProcess(u64 process_id) {
+    return impl->IsNVDECActiveForProcess(process_id);
 }
 
 void System::InitializeDebugger() {
