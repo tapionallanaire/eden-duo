@@ -19,6 +19,7 @@
 #include "common/common_types.h"
 #include "common/div_ceil.h"
 #include "common/env_gate.h"
+#include "common/settings.h"
 #include "shader_recompiler/backend/nvn_storage_descriptor.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -469,12 +470,13 @@ Id DescType(EmitContext& ctx, Id sampled_type, Id pointer_type, u32 count) {
 // EDEN_NX2_LEAN_SSBO=0 turns it off: the global memory helpers are kept as calls and route
 // with one switch. Inlined at each of their calls, a program with ~30 candidate buffers took
 // NVIDIA's compiler 2.4 s (Ocarina's foliage compute programs; 0.6 s this way, same accesses).
+// Switch 2 titles only.
 bool LeanGlobalMemory() {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_LEAN_SSBO");
         return value == nullptr || value[0] != '0';
     }();
-    return enabled;
+    return enabled && Settings::CurrentProgramIsSwitch2();
 }
 } // Anonymous namespace
 

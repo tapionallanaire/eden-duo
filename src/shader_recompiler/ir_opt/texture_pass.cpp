@@ -1861,7 +1861,11 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 count = std::min(count, sampled_dynamic_cap);
                 // Depth-compare sampling returns a float in Vulkan, so its image must be float
                 // even when a garbage or unknown descriptor reads as an integer format.
-                static const bool depth_float_fix{Common::EnvGate("EGLANTINE_DEPTH_FLOAT_FIX")};
+                // Switch 2 titles only.
+                static const bool depth_float_fix_enabled{
+                    Common::EnvGate("EGLANTINE_DEPTH_FLOAT_FIX")};
+                const bool depth_float_fix{depth_float_fix_enabled &&
+                                           Settings::CurrentProgramIsSwitch2()};
                 const bool is_integer{(!depth_float_fix || flags.is_depth == 0) &&
                                       is_texture_pixel_format_integer(cbuf)};
                 u32 live_stride{};

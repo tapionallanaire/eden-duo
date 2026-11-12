@@ -1501,8 +1501,8 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         if constexpr (!IS_OPENGL && VideoCommon::StreamUniformReusable<Runtime>) {
             // The same bytes as this slot's previous bind, in the same command buffer: bind that
             // stream allocation again instead of allocating and copying (uniform_stream_reuse.h).
-            // EDEN_NX2_UBOREUSE=0 turns it off.
-            if (VideoCommon::UniformStreamReuseEnabled()) {
+            // EDEN_NX2_UBOREUSE=0 turns it off. Switch 2 titles only.
+            if (VideoCommon::UniformStreamReuseEnabled() && Settings::CurrentProgramIsSwitch2()) {
                 streamed = VideoCommon::BindSmallUniformReusing(
                     runtime, device_memory, stage, index, binding_index, device_addr, size);
             }
