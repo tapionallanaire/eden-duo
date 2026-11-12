@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <memory>
@@ -25,6 +26,8 @@ namespace AudioCore::Sink {
 void SinkStream::AppendBuffer(SinkBuffer& buffer, std::span<s16> samples) {
     if (type == StreamType::In)
         return;
+
+    queued_buffer_frames.store(static_cast<u32>(buffer.frames), std::memory_order_relaxed);
 
     constexpr s32 min = (std::numeric_limits<s16>::min)();
     constexpr s32 max = (std::numeric_limits<s16>::max)();
@@ -182,6 +185,10 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
         return;
     }
 
+    if (num_frames > device_request_frames.load(std::memory_order_relaxed)) {
+        device_request_frames.store(static_cast<u32>(num_frames), std::memory_order_relaxed);
+    }
+
     while (frames_written < num_frames) {
         if (playing_buffer.consumed || playing_buffer.frames == 0) {
             std::unique_lock lk{release_mutex};
@@ -234,13 +241,25 @@ u64 SinkStream::GetExpectedPlayedSampleCount() {
 void SinkStream::WaitFreeSpace(std::stop_token stop_token) {
     std::unique_lock lk{release_mutex};
 
-    auto can_continue = [this]() {
-        return paused || queued_buffers < max_queue_size;
+    // The host device takes its samples in callbacks of its own size: 1024 frames (21 ms) on
+    // Android's OpenSL ES, more than the four 240-frame buffers (20 ms) the renderer's ring
+    // allows. A callback that found the ring exactly full came up 64 frames short and repeated
+    // the last sample, a click once or twice every five seconds on the Retroid Pocket Flip 2
+    // (Crash Team Racing's menu). Keep one callback's worth queued, plus two buffers of margin.
+    u32 limit = max_queue_size;
+    const u32 request = device_request_frames.load(std::memory_order_relaxed);
+    const u32 buffer_frames = queued_buffer_frames.load(std::memory_order_relaxed);
+    if (request != 0 && buffer_frames != 0) {
+        limit = (std::max)(limit, (request + buffer_frames - 1) / buffer_frames + 2);
+    }
+
+    auto can_continue = [this, limit]() {
+        return paused || queued_buffers < limit;
     };
 
     release_cv.wait_for(lk, std::chrono::milliseconds(7), can_continue);
 
-    if (queued_buffers > max_queue_size + 3) {
+    if (queued_buffers > limit + 3) {
         release_cv.wait(lk, stop_token, can_continue);
     }
 }
