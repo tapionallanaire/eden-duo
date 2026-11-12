@@ -1957,8 +1957,9 @@ bool TextureCache<P>::UploadInChunks(Image& image) {
     constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
                                        ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
                                        ImageFlagBits::TrimmedLevels;
+    // Switch 2 titles only: this path skips UploadImageContents' flush of buffer cache writes.
     if (True(image.flags & excluded) || image.info.type != ImageType::e2D ||
-        MapSizeBytes(image) < min_size) {
+        MapSizeBytes(image) < min_size || !gpu_memory->UsesNativeTiling()) {
         return false;
     }
     for (u64 offset = 0; offset < image.guest_size_bytes; offset += chunk_size) {
