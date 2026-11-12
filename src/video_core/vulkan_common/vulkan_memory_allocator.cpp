@@ -378,6 +378,10 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
     if (usage != MemoryUsage::DeviceLocal || ci.size > Device::SeparatePoolBlockSize / 2) {
         return false;
     }
+    // A title with reserved device memory (Hogwarts Legacy) keeps its buffers in that pool.
+    if (device.GetPinnedPool() != nullptr) {
+        return false;
+    }
     u32 memory_type{};
     {
         std::scoped_lock lk{buffer_type_mutex};
