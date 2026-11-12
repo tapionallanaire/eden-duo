@@ -2527,8 +2527,8 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
         // Mapped uploads carry their own barriers (or run in the upload command buffer, which
         // ends with one); another barrier here only ended the render pass (~50 times a frame in
-        // Pokopia).
-        if constexpr (!USE_MEMORY_MAPS_FOR_UPLOADS) {
+        // Pokopia). Switch 1 titles keep the barrier, as in Duet Plus 1.1.18.
+        if (!USE_MEMORY_MAPS_FOR_UPLOADS || !Settings::CurrentProgramIsSwitch2()) {
             any_buffer_uploaded = true;
         }
         return false;
@@ -2561,7 +2561,9 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         }
         const std::span<BufferCopy> copies_span(copies.data(), copies.size());
         UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
-        any_buffer_uploaded = true;
+        if (!USE_MEMORY_MAPS_FOR_UPLOADS || !Settings::CurrentProgramIsSwitch2()) {
+            any_buffer_uploaded = true;
+        }
         return false;
     }
 }
