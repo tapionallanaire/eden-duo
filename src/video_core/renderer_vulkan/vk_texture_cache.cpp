@@ -1637,12 +1637,16 @@ bool TextureCacheRuntime::UsesNvidiaDlss() const {
 
 std::optional<VideoCore::GameDlssProbe> TextureCacheRuntime::ProbeGameDlssOutput(
     ImageView& input, ImageView& output) {
+#ifdef __ANDROID__
+    return std::nullopt;
+#else
     if (!dlss_network_probe) {
         dlss_network_probe = std::make_unique<DlssNetworkProbe>(
             device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator);
     }
     return dlss_network_probe->Probe(input.Handle(Shader::TextureType::Color2D),
                                      output.Handle(Shader::TextureType::Color2D));
+#endif
 }
 
 bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageView& input_color,
@@ -1650,6 +1654,9 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
                                           std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale) {
+#ifdef __ANDROID__
+    return false;
+#else
     if (!WantsTemporalUpscaleDepth()) {
         return false;
     }
@@ -1720,6 +1727,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
                  render_size[1], extent.width, extent.height);
     }
     return true;
+#endif
 }
 
 void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view,

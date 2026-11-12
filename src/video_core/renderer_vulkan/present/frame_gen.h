@@ -9,10 +9,21 @@
 #include "video_core/renderer_vulkan/present/frame_gen_pacer.h"
 #include "video_core/renderer_vulkan/present/lsfg_chain.h"
 #include "video_core/renderer_vulkan/present/lsfg_shaders.h"
+#ifndef __ANDROID__
 #include "video_core/renderer_vulkan/present/fsr3_frame_gen.h"
+#endif
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 namespace Vulkan {
+
+#ifdef __ANDROID__
+// FSR 3 frame generation is desktop only; FrameGen never creates this on Android (UseFsr3).
+struct Fsr3FrameGen {
+    Fsr3FrameGen(auto&&...) {}
+    void Process(auto&&...) {}
+    void Generate(auto&&...) {}
+};
+#endif
 
 class Device;
 class Scheduler;

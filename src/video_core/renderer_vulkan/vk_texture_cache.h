@@ -16,8 +16,10 @@
 
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
+#ifndef __ANDROID__ // FSR 3.1 and the DLSS network probe are desktop only
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#endif
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #endif
@@ -221,10 +223,14 @@ public:
                          ImageView& motion_vectors, ImageView& depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                          std::array<f32, 2> motion_scale);
+#ifdef __ANDROID__
+    bool fsr3_unsupported{true}; // not built: DLSS evaluations use the temporal stand-in
+#else
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_unsupported{};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
+#endif
     std::optional<std::chrono::steady_clock::time_point> fsr3_last_evaluation;
 
     /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.

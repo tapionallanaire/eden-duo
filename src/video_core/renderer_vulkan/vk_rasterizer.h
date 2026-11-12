@@ -148,7 +148,11 @@ public:
     bool SupportsGameDlssNetwork() const override;
     bool UsesNvidiaDlss() const override;
     bool CanProbeGameDlssOutput() const override {
+#ifdef __ANDROID__
+        return false; // the probe is not built for Android
+#else
         return true;
+#endif
     }
     std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
         const Tegra::Engines::Fermi2D::Surface& src,

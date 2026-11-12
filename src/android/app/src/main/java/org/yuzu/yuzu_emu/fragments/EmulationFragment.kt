@@ -1432,7 +1432,6 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             getString(R.string.scaling_filter_fsr),
             getString(R.string.scaling_filter_sgsr),
             getString(R.string.scaling_filter_sgsr_edge),
-            getString(R.string.scaling_filter_fsr3),
         )
         return names.asSequence()
             .mapIndexedNotNull { index, name ->
