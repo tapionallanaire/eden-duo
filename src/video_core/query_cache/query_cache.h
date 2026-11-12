@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -22,6 +23,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/query_base.h"
 #include "video_core/query_cache/query_cache_base.h"
@@ -233,6 +235,16 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                                            QueryPropertiesFlags flags, u32 payload, u32 subreport) {
     const bool has_timestamp = True(flags & QueryPropertiesFlags::HasTimeout);
     const bool is_fence = True(flags & QueryPropertiesFlags::IsAFence);
+    static const GPUVAddr watch = [] {
+        const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
+        return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
+    }();
+    if (static const bool trace = std::getenv("EDEN_NX2_QUERY_TRACE") != nullptr;
+        trace || (watch != 0 && (addr & ~GPUVAddr{0xf}) == watch)) {
+        LOG_INFO(HW_GPU, "nx2 report addr={:#x} type={} flags={:#x} payload={:#x} as={} device={:#x}", addr,
+                 static_cast<u32>(counter_type), static_cast<u32>(flags), payload, gpu_memory->GetID(),
+                 gpu_memory->GpuToCpuAddress(addr).value_or(0));
+    }
     size_t streamer_id = static_cast<size_t>(counter_type);
     auto* streamer = impl->streamers[streamer_id];
     if (streamer == nullptr) [[unlikely]] {
@@ -274,7 +286,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     const bool delay_fence = is_fence && Settings::values.delay_fence_reports_by_title;
     bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence && !delay_fence;
     std::function<void()> operation([this, is_synced, delay_fence, streamer, query_base = query,
-                                     query_location, write_report] {
+                                     query_location, write_report, cpu_addr] {
         // A delayed fence still has to be written once the GPU gets there, as the hardware would,
         // even if the guest touched that memory meanwhile; the game waits for that value. Only a
         // newer report to the same address supersedes it.
@@ -298,6 +310,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         streamer->SetAccumulationValue(query_base->value);
         const bool long_report = True(query_base->flags & QueryFlagBits::HasTimestamp);
         write_report(query_base->value, long_report, long_report ? impl->gpu.GetTicks() : 0);
+        Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
         if (!is_synced) [[likely]] {
             impl->pending_unregister.push_back(query_location);
         }
@@ -310,6 +323,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
             write_report(payload, has_timestamp, has_timestamp ? impl->gpu.GetTicks() : 0);
+            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, payload);
             streamer->Free(new_query_id);
             return;
         }
@@ -507,6 +521,16 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
     bool result = false;
     impl->ForEachStreamer([&result](StreamerInterface* streamer) {
         result |= streamer->HasUnsyncedQueries();
+        return result;
+    });
+    return result;
+}
+
+template <typename Traits>
+bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
+    bool result = false;
+    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
+        result |= streamer->HasUnsyncedQueries() || streamer->HasPendingSync();
         return result;
     });
     return result;

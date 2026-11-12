@@ -7,6 +7,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <utility>
 #include <vector>
 
 #include "common/alignment.h"
@@ -26,10 +28,25 @@ public:
     }
 
     void Reset() noexcept {
+        if (!tracked) {
+            return;
+        }
+        tracked = false;
         std::ranges::fill(pages, 0ULL);
+        recent.fill({~u64{0}, 0});
     }
 
     void Track(u64 offset, u64 size) noexcept {
+        // Tracking is idempotent until Reset: skip ranges tracked just before. Draws bind the
+        // same (often multi-megabyte) storage buffers again and again, and each Track wrote a
+        // word per 4 KiB of the range.
+        for (const auto& [recent_offset, recent_size] : recent) {
+            if (recent_offset == offset && recent_size == size) {
+                return;
+            }
+        }
+        tracked = true;
+        recent[recent_cursor++ % recent.size()] = {offset, size};
         const size_t page = offset >> BUFFER_PAGE_SHIFT;
         const size_t page_end = (offset + size) >> BUFFER_PAGE_SHIFT;
         if (page_end < page || page_end >= pages.size()) {
@@ -92,6 +109,10 @@ private:
 
 private:
     std::vector<u64> pages;
+    /// Ranges tracked last, (offset, size).
+    std::array<std::pair<u64, u64>, 4> recent{{{~u64{0}, 0}, {~u64{0}, 0}, {~u64{0}, 0}, {~u64{0}, 0}}};
+    size_t recent_cursor{};
+    bool tracked{};
 };
 
 } // namespace VideoCommon

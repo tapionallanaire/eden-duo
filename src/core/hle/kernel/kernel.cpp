@@ -22,6 +22,7 @@
 #include "core/arm/arm_interface.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/device_memory.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/hardware_properties.h"
@@ -104,7 +105,7 @@ struct KernelCore::Impl {
     // And we have the guarantee that the data won't move out of the way so we can safely
     // take a reference to it. This isn't always universally true but this is "global" data
     // so it will be statically given a TLS slot anyways.
-    static inline thread_local ThreadLocalData tls_data = {};
+    static thread_local ThreadLocalData tls_data;
 
     explicit Impl(Core::System& system_, KernelCore& kernel_) : system{system_} {
         tls_data.lock = true;
@@ -166,7 +167,27 @@ struct KernelCore::Impl {
 
         CloseServices();
 
+        // Eglantine: a Switch 2 process still referenced here (55-60 references seen) is never
+        // finalized, so its memory stayed mapped in the fastmem arena under the next game. Detach
+        // it from the arena and clear the arena. Switch 1 processes finalize as before.
+        bool clear_arena = false;
+        {
+            std::scoped_lock lock{application_process_lock};
+            if (application_process != nullptr && application_process->IsSwitch2()) {
+                const u32 references = application_process->GetReferenceCount();
+                application_process->GetPageTable().GetImpl().fastmem_arena = nullptr;
+                clear_arena = true;
+                if (references > 1) {
+                    LOG_WARNING(Kernel, "Application process still had {} references at shutdown",
+                                references);
+                }
+            }
+        }
         SetApplicationProcess(kernel, nullptr);
+        if (clear_arena) {
+            auto& arena = system.DeviceMemory().buffer;
+            arena.Unmap(0, arena.VirtualSize(), false);
+        }
         if (system.ModRuntime() == nullptr) {
             Core::HID::DSModPadGate::BlockForContextChange(false);
         }
@@ -200,7 +221,7 @@ struct KernelCore::Impl {
             schedulers[core_id].reset();
         }
 
-        // Next host thead ID to use, 0-3 IDs represent core threads, >3 represent others
+        // Next host thead ID to use, IDs below NUM_CPU_CORES represent core threads, the rest others
         next_host_thread_id = Core::Hardware::NUM_CPU_CORES;
 
         // Close kernel objects that were not freed on shutdown
@@ -888,6 +909,8 @@ struct KernelCore::Impl {
     // System context
     Core::System& system;
 };
+
+thread_local ThreadLocalData KernelCore::Impl::tls_data{};
 
 KernelCore::KernelCore(Core::System& system) : impl{std::make_unique<Impl>(system, *this)} {}
 KernelCore::~KernelCore() = default;

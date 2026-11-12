@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -19,6 +20,7 @@
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
+#include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -50,6 +52,22 @@ public:
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
 
+    /// On the split GPU thread, a fence or a command list copy submits only if the last
+    /// submission is older than a window (EDEN_NX2_FENCE_FLUSH_US, default 500 us, 0 submits at
+    /// once); otherwise it goes with the next one. The back submits deferred work before it
+    /// sleeps and when another thread asks (WaitSubmitted). True when the flush was deferred.
+    bool DeferFlush();
+    /// Submits deferred work (the split's back, from its idle hook).
+    void FlushDeferred();
+    /// Threads other than the split's back: waits until tick is submitted, asking the back to
+    /// submit deferred work (logged every 2 s while it waits). False only when the back thread
+    /// is not running, so nothing will submit it: the caller then submits it itself.
+    bool WaitSubmitted(u64 tick);
+    /// Whether everything up to tick has been handed to the worker for submission.
+    [[nodiscard]] bool IsSubmitted(u64 tick) const noexcept {
+        return tick < master_semaphore->CurrentTick();
+    }
+
     /// Waits for the worker thread to finish executing everything. After this function returns it's
     /// safe to touch worker resources.
     void WaitWorker();
@@ -73,6 +91,11 @@ public:
     /// of a renderpass.
     void RequestOutsideRenderPassOperationContext();
 
+    /// A dispatch was recorded: the next render pass must see what it wrote.
+    void NoteComputeWrites() {
+        compute_writes_pending = true;
+    }
+
     /// Returns true when a render pass is currently active in the scheduler state.
     bool IsRenderPassActive() const {
         return state.renderpass != VK_NULL_HANDLE;
@@ -80,6 +103,15 @@ public:
 
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
+
+    /// Worker thread only: whether the bound graphics pipeline failed to build, so the draws
+    /// recorded after it must be dropped instead of reaching the driver without a pipeline.
+    void SetGraphicsPipelineMissing(bool missing) {
+        graphics_pipeline_missing = missing;
+    }
+    [[nodiscard]] bool GraphicsPipelineMissing() const {
+        return graphics_pipeline_missing;
+    }
 
     /// Update the rescaling state. Returns true if the state has to be updated.
     bool UpdateRescaling(bool is_rescaling);
@@ -104,6 +136,9 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
+            VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
+        }
         if (chunk->Record(command)) {
             return;
         }
@@ -120,6 +155,18 @@ public:
             });
     }
 
+    /// Whether the recording thread submitted `tick` within 20 ms.
+    [[nodiscard]] bool WaitForSubmission(u64 tick) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{20};
+        while (tick >= master_semaphore->CurrentTick()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds{100});
+        }
+        return true;
+    }
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore->CurrentTick();
@@ -130,9 +177,13 @@ public:
         return master_semaphore->IsFree(tick);
     }
 
-    /// Waits for the given GPU tick, optionally pacing frames.
-    void Wait(u64 tick, double target_fps = 0.0) {
-        if (tick > 0) {
+    /// Waits for the given GPU tick, optionally pacing frames. Threads other than the one that
+    /// records (the async present thread) pass may_flush = false: flushing from there records
+    /// into the current chunk while that thread does (corrupt command buffers, crashes). They
+    /// wait for the recording thread to submit the tick instead, and give up after 20 ms (it may
+    /// be waiting for them).
+    void Wait(u64 tick, double target_fps = 0.0, bool may_flush = true) {
+        if (tick > 0 && (may_flush || WaitForSubmission(tick))) {
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
@@ -173,6 +224,9 @@ public:
     std::mutex submit_mutex;
 
 private:
+    std::chrono::steady_clock::time_point last_flush{};
+    bool flush_pending{};
+
     class Command {
     public:
         virtual ~Command() = default;
@@ -300,6 +354,8 @@ private:
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
+    bool compute_writes_pending{};
+    bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
 
     VideoCommon::QueryCacheBase<QueryCacheParams>* query_cache = nullptr;

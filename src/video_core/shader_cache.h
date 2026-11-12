@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -39,6 +40,8 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Bytes from the shader's start that unique_hash covers; 0 when it covers another range.
     size_t hashed_bytes{};
+    /// Lowered code of a native program, reused when its pipelines are built.
+    std::shared_ptr<const LoweredNativeCode> lowered_native;
 };
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
@@ -74,6 +77,8 @@ public:
     /// @param size Number of bytes of the invalidation
     void InvalidateRegion(VAddr addr, size_t size);
 
+    void InvalidateRegions(std::span<const std::pair<DAddr, size_t>> sequences);
+
     /// @brief Unmarks a memory region as cached and marks it for removal
     /// @param addr Start address of the CPU write operation
     /// @param size Number of bytes of the CPU write operation
@@ -81,6 +86,18 @@ public:
 
     /// @brief Flushes delayed removal operations
     void SyncGuestHost();
+
+    /// Drops the cached native programs the debug server rejects (docs/nx2/debug-mcp.md); after
+    /// an un-reject also every remembered rejection. Rasterizer thread, between frames.
+    void RefreshDebugRejections(bool unrejected);
+
+    /// Native program keys of the graphics stages bound by the last RefreshStages (0 where a
+    /// stage is off or not a native program), for the frame dump.
+    [[nodiscard]] std::array<u64, NUM_PROGRAMS> GraphicsNativeKeys(
+        const std::array<u64, NUM_PROGRAMS>& unique_hashes) const;
+
+    /// Native program key of the bound compute program, 0 when unknown, for the frame dump.
+    [[nodiscard]] u64 ComputeNativeKey();
 
 protected:
     struct GraphicsEnvironments {
@@ -111,6 +128,8 @@ protected:
     bool last_shaders_valid = false;
 
 private:
+    friend struct ShaderCacheTestAccess;
+
     /// @brief Tries to obtain a cached shader starting in a given address
     /// @note Doesn't check for ranges, the given address has to be the start of the shader
     /// @param addr Start address of the shader, this doesn't cache for region
@@ -163,6 +182,15 @@ private:
     /// @brief Create a new shader entry and register it
     const ShaderInfo* MakeShaderInfo(GenericEnvironment& env, VAddr cpu_addr);
 
+    /// Rethrows the error a native program at this address was rejected with, if any.
+    void RethrowIfRejected(VAddr addr);
+    /// Whether a native program at this address was rejected.
+    bool IsRejected(VAddr addr);
+    /// Remembers the exception being handled as this address's rejection.
+    void RememberRejection(VAddr addr);
+    /// Hash of the state task and mesh programs are translated with.
+    u64 MeshStateHash() const;
+
     Tegra::MaxwellDeviceMemoryManager& device_memory;
 
     mutable std::mutex lookup_mutex;
@@ -175,6 +203,14 @@ private:
     /// Invalidations seen by earlier entries at an address, so a rebuilt entry can reach
     /// HOT_INVALIDATIONS (a removed entry's replacement would otherwise always start at zero).
     ::Common::unordered_map<VAddr, u32> invalidation_history;
+
+    /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
+    /// first error instead of lowering again; dropped when guest memory there is written.
+    std::mutex rejected_mutex;
+    ::Common::unordered_map<u64, std::exception_ptr> rejected_native;
+    /// Bounds of every address ever rejected (never shrinks): a quick test for invalidations.
+    std::atomic<VAddr> rejected_lowest{~VAddr{}};
+    std::atomic<VAddr> rejected_highest{};
 };
 
 } // namespace VideoCommon

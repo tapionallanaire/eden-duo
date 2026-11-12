@@ -7,9 +7,13 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <span>
+#include <vector>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
@@ -65,7 +69,36 @@ public:
     /// instead of behind every pipeline queued before it.
     void BuildUrgently(Common::ThreadWorker& worker);
 
+    [[nodiscard]] u64 ShaderHash() const noexcept {
+        return shader_hash;
+    }
+
+    /// Native constant buffer pointer slots taken as storage buffers, and the ones left out
+    /// because they held null when this pipeline was built (rebuilt once one is filled).
+    std::vector<u64> pointer_slots;
+    std::vector<u64> null_pointer_slots;
+    u32 pointer_rebuilds{};
+
+    /// Storage images written by the last configured dispatch, kept while a frame dump runs.
+    [[nodiscard]] std::span<const VideoCommon::ImageViewId> WrittenImages() const noexcept {
+        return written_images;
+    }
+
+    struct SampledImage {
+        u32 tic;
+        VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
+    };
+
+    /// The textures sampled by the last configured dispatch, kept while a sampled frame dump runs.
+    [[nodiscard]] std::span<const SampledImage> SampledImages() const noexcept {
+        return sampled_images;
+    }
+
 private:
+    /// Builds the pipeline once, on whichever thread gets here first.
+    void RunBuild();
+
     const Device& device;
     vk::PipelineCache& pipeline_cache;
     GuestDescriptorQueue& guest_descriptor_queue;
@@ -73,6 +106,8 @@ private:
     Shader::Info info;
     u64 shader_hash{};
     u32 num_descriptor_entries{};
+    boost::container::small_vector<VideoCommon::ImageViewId, 8> written_images;
+    std::vector<SampledImage> sampled_images;
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
 
@@ -91,7 +126,6 @@ private:
     /// The build runs once, on whichever thread claims it first.
     std::function<void()> build_func;
     std::atomic_bool build_claimed{false};
-    void RunBuild();
     std::atomic_bool is_built{false};
 };
 

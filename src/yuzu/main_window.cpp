@@ -13,6 +13,7 @@
 #include <boost/algorithm/string/split.hpp>
 #include "common/controller_console_state.h"
 #include "common/fs/path_util.h"
+#include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "frontend_common/settings_generator.h"
@@ -46,6 +47,7 @@
 #include "util/util.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/overlay_panel.h"
+#include "yuzu/nup_dialogs.h"
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -85,6 +87,8 @@
 #include <QDialog>
 #include <QDir>
 #include <QFile>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QPushButton>
@@ -104,6 +108,7 @@
 #include <time.h>
 #include <unistd.h>
 #endif
+#include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QInputDialog>
 #include <QMimeData>
@@ -115,6 +120,10 @@
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QtConcurrentRun>
+
+#ifdef __APPLE__
+#include "util/macos_sleep.h"
+#endif
 
 // Qt Common //
 #include "qt_common/config/shared_translation.h"
@@ -177,6 +186,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
+#include "core/file_sys/nup_writer.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/savedata_factory.h"
 #include "core/memory/dmnt_cheat_types.h"
@@ -353,6 +363,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 constexpr int default_mouse_hide_timeout = 2500;
 constexpr int default_input_update_timeout = 1;
+constexpr int EmuThreadStopTimeoutMs = 10'000;
 
 constexpr size_t CopyBufferSize = 1_MiB;
 
@@ -863,7 +874,7 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     QtCommon::SetupContentProviders();
 
     // Gen keys if necessary
-    OnCheckFirmwareDecryption();
+    OnCheckFirmwareDecryption(false);
 
     // Check for orphaned profiles and reset profile data if necessary
     QtCommon::Content::FixProfiles();
@@ -911,7 +922,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         VkDeviceInfo::PopulateRecords(vk_device_records, this->window()->windowHandle());
     }
 
-#if !defined(_WIN32)
+    // On macOS, SDL video would pump AppKit events alongside Qt and disrupt native menus.
+#if !defined(_WIN32) && !defined(__APPLE__)
     SDL_InitSubSystem(SDL_INIT_VIDEO);
 
     // Set a screensaver inhibition reason string. Currently passed to DBus by SDL and visible to
@@ -942,7 +954,8 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         for (auto& e : qba)
             args_cstr.push_back(e.data());
 
-        auto const lp = Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
+        auto const lp =
+            Core::ParseLaunchParams(*QtCommon::system, args_cstr.size(), args_cstr.data(), nullptr);
 
         // Override fullscreen setting if gamepath or argument is provided
         if (!lp.filepath.empty() || lp.fullscreen) {
@@ -969,6 +982,13 @@ MainWindow::MainWindow(bool has_broken_vulkan)
 MainWindow::~MainWindow() {
     // The config saves itself on destruction: it must write the user's own players
     RestoreConsoleProfile();
+    if (nup_cancel) {
+        nup_cancel->store(true);
+    }
+    nup_watcher.waitForFinished();
+#ifdef __APPLE__
+    AllowOSSleep();
+#endif
 
     // will get automatically deleted otherwise
     if (render_window->parent() == nullptr) {
@@ -1701,7 +1721,6 @@ void MainWindow::InitializeHotkeys() {
     hotkey_registry.LoadHotkeys();
 
     LinkActionShortcut(ui->action_Load_File, QStringLiteral("Load File"));
-    LinkActionShortcut(ui->action_Load_Amiibo, QStringLiteral("Load/Remove Amiibo"));
     LinkActionShortcut(ui->action_Exit, QStringLiteral("Exit Eden"));
     LinkActionShortcut(ui->action_Restart, QStringLiteral("Restart Emulation"));
     LinkActionShortcut(ui->action_Pause, QStringLiteral("Continue/Pause Emulation"));
@@ -1879,6 +1898,10 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::DumpRomFSRequested, this, &MainWindow::OnGameListDumpRomFS);
     connect(game_list, &GameList::VerifyIntegrityRequested, this,
             &MainWindow::OnGameListVerifyIntegrity);
+    connect(game_list, &GameList::ConvertToNupRequested, this, &MainWindow::OnGameListConvertToNup);
+    connect(game_list, &GameList::ExtractNupRequested, this, &MainWindow::OnGameListExtractNup);
+    connect(game_list, &GameList::EditNupMetadataRequested, this,
+            &MainWindow::OnGameListEditNupMetadata);
     connect(game_list, &GameList::CopyTIDRequested, this, &MainWindow::OnGameListCopyTID);
     connect(game_list, &GameList::CreateShortcut, this, &MainWindow::OnGameListCreateShortcut);
     connect(game_list, &GameList::AddDirectory, this, &MainWindow::OnGameListAddDirectory);
@@ -7302,11 +7325,8 @@ void MainWindow::UpdateMenuState() {
     const bool is_firmware_available = CheckFirmwarePresence();
 
     const std::array running_actions{
-        ui->action_Stop,
-        ui->action_Restart,
-        ui->action_Configure_Current_Game,
-        ui->action_Load_Amiibo,
-        ui->action_Pause,
+        ui->action_Stop,        ui->action_Restart, ui->action_Configure_Current_Game,
+        ui->action_Load_Amiibo, ui->action_Pause,
     };
 
     const std::array applet_actions{
@@ -7432,6 +7452,10 @@ void MainWindow::OnSigInterruptNotifierActivated() {
 void MainWindow::PreventOSSleep() {
 #ifdef _WIN32
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+#elif defined(__APPLE__)
+    if (sleep_assertion_id == 0) {
+        sleep_assertion_id = MacOS::PreventSleep();
+    }
 #else
     SDL_DisableScreenSaver();
 #endif
@@ -7440,6 +7464,11 @@ void MainWindow::PreventOSSleep() {
 void MainWindow::AllowOSSleep() {
 #ifdef _WIN32
     SetThreadExecutionState(ES_CONTINUOUS);
+#elif defined(__APPLE__)
+    if (sleep_assertion_id != 0) {
+        MacOS::AllowSleep(sleep_assertion_id);
+        sleep_assertion_id = 0;
+    }
 #else
     SDL_EnableScreenSaver();
 #endif
@@ -7486,24 +7515,6 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
     const Core::SystemResultStatus result{
         QtCommon::system->Load(*render_window, filename.toStdString(), params)};
 
-    const auto drd_callout = (UISettings::values.callout_flags.GetValue() &
-                              static_cast<u32>(CalloutFlag::DRDDeprecation)) == 0;
-
-    if (result == Core::SystemResultStatus::Success &&
-        QtCommon::system->GetAppLoader().GetFileType() ==
-            Loader::FileType::DeconstructedRomDirectory &&
-        drd_callout) {
-        UISettings::values.callout_flags = UISettings::values.callout_flags.GetValue() |
-                                           static_cast<u32>(CalloutFlag::DRDDeprecation);
-        QMessageBox::warning(
-            this, tr("Warning: Outdated Game Format"),
-            tr("You are using the deconstructed ROM directory format for this game, which is an "
-               "outdated format that has been superseded by others such as NCA, NAX, XCI, or "
-               "NSP. Deconstructed ROM directories lack icons, metadata, and update "
-               "support.<br>For an explanation of the various Switch formats Eden supports, "
-               "out our user handbook. This message will not be shown again."));
-    }
-
     if (result != Core::SystemResultStatus::Success) {
         switch (result) {
         case Core::SystemResultStatus::ErrorGetLoader:
@@ -7512,12 +7523,13 @@ bool MainWindow::LoadROM(const QString& filename, Service::AM::FrontendAppletPar
                                   tr("The ROM format is not supported."));
             break;
         case Core::SystemResultStatus::ErrorVideoCore:
-            QMessageBox::critical(
-                this, tr("An error occurred initializing the video core."),
-                tr("This is usually caused by outdated GPU drivers. "
-                   "Please see the log for more details. See: "
-                   "<a href='https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/HowToAccessLogs.md'>"
-                   "How to access log files</a>."));
+            QMessageBox::critical(this, tr("An error occurred initializing the video core."),
+                                  tr("This is usually caused by outdated GPU drivers. "
+                                     "Please see the log for more details. See: "
+                                     "<a "
+                                     "href='https://git.eden-emu.dev/eden-emu/eden/src/branch/"
+                                     "master/docs/user/HowToAccessLogs.md'>"
+                                     "How to access log files</a>."));
             break;
         default:
             if (result > Core::SystemResultStatus::ErrorLoader) {
@@ -7567,6 +7579,37 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+    if (nup_running && filename.toStdString() == nup_source_path) {
+        QMessageBox::information(this, tr("Conversion in Progress"),
+                                 tr("This game cannot be started while its dump is being "
+                                    "converted."));
+        return;
+    }
+    if (boot_in_progress || close_pending) {
+        return;
+    }
+    boot_in_progress = true;
+    game_list->SetScanEnabled(false);
+    QElapsedTimer boot_timer;
+    boot_timer.start();
+    SCOPE_EXIT {
+        boot_in_progress = false;
+        LOG_INFO(Frontend, "Launch finished: elapsed_ms={} running={}", boot_timer.elapsed(),
+                 emulation_running);
+        if (!emulation_running && !close_pending) {
+            game_list->SetScanEnabled(true);
+            game_list->PopulateAsync(UISettings::values.game_dirs);
+        }
+        if (close_pending) {
+            QTimer::singleShot(0, this, &QWidget::close);
+        }
+    };
+    if (emulation_running) {
+        ShutdownGame();
+    }
+    if (close_pending) {
+        return;
+    }
     LOG_INFO(Frontend, "Eden starting...");
 
     if (params.program_id == 0 ||
@@ -7601,6 +7644,48 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         QtCommon::system->ApplySettings();
     }
 
+    if (title_id == Settings::MarioKartWorldProgramId && !asked_recommended_mkw_settings) {
+        asked_recommended_mkw_settings = true;
+        use_recommended_mkw_settings =
+            QMessageBox::question(
+                this, tr("Recommended Mario Kart World settings"),
+                tr("Use the recommended settings for Mario Kart World?\n\n"
+                   "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, "
+                   "reactive flushing off, FIFO Relaxed VSync, handheld mode, ScaleForce, and "
+                   "FXAA.\n\n"
+                   "They apply to Mario Kart World until Eden is closed. Your saved settings "
+                   "are not changed."),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+        LOG_INFO(Config, "MKW recommended settings accepted: {}", use_recommended_mkw_settings);
+    }
+    if (Settings::ApplyMarioKartWorldPreset(Settings::values, title_id,
+                                            use_recommended_mkw_settings)) {
+        QtCommon::system->ApplySettings();
+        Settings::UpdateGPUAccuracy();
+        LOG_INFO(Config, "Applied recommended MKW settings after per-game configuration");
+    }
+
+    if (title_id == Settings::OcarinaOfTimeProgramId && !asked_recommended_oot_settings) {
+        asked_recommended_oot_settings = true;
+        use_recommended_oot_settings =
+            QMessageBox::question(
+                this, tr("Recommended Ocarina of Time settings"),
+                tr("Use the recommended settings for Ocarina of Time?\n\n"
+                   "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, "
+                   "reactive flushing on, FIFO Relaxed VSync, docked mode, ScaleForce, and "
+                   "FXAA.\n\n"
+                   "They apply to Ocarina of Time until Eden is closed. Your saved settings "
+                   "are not changed."),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+        LOG_INFO(Config, "OOT recommended settings accepted: {}", use_recommended_oot_settings);
+    }
+    if (Settings::ApplyOcarinaOfTimePreset(Settings::values, title_id,
+                                           use_recommended_oot_settings)) {
+        QtCommon::system->ApplySettings();
+        Settings::UpdateGPUAccuracy();
+        LOG_INFO(Config, "Applied recommended OOT settings after per-game configuration");
+    }
+
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -7620,9 +7705,44 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     // behavior of asking.
     user_flag_cmd_line = false;
 
+    FileSys::VirtualFile prepared_romfs;
+    if (loader && loader->GetFileType() == Loader::FileType::DeconstructedRomDirectory) {
+        QProgressDialog progress(tr("Preparing game files..."), QString{}, 0, 0, this);
+        progress.setWindowModality(Qt::ApplicationModal);
+        progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
+        progress.setCancelButton(nullptr);
+        progress.setMinimumDuration(0);
+        QFutureWatcher<FileSys::VirtualFile> watcher;
+        QEventLoop loop;
+        connect(&watcher, &QFutureWatcher<FileSys::VirtualFile>::finished, &loop,
+                &QEventLoop::quit);
+        watcher.setFuture(QtConcurrent::run([&loader] {
+            FileSys::VirtualFile image;
+            loader->ReadRomFS(image);
+            return image;
+        }));
+        progress.show();
+        loop.exec();
+        try {
+            prepared_romfs = watcher.result();
+        } catch (const std::exception& error) {
+            LOG_ERROR(Frontend, "Loose RomFS preparation failed: {}", error.what());
+            QMessageBox::critical(this, tr("Unable to prepare game files"),
+                                  tr("Game preparation failed. See the log for details."));
+            return;
+        }
+        if (close_pending) {
+            return;
+        }
+    }
+
+    QElapsedTimer load_timer;
+    load_timer.start();
     if (!LoadROM(filename, params)) {
+        LOG_ERROR(Frontend, "Core load failed: elapsed_ms={}", load_timer.elapsed());
         return;
     }
+    LOG_INFO(Frontend, "Core load completed: elapsed_ms={}", load_timer.elapsed());
 
     QtCommon::system->SetShuttingDown(false);
     game_list->setDisabled(true);
@@ -7667,10 +7787,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
 
     connect(
         QtCommon::emu_thread.get(), &EmuThread::ShaderCacheReloadFinished, this,
-        [this] {
-            loading_screen->OnLoadComplete();
-        },
-        Qt::QueuedConnection);
+        [this] { loading_screen->OnLoadComplete(); }, Qt::QueuedConnection);
 
     // Update the GUI
     UpdateStatusButtons();
@@ -7727,6 +7844,12 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     emulation_running = true;
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
+    } else {
+        if (Settings::IsDockedMode()) {
+            ResetWindowSize1080();
+        } else {
+            ResetWindowSize720();
+        }
     }
     OnStartGame();
 }
@@ -7751,6 +7874,9 @@ bool MainWindow::OnShutdownBegin() {
     Settings::values.current_speed_mode = Settings::SpeedMode::Standard;
 
     if (QtCommon::system->IsShuttingDown()) {
+        status_bar_update_timer.stop();
+        connect(QtCommon::emu_thread.get(), &QThread::finished, this,
+                &MainWindow::OnEmulationStopped, Qt::UniqueConnection);
         return false;
     }
 
@@ -7761,6 +7887,8 @@ bool MainWindow::OnShutdownBegin() {
     }
 
     QtCommon::system->SetShuttingDown(true);
+    status_bar_update_timer.stop();
+    LOG_INFO(Frontend, "Shutdown requested; waiting for emulation thread");
     discord_rpc->Pause();
 
     RequestGameExit();
@@ -7780,7 +7908,8 @@ bool MainWindow::OnShutdownBegin() {
 
     shutdown_timer.setSingleShot(true);
     shutdown_timer.start(shutdown_time);
-    connect(&shutdown_timer, &QTimer::timeout, this, &MainWindow::OnEmulationStopTimeExpired);
+    connect(&shutdown_timer, &QTimer::timeout, this, &MainWindow::OnEmulationStopTimeExpired,
+            Qt::UniqueConnection);
 
     // Disable everything to prevent anything from being triggered here
     ui->action_Pause->setEnabled(false);
@@ -7800,11 +7929,35 @@ void MainWindow::OnShutdownBeginDialog() {
 void MainWindow::OnEmulationStopTimeExpired() {
     if (QtCommon::emu_thread) {
         QtCommon::emu_thread->ForceStop();
+        emu_terminate_timer.setSingleShot(true);
+        emu_terminate_timer.start(EmuThreadStopTimeoutMs);
+        connect(&emu_terminate_timer, &QTimer::timeout, this, &MainWindow::OnEmulationStopTimeout,
+                Qt::UniqueConnection);
+    }
+}
+
+void MainWindow::OnEmulationStopTimeout() {
+    TerminateEmulationThread();
+    OnEmulationStopped();
+}
+
+void MainWindow::TerminateEmulationThread() {
+    if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
+        LOG_ERROR(Frontend, "Emulation thread failed to stop, terminating it");
+        QtCommon::emu_thread->terminate();
+        QtCommon::emu_thread->wait();
     }
 }
 
 void MainWindow::OnEmulationStopped() {
+    if (!emulation_running) {
+        return;
+    }
+    if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
+        return;
+    }
     shutdown_timer.stop();
+    emu_terminate_timer.stop();
     if (QtCommon::emu_thread) {
         QtCommon::emu_thread->disconnect();
         QtCommon::emu_thread->wait();
@@ -7876,6 +8029,13 @@ void MainWindow::OnEmulationStopped() {
     Settings::RestoreGlobalState(QtCommon::system->IsPoweredOn());
     QtCommon::system->HIDCore().ReloadInputDevices();
     UpdateStatusButtons();
+    LOG_INFO(Frontend, "Emulation cleanup completed");
+    if (close_pending) {
+        QTimer::singleShot(0, this, &QWidget::close);
+    } else if (!boot_in_progress) {
+        game_list->SetScanEnabled(true);
+        game_list->PopulateAsync(UISettings::values.game_dirs);
+    }
 }
 
 void MainWindow::ShutdownGame() {
@@ -7887,6 +8047,17 @@ void MainWindow::ShutdownGame() {
     play_time_manager->Stop();
     OnShutdownBegin();
     OnEmulationStopTimeExpired();
+    emu_terminate_timer.stop();
+    if (QtCommon::emu_thread && QtCommon::emu_thread->isRunning()) {
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        connect(QtCommon::emu_thread.get(), &QThread::finished, &loop, &QEventLoop::quit);
+        connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(EmuThreadStopTimeoutMs);
+        loop.exec(QEventLoop::ExcludeUserInputEvents);
+    }
+    TerminateEmulationThread();
     OnEmulationStopped();
 }
 
@@ -7951,10 +8122,9 @@ void MainWindow::OnGameListOpenFolder(u64 program_id, GameListOpenTarget target,
         }
     }();
 
-    const bool has_user_save{user_save_size > 0};
-    const bool has_device_save{device_save_size > 0};
-
-    ASSERT_MSG(has_user_save != has_device_save, "Game uses both user and device savedata?");
+    // Some titles (e.g. NX2 games) report no sizes in their NACP yet still create account saves
+    // at runtime, so only use the device layout when it is explicitly declared.
+    const bool use_device_save{device_save_size > 0 && user_save_size == 0};
 
     switch (target) {
     case GameListOpenTarget::SaveData: {
@@ -7963,26 +8133,23 @@ void MainWindow::OnGameListOpenFolder(u64 program_id, GameListOpenTarget target,
         auto vfs_save_dir = QtCommon::vfs->OpenDirectory(Common::FS::PathToUTF8String(save_dir),
                                                          FileSys::OpenMode::Read);
 
-        if (has_user_save) {
-            // User save data
+        u128 save_user_id{};
+        if (!use_device_save) {
             const auto user_id = GetProfileID();
-            assert(user_id);
-
-            const auto user_save_data_path = FileSys::SaveDataFactory::GetFullPath(
-                {}, vfs_save_dir, FileSys::SaveDataSpaceId::User, FileSys::SaveDataType::Account,
-                program_id, user_id->AsU128(), 0);
-
-            path = Common::FS::ConcatPathSafe(save_dir, user_save_data_path);
-        } else {
-            // Device save data
-            const auto device_save_data_path = FileSys::SaveDataFactory::GetFullPath(
-                {}, vfs_save_dir, FileSys::SaveDataSpaceId::User, FileSys::SaveDataType::Account,
-                program_id, {}, 0);
-
-            path = Common::FS::ConcatPathSafe(save_dir, device_save_data_path);
+            if (user_id) {
+                save_user_id = user_id->AsU128();
+            }
         }
 
-        if (!Common::FS::CreateDirs(path)) {
+        const auto save_data_path = FileSys::SaveDataFactory::GetFullPath(
+            {}, vfs_save_dir, FileSys::SaveDataSpaceId::User, FileSys::SaveDataType::Account,
+            program_id, save_user_id, 0);
+
+        path = Common::FS::ConcatPathSafe(save_dir, save_data_path);
+
+        // Only create the folder for games that are known to need it; otherwise an empty
+        // directory would be left behind in the wrong place.
+        if ((user_save_size > 0 || device_save_size > 0) && !Common::FS::CreateDirs(path)) {
             LOG_ERROR(Frontend, "Unable to create the directories for save data");
         }
 
@@ -8719,8 +8886,6 @@ void MainWindow::OnPauseContinueGame() {
 void MainWindow::OnStopGame() {
     if (ConfirmShutdownGame()) {
         play_time_manager->Stop();
-        // Update game list to show new play time
-        game_list->PopulateAsync(UISettings::values.game_dirs);
         if (OnShutdownBegin()) {
             OnShutdownBeginDialog();
         } else {
@@ -8872,7 +9037,8 @@ void MainWindow::OnOpenModsPage() {
 }
 
 void MainWindow::OnOpenUserHandbook() {
-    OpenURL(QUrl(QStringLiteral("https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/README.md")));
+    OpenURL(QUrl(QStringLiteral(
+        "https://git.eden-emu.dev/eden-emu/eden/src/branch/master/docs/user/README.md")));
 }
 
 void MainWindow::ToggleFullscreen() {
@@ -9005,12 +9171,36 @@ void MainWindow::ToggleWindowMode() {
 void MainWindow::ResetWindowSize(u32 width, u32 height) {
     const auto aspect_ratio = Layout::EmulationAspectRatio(Settings::values.aspect_ratio.GetValue(),
                                                            float(height) / width);
-    if (!ui->action_Single_Window_Mode->isChecked()) {
-        render_window->resize(height / aspect_ratio, height);
+    const bool single_window = ui->action_Single_Window_Mode->isChecked();
+    const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
+    const auto status_bar_height = (single_window && show_status_bar) ? statusBar()->height() : 0;
+    const auto menu_bar_height = single_window ? menuBar()->height() : 0;
+    const auto extra_height = menu_bar_height + status_bar_height;
+
+    auto* current_screen = this->screen();
+    if (!current_screen) {
+        current_screen = QGuiApplication::primaryScreen();
+    }
+    const auto available = current_screen ? current_screen->availableGeometry() : QRect();
+
+    u32 target_h = height;
+    u32 target_w = static_cast<u32>(std::round(height / aspect_ratio));
+
+    if (!available.isEmpty()) {
+        const int max_w = available.width();
+        const int max_h = available.height() - extra_height;
+        if (max_w > 0 && max_h > 0 &&
+            (target_w > static_cast<u32>(max_w) || target_h > static_cast<u32>(max_h))) {
+            const float scale = (std::min)(float(max_w) / target_w, float(max_h) / target_h);
+            target_w = (std::max)(1U, static_cast<u32>(std::round(target_w * scale)));
+            target_h = (std::max)(1U, static_cast<u32>(std::round(target_h * scale)));
+        }
+    }
+
+    if (!single_window) {
+        render_window->resize(target_w, target_h);
     } else {
-        const bool show_status_bar = ui->action_Show_Status_Bar->isChecked();
-        const auto status_bar_height = show_status_bar ? statusBar()->height() : 0;
-        resize(height / aspect_ratio, height + menuBar()->height() + status_bar_height);
+        resize(target_w, target_h + extra_height);
     }
 }
 
@@ -9633,6 +9823,321 @@ void MainWindow::OnGameListRefresh() {
     SetFirmwareVersion();
 }
 
+void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
+    if (nup_running)
+        return;
+
+    const auto root = FileSys::Nup::DumpRootFromMain(game_path);
+    if (!root)
+        return;
+    const QString convert_title = tr("Convert to NUP");
+    const auto archive = FileSys::Nup::DefaultArchivePath(*root);
+    if (std::filesystem::exists(archive)) {
+        QMessageBox::information(
+            this, convert_title,
+            tr("The target archive already exists:\n%1")
+                .arg(QString::fromStdString(Common::FS::PathToUTF8String(archive))));
+        return;
+    }
+
+    const bool resume = FileSys::Nup::HasResumableJournal(archive);
+    bool delete_sources = resume;
+    FileSys::Nup::Metadata metadata;
+    QString progress_title;
+    QPixmap progress_icon;
+    if (resume) {
+        if (QMessageBox::question(this, tr("Resume Conversion"),
+                                  tr("Resume the interrupted conversion?"),
+                                  QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+            return;
+    } else {
+        u64 needed{};
+        {
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator it(*root, ec), end; !ec && it != end;
+                 it.increment(ec)) {
+                if (it->is_regular_file(ec))
+                    needed += it->file_size(ec);
+            }
+        }
+        std::error_code space_error;
+        const auto space = std::filesystem::space(archive.parent_path(), space_error);
+        NupMetadataDialog dialog(*root, archive, needed, space_error ? 0 : space.available, this);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        delete_sources = dialog.DeleteSources();
+        metadata = dialog.Metadata();
+        progress_title = dialog.DisplayName();
+        progress_icon = dialog.CurrentIcon();
+    }
+
+    nup_running = true;
+    nup_source_path = game_path;
+    game_list->SetNupConversionRunning(true);
+    nup_cancel = std::make_shared<std::atomic_bool>(false);
+    nup_progress =
+        new NupProgressDialog(tr("Converting to NUP"), progress_title, progress_icon, this);
+    connect(nup_progress, &NupProgressDialog::CancelRequested, this, [this, cancel = nup_cancel] {
+        cancel->store(true);
+        if (nup_progress)
+            nup_progress->SetCancelling();
+    });
+    nup_progress->show();
+
+    const auto cancel = nup_cancel;
+    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
+    nup_watcher.setFuture(QtConcurrent::run([this, root = *root, archive, delete_sources, metadata,
+                                             cancel, last_update] {
+        std::string error;
+        const auto on_progress = [this, last_update](const FileSys::Nup::PackProgress& progress) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - *last_update < std::chrono::milliseconds(200))
+                return;
+            *last_update = now;
+            QMetaObject::invokeMethod(
+                this,
+                [this, progress] {
+                    if (!nup_progress)
+                        return;
+                    nup_progress->SetProgress(progress);
+                },
+                Qt::QueuedConnection);
+        };
+        const auto result = FileSys::Nup::PackDump(
+            root, archive, {.delete_sources = delete_sources, .metadata = metadata}, on_progress,
+            cancel.get(), &error);
+        QMetaObject::invokeMethod(
+            this,
+            [this, result, delete_sources, error] {
+                nup_running = false;
+                nup_source_path.clear();
+                game_list->SetNupConversionRunning(false);
+                if (nup_progress) {
+                    nup_progress->Finish();
+                    nup_progress->deleteLater();
+                    nup_progress = nullptr;
+                }
+                nup_cancel.reset();
+                switch (result) {
+                case FileSys::Nup::PackResult::Success:
+                    QMessageBox::information(
+                        this, tr("Conversion Complete"),
+                        delete_sources ? tr("The NUP was created and the loose folder was "
+                                            "removed.")
+                                       : tr("The NUP was created. You can delete the loose "
+                                            "folder if you no longer need it."));
+                    OnGameListRefresh();
+                    break;
+                case FileSys::Nup::PackResult::Cancelled:
+                    if (delete_sources)
+                        QMessageBox::information(this, tr("Conversion Cancelled"),
+                                                 tr("The conversion can be resumed by choosing "
+                                                    "Convert to NUP again."));
+                    break;
+                case FileSys::Nup::PackResult::InvalidSource:
+                case FileSys::Nup::PackResult::IoError:
+                    QMessageBox::critical(this, tr("Conversion Failed"),
+                                          QString::fromStdString(error));
+                    break;
+                }
+            },
+            Qt::QueuedConnection);
+        return result;
+    }));
+}
+
+void MainWindow::OnGameListExtractNup(const std::string& game_path) {
+    if (nup_running) {
+        return;
+    }
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto archive = to_path(game_path);
+    const auto out_dir =
+        QFileDialog::getSaveFileName(this, tr("Extract NUP"),
+                                     QString::fromStdString(Common::FS::PathToUTF8String(
+                                         FileSys::Nup::DefaultExtractPath(archive))));
+    if (out_dir.isEmpty()) {
+        return;
+    }
+    const auto out_path = to_path(out_dir.toStdString());
+    if (std::filesystem::exists(out_path)) {
+        QMessageBox::information(this, tr("Extract NUP"),
+                                 tr("The target directory already exists:\n%1").arg(out_dir));
+        return;
+    }
+    const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
+    const QString progress_title = QString::fromStdString(probed.title_name).trimmed().isEmpty()
+                                       ? tr("Extracting NUP")
+                                       : QString::fromStdString(probed.title_name);
+    QPixmap progress_icon;
+    if (!probed.icon.empty()) {
+        progress_icon.loadFromData(probed.icon.data(), static_cast<uint>(probed.icon.size()));
+    }
+
+    nup_running = true;
+    nup_source_path = game_path;
+    game_list->SetNupConversionRunning(true);
+    nup_cancel = std::make_shared<std::atomic_bool>(false);
+    nup_progress = new NupProgressDialog(tr("Extracting NUP"), progress_title, progress_icon, this);
+    connect(nup_progress, &NupProgressDialog::CancelRequested, this, [this, cancel = nup_cancel] {
+        cancel->store(true);
+        if (nup_progress) {
+            nup_progress->SetCancelling();
+        }
+    });
+    nup_progress->show();
+
+    const auto cancel = nup_cancel;
+    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
+    nup_watcher.setFuture(QtConcurrent::run([this, archive, out_path, cancel, last_update] {
+        std::string error;
+        const auto on_progress = [this, last_update](const FileSys::Nup::PackProgress& progress) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - *last_update < std::chrono::milliseconds(200)) {
+                return;
+            }
+            *last_update = now;
+            QMetaObject::invokeMethod(
+                this,
+                [this, progress] {
+                    if (!nup_progress) {
+                        return;
+                    }
+                    nup_progress->SetProgress(progress);
+                },
+                Qt::QueuedConnection);
+        };
+        const auto result =
+            FileSys::Nup::ExtractNup(archive, out_path, on_progress, cancel.get(), &error);
+        QMetaObject::invokeMethod(
+            this,
+            [this, result, error, out_path] {
+                nup_running = false;
+                nup_source_path.clear();
+                game_list->SetNupConversionRunning(false);
+                if (nup_progress) {
+                    nup_progress->Finish();
+                    nup_progress->deleteLater();
+                    nup_progress = nullptr;
+                }
+                nup_cancel.reset();
+                switch (result) {
+                case FileSys::Nup::ExtractResult::Success:
+                    QMessageBox::information(
+                        this, tr("Extraction Complete"),
+                        tr("The NUP was extracted. You can delete the NUP file if you no longer "
+                           "need it."));
+                    // Only a new loose dump can appear, so one rescan is enough. The full refresh
+                    // also rescans external content and the firmware on the UI thread.
+                    game_list->RefreshGameDirectory();
+                    break;
+                case FileSys::Nup::ExtractResult::Cancelled:
+                    break;
+                case FileSys::Nup::ExtractResult::InvalidSource:
+                case FileSys::Nup::ExtractResult::IoError:
+                    QMessageBox::critical(this, tr("Extraction Failed"),
+                                          QString::fromStdString(error));
+                    break;
+                }
+            },
+            Qt::QueuedConnection);
+        return FileSys::Nup::PackResult::Success;
+    }));
+}
+
+void MainWindow::OnGameListEditNupMetadata(const std::string& game_path) {
+    if (nup_running) {
+        return;
+    }
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto archive = to_path(game_path);
+    NupEditDialog dialog(archive, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const auto edit = dialog.Edit();
+    if (!edit.title_name && !edit.icon && !edit.display_version && !edit.publisher &&
+        !edit.localized_titles) {
+        return;
+    }
+    const QString progress_title = dialog.DisplayName();
+    const QPixmap progress_icon = dialog.CurrentIcon();
+
+    nup_running = true;
+    nup_source_path = game_path;
+    game_list->SetNupConversionRunning(true);
+    nup_cancel = std::make_shared<std::atomic_bool>(false);
+    nup_progress =
+        new NupProgressDialog(tr("Editing NUP Metadata"), progress_title, progress_icon, this);
+    connect(nup_progress, &NupProgressDialog::CancelRequested, this, [this, cancel = nup_cancel] {
+        cancel->store(true);
+        if (nup_progress) {
+            nup_progress->SetCancelling();
+        }
+    });
+    nup_progress->show();
+
+    const auto cancel = nup_cancel;
+    auto last_update = std::make_shared<std::chrono::steady_clock::time_point>();
+    nup_watcher.setFuture(QtConcurrent::run([this, archive, edit, cancel, last_update] {
+        std::string error;
+        const auto on_progress = [this, last_update](const FileSys::Nup::PackProgress& progress) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - *last_update < std::chrono::milliseconds(200)) {
+                return;
+            }
+            *last_update = now;
+            QMetaObject::invokeMethod(
+                this,
+                [this, progress] {
+                    if (!nup_progress) {
+                        return;
+                    }
+                    nup_progress->SetProgress(progress);
+                },
+                Qt::QueuedConnection);
+        };
+        const auto result =
+            FileSys::Nup::EditNupMetadata(archive, edit, &error, cancel.get(), on_progress);
+        QMetaObject::invokeMethod(
+            this,
+            [this, result, error] {
+                nup_running = false;
+                nup_source_path.clear();
+                game_list->SetNupConversionRunning(false);
+                if (nup_progress) {
+                    nup_progress->Finish();
+                    nup_progress->deleteLater();
+                    nup_progress = nullptr;
+                }
+                nup_cancel.reset();
+                switch (result) {
+                case FileSys::Nup::EditResult::Success:
+                    QMessageBox::information(this, tr("Edit Complete"),
+                                             tr("The NUP metadata was updated."));
+                    // The cached name and icon are keyed by title, so they must go; the rest is
+                    // one rescan instead of the full refresh.
+                    QtCommon::Game::ResetMetadata(false);
+                    game_list->RefreshGameDirectory();
+                    break;
+                case FileSys::Nup::EditResult::NoChange:
+                case FileSys::Nup::EditResult::Cancelled:
+                    break;
+                case FileSys::Nup::EditResult::InvalidSource:
+                case FileSys::Nup::EditResult::IoError:
+                    QMessageBox::critical(this, tr("Edit Failed"), QString::fromStdString(error));
+                    break;
+                }
+            },
+            Qt::QueuedConnection);
+        return FileSys::Nup::PackResult::Success;
+    }));
+}
+
 void MainWindow::LaunchFirmwareApplet(u64 raw_program_id,
                                       std::optional<Service::NFP::CabinetMode> cabinet_mode) {
     auto const program_id = Service::AM::AppletProgramId(raw_program_id);
@@ -10058,8 +10563,13 @@ void MainWindow::OnMouseActivity() {
     }
 }
 
-void MainWindow::OnCheckFirmwareDecryption() {
-    if (!ContentManager::AreKeysPresent()) {
+void MainWindow::OnCheckFirmwareDecryption(bool prompt) {
+    if (!ContentManager::AreKeysPresent() && !prompt) {
+        // At startup only log it: loose ExeFS/RomFS dumps (all Switch 2 games so far) need no
+        // keys, and a modal question blocked every unattended launch. Tools > Install Decryption
+        // Keys still installs them.
+        LOG_WARNING(Frontend, "Decryption keys are missing: NCA, NSP and XCI games need them");
+    } else if (!ContentManager::AreKeysPresent()) {
         const auto res = QtCommon::Frontend::Warning(
             tr("Derivation Components Missing"),
             tr("Decryption keys are missing. Install them now?"),
@@ -10192,10 +10702,28 @@ bool MainWindow::ConfirmClose() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (!ConfirmClose()) {
+    if (!close_pending && !ConfirmClose()) {
         event->ignore();
         return;
     }
+    close_pending = true;
+    game_list->SetScanEnabled(false);
+    if (boot_in_progress) {
+        event->ignore();
+        return;
+    }
+    if (QtCommon::emu_thread && emulation_running) {
+        event->ignore();
+        if (!QtCommon::emu_thread->isRunning()) {
+            OnEmulationStopped();
+            return;
+        }
+        if (OnShutdownBegin()) {
+            OnShutdownBeginDialog();
+        }
+        return;
+    }
+    LOG_INFO(Frontend, "Closing frontend after emulation cleanup");
     // Debug Probes: who was which player when Eden closed
     if (Common::ControllerProbes() && !overlay_rows.empty()) {
         std::string players_now;
@@ -10300,8 +10828,9 @@ bool MainWindow::ConfirmForceLockedExit() {
     if (QtCommon::emu_thread == nullptr)
         return true;
 
-    const auto text = tr("The currently running application has requested Eden to not exit.\n\n"
-                         "Would you like to bypass this and exit anyway?");
+    const auto text =
+        tr("The currently running application has requested Eden to not exit.\n\n"
+           "Would you like to bypass this and exit anyway?");
 
     return question(this, tr("Eden"), text);
 }
@@ -10332,7 +10861,8 @@ static void AdjustLinkColor() {
 }
 
 void MainWindow::UpdateUITheme() {
-    const QString default_theme = QString::fromUtf8(UISettings::themes[size_t(UISettings::default_theme)].second);
+    const QString default_theme =
+        QString::fromUtf8(UISettings::themes[size_t(UISettings::default_theme)].second);
     QString current_theme = QString::fromStdString(UISettings::values.theme);
 
     if (current_theme.isEmpty())
@@ -10343,7 +10873,8 @@ void MainWindow::UpdateUITheme() {
     AdjustLinkColor();
 #else
     if (current_theme == QStringLiteral("default") || current_theme == QStringLiteral("colorful")) {
-        QIcon::setThemeName(current_theme == QStringLiteral("colorful") ? current_theme : startup_icon_theme);
+        QIcon::setThemeName(current_theme == QStringLiteral("colorful") ? current_theme
+                                                                        : startup_icon_theme);
         QIcon::setThemeSearchPaths(QStringList(default_theme_paths));
         if (isDarkMode()) {
             current_theme = QStringLiteral("default_dark");

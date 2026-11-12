@@ -9,9 +9,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <functional>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <span>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -97,6 +98,22 @@ public:
                               EmitModules emit_modules = {});
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
+    const std::array<u64, 6>& ShaderHashes() const noexcept {
+        return key.unique_hashes;
+    }
+
+    struct SampledImage {
+        u32 stage;
+        u32 tic;
+        VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
+    };
+
+    /// The sampled textures of the last configured draw, kept while a sampled frame dump runs.
+    std::span<const SampledImage> SampledImages() const noexcept {
+        return sampled_images;
+    }
+
     bool SupportsAlphaToCoverage() const noexcept {
         return fragment_has_color0_output;
     }
@@ -107,6 +124,11 @@ public:
 
     bool UsesExtendedDynamicState() const noexcept {
         return key.state.extended_dynamic_state != 0;
+    }
+
+    /// Switch 2 task/mesh pipeline: drawn with vkCmdDrawMeshTasksEXT.
+    [[nodiscard]] bool IsMeshPipeline() const noexcept {
+        return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
@@ -153,6 +175,20 @@ public:
         return it != transitions.end() ? it->second : nullptr;
     }
 
+    /// The frame the pipeline cache last handed this pipeline out (evicts long unused ones).
+    void MarkUsed(u64 frame) noexcept {
+        last_use_frame = frame;
+    }
+
+    [[nodiscard]] u64 LastUse() const noexcept {
+        return last_use_frame;
+    }
+
+    /// Forgets the transitions, which may point to pipelines the cache evicted.
+    void ClearTransitions() noexcept {
+        transitions.clear();
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
     }
@@ -177,6 +213,9 @@ public:
     }
 
 private:
+    /// Builds the pipeline once, on whichever thread gets here first.
+    void RunBuild();
+
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
@@ -203,6 +242,7 @@ private:
     /// Pipelines drawn right after this one. Hashed: the list search of their keys ran on every
     /// draw that changed pipeline (a fifth of the GPU thread in Hogwarts Legacy).
     std::unordered_map<GraphicsPipelineCacheKey, GraphicsPipeline*> transitions;
+    u64 last_use_frame{};
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
@@ -211,6 +251,7 @@ private:
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
     size_t num_image_elements{};
+    std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     u32 attribute_handle{};
     bool uses_attribute_handle{};
@@ -237,7 +278,6 @@ private:
     std::function<void()> build_func;
     std::atomic_bool build_claimed{false};
     EmitModules emit_modules;
-    void RunBuild();
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
 };

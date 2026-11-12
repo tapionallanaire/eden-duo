@@ -20,14 +20,14 @@ using namespace AudioCore::Renderer;
 
 IAudioRendererManager::IAudioRendererManager(Core::System& system_)
     : ServiceFramework{system_, "audren:u"}
-    , impl(system_)
+    , impl(std::make_shared<AudioCore::Renderer::Manager>(system_))
 {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IAudioRendererManager::OpenAudioRenderer>, "OpenAudioRenderer"},
         {1, D<&IAudioRendererManager::GetWorkBufferSize>, "GetWorkBufferSize"},
         {2, D<&IAudioRendererManager::GetAudioDeviceService>, "GetAudioDeviceService"},
-        {3, nullptr, "OpenAudioRendererForManualExecution"},
+        {3, &IAudioRendererManager::StubReplyInterface, "OpenAudioRendererForManualExecution"},
         {4, D<&IAudioRendererManager::GetAudioDeviceServiceWithRevisionInfo>, "GetAudioDeviceServiceWithRevisionInfo"},
     };
     // clang-format on
@@ -64,7 +64,7 @@ Result IAudioRendererManager::OpenAudioRenderer(
               impl->GetSessionCount());
 
     *out_audio_renderer =
-        std::make_shared<IAudioRenderer>(system, *impl, parameter, tmem_handle.Get(), tmem_size,
+        std::make_shared<IAudioRenderer>(system, impl, parameter, tmem_handle.Get(), tmem_size,
                                          process_handle.Get(), aruid.pid, session_id);
     R_SUCCEED();
 }

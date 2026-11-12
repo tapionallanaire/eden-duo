@@ -4,6 +4,17 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <iterator>
+#include <fstream>
+#include <vector>
+#include <cstdlib>
+#include <chrono>
+#include <cstdio>
+#include <csignal>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <atomic>
 #include <memory>
@@ -19,8 +30,10 @@
 #include <SDL3/SDL_main.h>
 
 #include <format>
+#include <print>
 
 #include "common/logging.h"
+#include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/string_util.h"
@@ -28,12 +41,14 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
+#include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/am/applet_manager.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
+#include "input_common/drivers/keyboard.h"
 #include "input_common/main.h"
 #include "network/network.h"
 #include "sdl_config.h"
@@ -48,6 +63,10 @@
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
+
 #ifdef _WIN32
 // windows.h needs to be included before shellapi.h
 #include <windows.h>
@@ -61,6 +80,75 @@ extern "C" {
 // graphics
 __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
+// EDEN_NX2_CRASH_DUMP=<dir>: on an unhandled exception (a real crash; fastmem faults are handled
+// before this), write <dir>/eden-crash-<pid>.dmp. A debugger changes the timing enough to hide
+// some crashes, so this catches them at full speed. dbghelp.dll is loaded only then.
+// Prints a code address as module+offset (resolve with llvm-symbolizer and the module's PDB).
+static void PrintCodeAddress(const char* label, const void* address) {
+    HMODULE module{};
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(address), &module)) {
+        GetModuleFileNameA(module, name, sizeof(name));
+    }
+    const char* base_name = std::strrchr(name, '\\');
+    std::fprintf(stderr, "  %s %p %s+%#llx\n", label, address, base_name ? base_name + 1 : name,
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
+                                                 reinterpret_cast<uintptr_t>(module)));
+}
+
+static LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* exception) {
+    static std::atomic<bool> written{};
+    const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
+    if (directory == nullptr || written.exchange(true)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // The faulting address and stack first: they survive even if the dump fails.
+    const EXCEPTION_RECORD& record = *exception->ExceptionRecord;
+    std::fprintf(stderr, "Unhandled exception %#lx on thread %lu, info %#llx %#llx\n",
+                 record.ExceptionCode, GetCurrentThreadId(),
+                 static_cast<unsigned long long>(record.NumberParameters > 0 ? record.ExceptionInformation[0] : 0),
+                 static_cast<unsigned long long>(record.NumberParameters > 1 ? record.ExceptionInformation[1] : 0));
+    PrintCodeAddress("at", record.ExceptionAddress);
+    void* frames[48];
+    const USHORT count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        PrintCodeAddress("frame", frames[i]);
+    }
+    std::fflush(stderr);
+    struct ExceptionInformation {
+        DWORD thread_id;
+        EXCEPTION_POINTERS* exception_pointers;
+        BOOL client_pointers;
+    };
+    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, const ExceptionInformation*,
+                                              const void*, const void*);
+    const HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+    const auto write = dbghelp ? reinterpret_cast<MiniDumpWriteDumpFn>(
+                                     GetProcAddress(dbghelp, "MiniDumpWriteDump"))
+                               : nullptr;
+    if (write == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    char path[MAX_PATH];
+    std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu.dmp", directory, GetCurrentProcessId());
+    const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        const ExceptionInformation information{GetCurrentThreadId(), exception, FALSE};
+        // MiniDumpWithThreadInfo; the larger MiniDumpWithIndirectlyReferencedMemory failed on
+        // Eden's address space and left an empty file.
+        const BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file, 0x1000,
+                              &information, nullptr, nullptr);
+        const DWORD error = ok ? 0 : GetLastError();
+        CloseHandle(file);
+        std::fprintf(stderr, ok ? "Crash dump written to %s\n" : "Crash dump to %s failed (%#lx)\n",
+                     path, error);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
 
@@ -161,6 +249,7 @@ static void OnStatusMessageReceived(const Network::StatusMessageEntry& msg) {
 
 struct SdlState {
     Core::System system{};
+    // Must outlive emu_window, which keeps a pointer to it.
     InputCommon::InputSubsystem input_subsystem{};
     std::unique_ptr<EmuWindow_SDL3> emu_window;
     DSModHarness::Session dsmod; // Duo: eden-cli harness state
@@ -170,6 +259,7 @@ struct SdlState {
     std::string filepath;
     int program_index{0};
     std::atomic<int> next_program_index{-1};
+    bool network_initialized{};
 };
 
 // What follows a successful Load: GPU start, shader cache, the core's frontend callbacks, Run.
@@ -247,7 +337,155 @@ static bool SwitchProgram(SdlState* state, int program_index) {
     return true;
 }
 
+static std::atomic_bool pack_nup_cancel{false};
+static std::atomic_bool unpack_nup_cancel{false};
+static std::atomic_bool edit_nup_cancel{false};
+
+// eden-cli --pack-nup <dump> [<out.nup>]; the output defaults to <dump>.nup next to the dump.
+static bool PackNup(const std::string& source, const std::string& output) {
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto dump_root = to_path(source);
+    const auto archive =
+        output.empty() ? FileSys::Nup::DefaultArchivePath(dump_root) : to_path(output);
+    std::signal(SIGINT, [](int) { pack_nup_cancel = true; });
+
+    const auto start = std::chrono::steady_clock::now();
+    auto last_report = start;
+    std::string error;
+    const auto result = FileSys::Nup::PackDump(
+        dump_root, archive, {},
+        [&](const FileSys::Nup::PackProgress& p) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_report < std::chrono::seconds(1) && p.files_done != p.files_total) {
+                return;
+            }
+            last_report = now;
+            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+                       p.bytes_total >> 20, p.files_done, p.files_total);
+        },
+        &pack_nup_cancel, &error);
+    const auto seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::print(stderr, "\n");
+    switch (result) {
+    case FileSys::Nup::PackResult::Success:
+        std::print(stderr, "Wrote {} in {:.1f} s\n", archive.string(), seconds);
+        return true;
+    case FileSys::Nup::PackResult::Cancelled:
+        std::print(stderr, "Cancelled\n");
+        return false;
+    default:
+        std::print(stderr, "Packing failed: {}\n", error);
+        return false;
+    }
+}
+
+// eden-cli --unpack-nup <file.nup> [<out_dir>]; the output defaults to <name>/ next to the NUP.
+static bool UnpackNup(const std::string& source, const std::string& output) {
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto archive = to_path(source);
+    const auto out_dir =
+        output.empty() ? FileSys::Nup::DefaultExtractPath(archive) : to_path(output);
+    std::signal(SIGINT, [](int) { unpack_nup_cancel = true; });
+
+    const auto start = std::chrono::steady_clock::now();
+    auto last_report = start;
+    std::string error;
+    const auto result = FileSys::Nup::ExtractNup(
+        archive, out_dir,
+        [&](const FileSys::Nup::PackProgress& p) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_report < std::chrono::seconds(1) && p.files_done != p.files_total) {
+                return;
+            }
+            last_report = now;
+            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+                       p.bytes_total >> 20, p.files_done, p.files_total);
+        },
+        &unpack_nup_cancel, &error);
+    const auto seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    std::print(stderr, "\n");
+    switch (result) {
+    case FileSys::Nup::ExtractResult::Success:
+        std::print(stderr, "Extracted to {} in {:.1f} s\n", out_dir.string(), seconds);
+        return true;
+    case FileSys::Nup::ExtractResult::Cancelled:
+        std::print(stderr, "Cancelled\n");
+        return false;
+    default:
+        std::print(stderr, "Extraction failed: {}\n", error);
+        return false;
+    }
+}
+
+static bool EditNup(const Core::LaunchParams& lp) {
+    const auto to_path = [](const std::string& utf8) {
+        return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
+    };
+    const auto archive = to_path(*lp.edit_nup_source);
+    FileSys::Nup::MetadataEdit edit;
+    if (lp.edit_nup_name) {
+        edit.title_name = *lp.edit_nup_name;
+    }
+    if (lp.edit_nup_publisher) {
+        edit.publisher = *lp.edit_nup_publisher;
+    }
+    if (lp.edit_nup_version) {
+        edit.display_version = *lp.edit_nup_version;
+    }
+    if (lp.edit_nup_icon) {
+        if (lp.edit_nup_icon->empty()) {
+            edit.icon = std::vector<u8>{};
+        } else {
+            const auto icon_path = to_path(*lp.edit_nup_icon);
+            std::ifstream in(icon_path, std::ios::binary);
+            if (!in) {
+                std::print(stderr, "Cannot read icon {}\n", icon_path.string());
+                return false;
+            }
+            edit.icon = std::vector<u8>((std::istreambuf_iterator<char>(in)), {});
+            if (edit.icon->empty()) {
+                std::print(stderr, "Icon file is empty\n");
+                return false;
+            }
+        }
+    }
+    if (!edit.title_name && !edit.icon && !edit.display_version && !edit.publisher) {
+        std::print(stderr, "Nothing to edit: pass --nup-name, --nup-icon, --nup-version or "
+                           "--nup-publisher (or a --clear-* flag)\n");
+        return false;
+    }
+    std::signal(SIGINT, [](int) { edit_nup_cancel = true; });
+    std::string error;
+    switch (FileSys::Nup::EditNupMetadata(archive, edit, &error, &edit_nup_cancel)) {
+    case FileSys::Nup::EditResult::Success:
+        std::print(stderr, "Updated {}\n", archive.string());
+        return true;
+    case FileSys::Nup::EditResult::NoChange:
+        std::print(stderr, "No changes to apply\n");
+        return true;
+    case FileSys::Nup::EditResult::Cancelled:
+        std::print(stderr, "Cancelled\n");
+        return false;
+    default:
+        std::print(stderr, "Edit failed: {}\n", error);
+        return false;
+    }
+}
+
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(WriteCrashDump);
+#endif
+    Nx2Sampler::StartFromEnvironment();
+    // SDL calls SDL_AppIterate back to back by default, which kept a host core at 100% polling
+    // input; 240 Hz is plenty for input and the key script.
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "240");
     SdlState* state = new SdlState();
     *appstate = state;
 
@@ -255,6 +493,15 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         freopen("CONOUT$", "wb", stdout);
         freopen("CONOUT$", "wb", stderr);
+    }
+    // Raise the CRT's open-file limit like the Qt frontend: loose RomFS folders keep thousands of
+    // files open through the VFS cache.
+    _setmaxstdio(8192);
+#elif defined(__unix__) || defined(__APPLE__)
+    // Same for the open file limit (macOS shells default to 256).
+    if (struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rl.rlim_cur = std::min<rlim_t>(8192, rl.rlim_max);
+        setrlimit(RLIMIT_NOFILE, &rl);
     }
 #endif
 
@@ -288,8 +535,32 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     Core::ApplyLaunchParams(lp);
 
+    // Informational options already printed by ApplyLaunchParams; handle them before any
+    // archive operation so --help/--version never packs, unpacks or edits.
+    if (lp.print_help || lp.print_version) {
+        return SDL_APP_SUCCESS;
+    }
+
+    if (lp.pack_nup_source) {
+        return PackNup(*lp.pack_nup_source, lp.filepath) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+
+    if (lp.unpack_nup_source) {
+        return UnpackNup(*lp.unpack_nup_source, lp.filepath) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+
+    if (lp.edit_nup_source) {
+        return EditNup(lp) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+
     if (lp.filepath.empty()) {
         LOG_CRITICAL(Frontend, "Failed to load ROM: No ROM specified");
+        return SDL_APP_FAILURE;
+    }
+
+    state->network_initialized = Network::Init();
+    if (!state->network_initialized) {
+        LOG_CRITICAL(Network, "Failed to initialize room networking");
         return SDL_APP_FAILURE;
     }
 
@@ -396,8 +667,131 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         state->system.InitializeDebugger();
     return SDL_APP_CONTINUE;
 }
+// EDEN_NX2_KEY_SCRIPT="seconds:code,seconds:-code,..." (or "@<file>"): press (code) or release (-code) keyboard
+// keys, by SDL scancode, that many seconds after start. Lets hidden test runs drive menus.
+double Nx2KeyClockSeconds(); // emu_window_sdl3.cpp
+
+// EDEN_NX2_DIAG_DIR=<dir>: keys.txt there is read and removed while the game runs, for scripted
+// control (tools/nx2/lab_ctl.py press). One entry per line: "<code>" press, "-<code>" release, or
+// "<code> <milliseconds>" press and release after that long. Codes are SDL scancodes.
+static void RunLiveKeys(InputCommon::InputSubsystem& input_subsystem, Core::System& system) {
+    static const std::filesystem::path file = [] {
+        const char* dir = std::getenv("EDEN_NX2_DIAG_DIR");
+        return dir && *dir ? std::filesystem::path{dir} / "keys.txt" : std::filesystem::path{};
+    }();
+    if (file.empty()) {
+        return;
+    }
+    static std::vector<std::pair<double, int>> releases;
+    static double last_check = 0.0;
+    const double now = Nx2KeyClockSeconds();
+    std::erase_if(releases, [&](const std::pair<double, int>& release) {
+        if (release.first > now) {
+            return false;
+        }
+        input_subsystem.GetKeyboard()->ReleaseKey(static_cast<std::size_t>(release.second));
+        return true;
+    });
+    if (now - last_check < 0.05) {
+        return;
+    }
+    last_check = now;
+    // Renamed first, so a writer replacing the file is never read halfway.
+    const auto taken = std::filesystem::path{file}.replace_extension(".taken");
+    std::error_code error;
+    std::filesystem::rename(file, taken, error);
+    if (error) {
+        return;
+    }
+    std::ifstream in{taken};
+    std::string line;
+    while (std::getline(in, line)) {
+        // "gpu low|high": sets the GPU accuracy, as the Qt app's Change GPU Mode hotkey.
+        if (line.starts_with("gpu ")) {
+            const bool high = line.substr(4) == "high";
+            Settings::values.gpu_accuracy.SetValue(high ? Settings::GpuAccuracy::High
+                                                        : Settings::GpuAccuracy::Low);
+            system.ApplySettings();
+            LOG_INFO(Frontend, "Live keys: GPU accuracy {}", high ? "high" : "low");
+            continue;
+        }
+        int code = 0, milliseconds = -1;
+        if (std::sscanf(line.c_str(), "%d %d", &code, &milliseconds) < 1 || code == 0) {
+            continue;
+        }
+        LOG_INFO(Frontend, "Live keys: {} {}{}", code < 0 ? "release" : "press", code < 0 ? -code : code,
+                 milliseconds >= 0 ? std::format(" for {} ms", milliseconds) : std::string{});
+        if (code < 0) {
+            input_subsystem.GetKeyboard()->ReleaseKey(static_cast<std::size_t>(-code));
+            continue;
+        }
+        input_subsystem.GetKeyboard()->PressKey(static_cast<std::size_t>(code));
+        if (milliseconds >= 0) {
+            releases.emplace_back(now + milliseconds / 1000.0, code);
+        }
+    }
+    in.close();
+    std::filesystem::remove(taken, error);
+}
+
+static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem, Core::System& system) {
+    struct KeyEvent {
+        double seconds; // when frame is 0
+        u64 frame;      // "f<frame>:code": after that many presents
+        int code;
+    };
+    static const std::vector<KeyEvent> script = [] {
+        std::vector<KeyEvent> events;
+        if (const char* text = std::getenv("EDEN_NX2_KEY_SCRIPT")) {
+            // "@<file>" reads the list from a file: long scripts in the environment slow down
+            // every getenv in the process.
+            std::string list{text};
+            if (!list.empty() && list[0] == '@') {
+                std::ifstream file{list.substr(1)};
+                list.assign(std::istreambuf_iterator<char>{file}, {});
+            }
+            size_t start = 0;
+            while (start < list.size()) {
+                const size_t end = (std::min)(list.find(',', start), list.size());
+                const std::string item = list.substr(start, end - start);
+                if (const size_t colon = item.find(':'); colon != std::string::npos) {
+                    const std::string when = item.substr(0, colon);
+                    const int code = std::stoi(item.substr(colon + 1));
+                    if (!when.empty() && when[0] == 'f') {
+                        events.push_back({0.0, std::stoull(when.substr(1)), code});
+                    } else {
+                        events.push_back({std::stod(when), 0, code});
+                    }
+                }
+                start = end + 1;
+            }
+        }
+        return events;
+    }();
+    static size_t next = 0;
+    const double elapsed = Nx2KeyClockSeconds();
+    const u64 frame = Core::g_nx2_present_count.load();
+    while (next < script.size() && (script[next].frame != 0 ? script[next].frame <= frame
+                                                            : script[next].seconds <= elapsed)) {
+        const int code = script[next].code;
+        LOG_INFO(Frontend, "Key script: {} key {} at {:.1f} s (frame {})",
+                 code < 0 ? "release" : "press", code < 0 ? -code : code, elapsed, frame);
+        if (code < 0) {
+            input_subsystem.GetKeyboard()->ReleaseKey(static_cast<std::size_t>(-code));
+        } else {
+            input_subsystem.GetKeyboard()->PressKey(static_cast<std::size_t>(code));
+        }
+        ++next;
+    }
+    RunLiveKeys(input_subsystem, system);
+}
+
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
+    RunKeyScript(state->input_subsystem, state->system);
+    if (!state->emu_window) {
+        return SDL_APP_SUCCESS;
+    }
     if (const int next = state->next_program_index.exchange(-1); next >= 0) {
         if (!SwitchProgram(state, next)) {
             return SDL_APP_FAILURE;
@@ -408,7 +802,7 @@ extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     SdlState *state = (SdlState *)appstate;
-    if (!DSModHarness::HandleEvent(state->dsmod, *event)) {
+    if (!DSModHarness::HandleEvent(state->dsmod, *event) && state->emu_window) {
         state->emu_window->OnEvent(*event);
     }
     return SDL_APP_CONTINUE;
@@ -423,7 +817,11 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
         void(state->system.Pause());
         state->system.ShutdownMainProcess();
     }
+    const bool network_initialized = state->network_initialized;
     delete state;
+    if (network_initialized) {
+        Network::Shutdown();
+    }
 }
 
 #define VMA_IMPLEMENTATION

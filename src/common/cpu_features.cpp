@@ -225,6 +225,15 @@ const CPUCaps g_cpu_caps = [] {
         }
     }
 
+    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every
+    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the
+    // host's much slower QueryPerformanceCounter. Intel CPUs that have the leaf but report no
+    // crystal frequency (e.g. Coffee Lake) keep the OS clock: an i5-9400F crashed at launch on the
+    // measured RDTSC clock.
+    if (max_std_fn < 0x15 && caps.invariant_tsc && caps.tsc_frequency == 0) {
+        caps.tsc_frequency = X64::EstimateRDTSCFrequency();
+    }
+
     if (max_std_fn >= 0x16) {
         __cpuid(cpu_id, 0x16);
         caps.base_frequency = cpu_id[0];
@@ -271,8 +280,16 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 
 s64 WallClock::GetCNTPCT() const {
     if (!invariant)
-        return GetUptime() * NsToCNTPCTRatio::num / NsToCNTPCTRatio::den;
-    return MultiplyHigh(GetUptime(), cntpct_rdtsc_factor);
+        return MultiplyAndDivide64(GetUptime(), GetGuestCNTFRQ(), NsRatio::den);
+    return MultiplyHigh(GetUptime(), cntpct_rdtsc_factor.load(std::memory_order_relaxed));
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
+    if (invariant) {
+        cntpct_rdtsc_factor.store(GetFixedPoint64Factor(frequency, rdtsc_frequency),
+                                  std::memory_order_relaxed);
+    }
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -329,7 +346,7 @@ namespace {
 } // namespace
 
 WallClock::WallClock(bool invariant_, u64 rdtsc_frequency_) noexcept {
-    const u64 host_cntfrq = std::max<u64>(GetHostCNTFRQ(), 1);
+    host_cntfrq = std::max<u64>(GetHostCNTFRQ(), 1);
     ns_cntfrq_factor = GetFixedPointFactor(NsRatio::den, host_cntfrq);
     us_cntfrq_factor = GetFixedPointFactor(UsRatio::den, host_cntfrq);
     ms_cntfrq_factor = GetFixedPointFactor(MsRatio::den, host_cntfrq);
@@ -352,6 +369,11 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 
 s64 WallClock::GetCNTPCT() const {
     return MultiplyHigh(GetUptime(), guest_cntfrq_factor);
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
+    guest_cntfrq_factor = GetFixedPointFactor(frequency, host_cntfrq);
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -392,7 +414,11 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 }
 
 s64 WallClock::GetCNTPCT() const {
-    return GetUptime() * NsToCNTPCTRatio::num / NsToCNTPCTRatio::den;
+    return MultiplyAndDivide64(GetUptime(), GetGuestCNTFRQ(), NsRatio::den);
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -412,9 +438,13 @@ u64 WallClock::NsToTicks(std::chrono::nanoseconds ns) const {
 }
 #endif
 
+u64 WallClock::CPUTickToGuestCNTPCT(u64 cpu_tick) const {
+    return MultiplyAndDivide64(cpu_tick, GetGuestCNTFRQ(), CPUTickFreq);
+}
+
 // Wall clock MUST be initialized AFTER g_cpu_caps
 // C++ only guarantees ctor init in the order they appear in TU
-const WallClock g_wall_clock = [] {
+WallClock g_wall_clock = [] {
 #if defined(ARCHITECTURE_x86_64)
     auto const& caps = Common::g_cpu_caps;
     return WallClock(caps.invariant_tsc && caps.tsc_frequency > std::nano::den, caps.tsc_frequency);

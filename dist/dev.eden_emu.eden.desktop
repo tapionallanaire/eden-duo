@@ -7,13 +7,13 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Eden
+Name=Eglantine
 GenericName=Switch Emulator
 Comment=Multiplatform FOSS Switch 1 emulator written in C++, derived from Yuzu and Sudachi
-Icon=dev.eden_emu.eden
-TryExec=eden
-Exec=eden %f
+Icon=dev.eglantine.eglantine
+TryExec=eglantine
+Exec=eglantine %f
 Categories=Game;Emulator;Qt;
 MimeType=application/x-nx-nro;application/x-nx-nso;application/x-nx-nsp;application/x-nx-xci;
 Keywords=Nintendo;Switch;
-StartupWMClass=eden
+StartupWMClass=eglantine

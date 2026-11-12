@@ -11,7 +11,9 @@
 #include <condition_variable>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -22,6 +24,7 @@
 #include "core/device_memory_manager.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
+#include "core/gpu_dirty_memory_manager.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/perf_stats.h"
 #include "video_core/cdma_pusher.h"
@@ -118,10 +121,19 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
-            renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
-        });
+        std::vector<std::pair<DAddr, u64>> writes;
+        std::function<void(PAddr, size_t)> callback_writes(
+            [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
         system.GatherGPUDirtyMemory(callback_writes);
+        if (!writes.empty()) {
+            renderer->ReadRasterizer()->OnCacheInvalidations(writes);
+        }
+    }
+
+    void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
+        for (auto& manager : system.GetGPUDirtyMemoryManager()) {
+            manager.ForEachPending(callback);
+        }
     }
 
     /// Signal the ending of command list.
@@ -225,6 +237,38 @@ struct GPU::Impl {
         gpu_thread.SubmitList(channel, std::move(entries), is_async);
     }
 
+    void RunInOrder(std::function<void()>&& func) {
+        gpu_thread.Run(std::move(func), is_async);
+    }
+
+    void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+        u64 id;
+        {
+            std::scoped_lock lock{pending_maps_mutex};
+            id = ++last_pending_map;
+            pending_maps.push_back({id, gpu_addr, gpu_addr + size});
+            pending_map_count.store(pending_maps.size(), std::memory_order_release);
+        }
+        gpu_thread.Run(
+            [this, id, func = std::move(func)] {
+                func();
+                std::scoped_lock lock{pending_maps_mutex};
+                std::erase_if(pending_maps, [id](const PendingMap& map) { return map.id == id; });
+                pending_map_count.store(pending_maps.size(), std::memory_order_release);
+            },
+            is_async, true);
+    }
+
+    bool IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+        if (pending_map_count.load(std::memory_order_acquire) == 0 || size == 0) {
+            return false;
+        }
+        std::scoped_lock lock{pending_maps_mutex};
+        return std::ranges::any_of(pending_maps, [&](const PendingMap& map) {
+            return gpu_addr < map.end && map.begin < gpu_addr + size;
+        });
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size) {
         gpu_thread.FlushRegion(addr, size, is_async);
@@ -236,7 +280,16 @@ struct GPU::Impl {
             return raster_area;
         }
         raster_area.preemtive = true;
-        const u64 fence = RequestSyncOperation([this, &raster_area]() {
+        // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
+        // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
+        if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
+            LOG_INFO(HW_GPU, "CPU read of GPU-written memory [{:#x}, {:#x}) ({} so far)",
+                     raster_area.start_address, raster_area.end_address,
+                     reads.load(std::memory_order_relaxed));
+        }
+        const u64 fence = RequestSyncOperation([this, raster_area]() {
+            // Apply collected guest writes before downloading GPU data over guest memory.
+            InvalidateGPUCache();
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
         gpu_thread.TickGPU(is_async);
@@ -471,6 +524,17 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     u64 last_sync_fence{};
+
+    // Maps queued by MapInOrder and not run yet, by the GPU addresses they change.
+    struct PendingMap {
+        u64 id;
+        GPUVAddr begin;
+        GPUVAddr end;
+    };
+    mutable std::mutex pending_maps_mutex;
+    std::vector<PendingMap> pending_maps;
+    u64 last_pending_map{};
+    std::atomic<size_t> pending_map_count{};
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
 
@@ -527,6 +591,10 @@ void GPU::InvalidateGPUCache() {
     impl->InvalidateGPUCache();
 }
 
+void GPU::ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
+    impl->ForEachPendingCpuWrite(callback);
+}
+
 void GPU::OnCommandListEnd() {
     impl->OnCommandListEnd();
 }
@@ -535,6 +603,10 @@ u64 GPU::RequestFlush(DAddr addr, std::size_t size) {
     return impl->RequestSyncOperation([this, addr, size]() {
         impl->renderer->ReadRasterizer()->FlushRegion(addr, size);
     });
+}
+
+u64 GPU::RunOnGpuThread(std::function<void()>&& action) {
+    return impl->RequestSyncOperation(std::move(action));
 }
 
 u64 GPU::CurrentSyncRequestFence() const {
@@ -638,6 +710,10 @@ bool GPU::IsAsync() const {
     return impl->is_async;
 }
 
+bool GPU::HasSuspendedChannels() const {
+    return impl->scheduler.HasPendingChannelsAnyThread();
+}
+
 bool GPU::UseNvdec() const {
     return impl->use_nvdec;
 }
@@ -680,6 +756,18 @@ VideoCore::RasterizerDownloadArea GPU::OnCPURead(PAddr addr, u64 size) {
 
 void GPU::FlushRegion(DAddr addr, u64 size) {
     impl->FlushRegion(addr, size);
+}
+
+void GPU::RunInOrder(std::function<void()>&& func) {
+    impl->RunInOrder(std::move(func));
+}
+
+void GPU::MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+    impl->MapInOrder(gpu_addr, size, std::move(func));
+}
+
+bool GPU::IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+    return impl->IsMapPending(gpu_addr, size);
 }
 
 void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {

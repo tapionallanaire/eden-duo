@@ -38,6 +38,9 @@ class MemoryManager;
 
 namespace Core::Memory {
 
+/// Counts unmapped reads on this host thread since the CPU callbacks last checked (debug aid).
+u32& UnmappedReadFlag();
+
 /**
  * Page size used by the ARM architecture. This is the smallest granularity with which memory can
  * be mapped.
@@ -485,6 +488,12 @@ public:
      *               marked as cached or uncached.
      */
     void RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached);
+
+    /**
+     * Makes the next guest read of each rasterizer cached page in the range take the slow path
+     * (fastmem only), so that the read reaches the GPU's reactive flush once.
+     */
+    void RasterizerArmReadTraps(Common::ProcessAddress vaddr, u64 size);
 
     /**
      * Marks each page within the specified address range as debug or non-debug.

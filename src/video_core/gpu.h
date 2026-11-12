@@ -154,6 +154,9 @@ public:
     void FlushCommands();
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache();
+    /// Calls `callback` for each CPU write into GPU-written memory that InvalidateGPUCache has not
+    /// applied yet.
+    void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback);
     /// Signal the ending of command list.
     void OnCommandListEnd();
 
@@ -169,6 +172,9 @@ public:
 
     /// Request a host GPU memory flush from the CPU.
     [[nodiscard]] u64 RequestFlush(DAddr addr, std::size_t size);
+
+    /// Runs an action on the GPU thread between command lists (returns its sync fence).
+    u64 RunOnGpuThread(std::function<void()>&& action);
 
     /// Obtains current flush request fence id.
     [[nodiscard]] u64 CurrentSyncRequestFence() const;
@@ -235,6 +241,9 @@ public:
 
     [[nodiscard]] bool IsAsync() const;
 
+    /// Whether a channel is suspended on a semaphore acquire (callable from any thread).
+    [[nodiscard]] bool HasSuspendedChannels() const;
+
     [[nodiscard]] bool UseNvdec() const;
 
     void RendererFrameEndNotify();
@@ -273,6 +282,17 @@ public:
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size);
+
+    /// Runs func on the GPU thread after the command lists submitted so far.
+    void RunInOrder(std::function<void()>&& func);
+
+    /// RunInOrder for GPU memory maps: also done before the GPU thread reads the command lists
+    /// submitted later (with the GPU split, on its front rather than its back).
+    /// [gpu_addr, gpu_addr + size) is the range of GPU addresses the map changes.
+    void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func);
+
+    /// Whether a MapInOrder over part of [gpu_addr, gpu_addr + size) is queued and not done yet.
+    [[nodiscard]] bool IsMapPending(GPUVAddr gpu_addr, u64 size) const;
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes = false);

@@ -46,6 +46,10 @@ add_library(core STATIC
     debugger/gdbstub.h
     debugger/gdbstub_arch.cpp
     debugger/gdbstub_arch.h
+    debugger/nx2_debug_server.cpp
+    debugger/nx2_debug_server.h
+    debugger/nx2_debug_tools.cpp
+    debugger/nx2_debug_tools.h
     device_memory.cpp
     device_memory.h
     device_memory_manager.h
@@ -132,6 +136,10 @@ add_library(core STATIC
     file_sys/program_metadata.h
     file_sys/registered_cache.cpp
     file_sys/registered_cache.h
+    file_sys/nup_container.cpp
+    file_sys/nup_container.h
+    file_sys/nup_writer.cpp
+    file_sys/nup_writer.h
     file_sys/romfs.cpp
     file_sys/romfs.h
     file_sys/romfs_factory.cpp
@@ -457,6 +465,7 @@ add_library(core STATIC
     hle/service/am/service/application_functions.cpp
     hle/service/am/service/application_functions.h
     hle/service/am/service/application_proxy.cpp
+    hle/service/am/service/graphics_scale_controller.h
     hle/service/am/service/application_proxy.h
     hle/service/am/service/application_proxy_service.cpp
     hle/service/am/service/application_proxy_service.h
@@ -526,6 +535,9 @@ add_library(core STATIC
     hle/service/audio/audio_out.h
     hle/service/audio/audio_renderer_manager.cpp
     hle/service/audio/audio_renderer_manager.h
+    hle/service/audio/nx2_audio_device_manager.h
+    hle/service/audio/nx2_hwacod.h
+    hle/service/audio/nx2_audio_user_client.h
     hle/service/audio/audio_renderer.cpp
     hle/service/audio/audio_renderer.h
     hle/service/audio/audio.cpp
@@ -865,6 +877,7 @@ add_library(core STATIC
     hle/service/nvdrv/devices/nvhost_vic.h
     hle/service/nvdrv/devices/nvmap.cpp
     hle/service/nvdrv/devices/nvmap.h
+    hle/service/nvdrv/devices/nx2_stub_device.h
     hle/service/nvdrv/nvdata.h
     hle/service/nvdrv/nvdrv.cpp
     hle/service/nvdrv/nvdrv.h
@@ -1033,6 +1046,9 @@ add_library(core STATIC
     hle/service/server_manager.h
     hle/service/service.cpp
     hle/service/service.h
+    hle/service/nx2_streamplay.h
+    hle/service/nx2_stub_interface.h
+    hle/service/nx2_gsv.h
     hle/service/services.cpp
     hle/service/services.h
     hle/service/set/factory_settings_server.cpp
@@ -1149,6 +1165,8 @@ add_library(core STATIC
     loader/nso.h
     loader/nsp.cpp
     loader/nsp.h
+    loader/nup.cpp
+    loader/nup.h
     loader/xci.cpp
     loader/xci.h
     memory.cpp
@@ -1280,6 +1298,11 @@ include(mods/duo_core.cmake) # Eden Duo: dual-screen runtime sources
 # AES with the ARMv8 Cryptography Extensions (aes_util.cpp, runtime-checked).
 if (ARCHITECTURE_arm64 AND NOT MSVC)
     set_source_files_properties(crypto/aes_util.cpp PROPERTIES COMPILE_OPTIONS "-march=armv8-a+crypto")
+endif()
+
+if (ENABLE_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
+    # Fibers can migrate between host threads; keep kernel TLS lookups outside LTO callers.
+    set_source_files_properties(hle/kernel/kernel.cpp PROPERTIES COMPILE_OPTIONS -fno-lto)
 endif()
 
 create_target_directory_groups(core)

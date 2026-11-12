@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <thread>
+
 #include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/core_timing.h"
@@ -18,6 +21,18 @@ namespace {
 
 constexpr bool IsValidVirtualCoreId(int32_t core_id) {
     return (0 <= core_id && core_id < static_cast<int32_t>(Core::Hardware::NUM_CPU_CORES));
+}
+
+// Switch 2 hardware has eight cores. Six are emulated (the most an application is given), so
+// fold any id past them back onto the low cores, both in core ids and in affinity masks.
+constexpr int32_t FoldExtraCoreId(int32_t core_id) {
+    constexpr auto num_cores = static_cast<int32_t>(Core::Hardware::NUM_CPU_CORES);
+    return core_id >= num_cores && core_id < 2 * num_cores ? core_id - num_cores : core_id;
+}
+
+constexpr u64 FoldExtraCoreMask(u64 mask) {
+    constexpr u64 low = (1ULL << Core::Hardware::NUM_CPU_CORES) - 1;
+    return (mask & low) | ((mask >> Core::Hardware::NUM_CPU_CORES) & low);
 }
 
 } // Anonymous namespace
@@ -36,6 +51,7 @@ Result CreateThread(Core::System& system, Handle* out_handle, u64 entry_point, u
     if (core_id == IdealCoreUseProcessValue) {
         core_id = process.GetIdealCoreId();
     }
+    core_id = FoldExtraCoreId(core_id);
 
     // Validate arguments.
     R_UNLESS(IsValidVirtualCoreId(core_id), ResultInvalidCoreId);
@@ -93,6 +109,35 @@ Result StartThread(Core::System& system, Handle thread_handle) {
 
     // Try to start the thread.
     R_TRY(thread->Run(system.Kernel()));
+
+    // On hardware a started thread that can run begins within microseconds. An emulated core takes
+    // longer (wake-up, JIT), so let the thread reach its first SVC before the caller carries on.
+    // Mario Tennis Fever's boot stub reuses the stack arguments it gave its threads right after
+    // starting them.
+    auto& kernel = system.Kernel();
+    const s32 core = thread->GetActiveCore();
+    if (core == GetCurrentCoreId(kernel) || !kernel.IsMulticore()) {
+        // Sleeping lets this core run the new thread; in single-core mode the idle core passes
+        // control to the next one.
+        for (int i = 0; i < 10 && !thread->HasEnteredKernel() && !thread->IsTerminationRequested();
+             ++i) {
+            const s64 timeout = kernel.HardwareTimer().GetTick() + 100'000 + 2;
+            static_cast<void>(GetCurrentThread(kernel).Sleep(kernel, timeout));
+        }
+    } else if (core >= 0 && core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES)) {
+        const KThread* const running = kernel.Scheduler(core).GetSchedulerCurrentThread();
+        const bool preempts = running == nullptr || running == thread.GetPointerUnsafe() ||
+                              running == kernel.Scheduler(core).GetIdleThread() ||
+                              thread->GetPriority() < running->GetPriority();
+        if (preempts) {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+            while (!thread->HasEnteredKernel() && !thread->IsTerminationRequested() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::yield();
+            }
+        }
+    }
 
     R_SUCCEED();
 }
@@ -260,6 +305,10 @@ Result SetThreadCoreMask(Core::System& system, Handle thread_handle, s32 core_id
         const u64 process_core_mask = GetCurrentProcess(system.Kernel()).GetCoreMask();
         R_UNLESS((affinity_mask | process_core_mask) == process_core_mask, ResultInvalidCoreId);
         R_UNLESS(affinity_mask != 0, ResultInvalidCombination);
+
+        // Validated against the real mask above; fold to the emulated cores from here on.
+        affinity_mask = FoldExtraCoreMask(affinity_mask);
+        core_id = FoldExtraCoreId(core_id);
 
         // Validate the core id.
         if (IsValidVirtualCoreId(core_id)) {

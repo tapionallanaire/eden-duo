@@ -329,6 +329,22 @@ void IREmitter::SetPatch(Patch patch, const F32& value) {
     Inst(Opcode::SetPatch, patch, value);
 }
 
+U32 IREmitter::IsbeRead(const U32& address) {
+    return Inst<U32>(Opcode::IsbeRead, address);
+}
+
+void IREmitter::IsbeWriteAttribute(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteAttribute, address, value);
+}
+
+void IREmitter::IsbeWriteMapU8(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteMapU8, address, value);
+}
+
+void IREmitter::IsbeWriteMapU32(const U32& address, const U32& value) {
+    Inst(Opcode::IsbeWriteMapU32, address, value);
+}
+
 void IREmitter::SetFragColor(u32 index, u32 component, const F32& value) {
     Inst(Opcode::SetFragColor, Imm32(index), Imm32(component), value);
 }
@@ -553,6 +569,16 @@ F16F32F64 IREmitter::FPAdd(const F16F32F64& a, const F16F32F64& b, FpControl con
     default:
         ThrowInvalidType(a.Type());
     }
+}
+
+Value IREmitter::TensorMulAdd(const Value& a, const Value& b, const Value& c, u32 depth) {
+    if (a.Type() != Type::U32x4 || b.Type() != Type::U32x2 || c.Type() != Type::U32x2 ||
+        (depth != 8 && depth != 16)) {
+        throw InvalidArgument("Invalid software matrix operands");
+    }
+    const Value result = Inst(Opcode::TensorMulAdd, a, b, c);
+    result.Inst()->SetFlags<u32>(depth);
+    return result;
 }
 
 Value IREmitter::CompositeConstruct(const Value& e1, const Value& e2) {
@@ -851,6 +877,10 @@ F32 IREmitter::FPSin(const F32& value) {
 
 F32 IREmitter::FPExp2(const F32& value) {
     return Inst<F32>(Opcode::FPExp2, value);
+}
+
+F32 IREmitter::FPTanh(const F32& value) {
+    return Inst<F32>(Opcode::FPTanh, value);
 }
 
 F32 IREmitter::FPLog2(const F32& value) {

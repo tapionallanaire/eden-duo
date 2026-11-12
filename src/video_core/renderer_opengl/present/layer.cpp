@@ -69,7 +69,7 @@ GLuint Layer::ConfigureDraw(std::array<GLfloat, 3 * 2>& out_matrix,
 
     glDisablei(GL_SCISSOR_TEST, 0);
 
-    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
+    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr || filters.get_scaling_filter() == Settings::ScalingFilter::Fsr3) {
         if (!fsr || fsr->NeedsRecreation(layout.screen)) {
             fsr.emplace(layout.screen.GetWidth(), layout.screen.GetHeight());
         }
@@ -190,6 +190,11 @@ void Layer::ConfigureFramebufferTexture(const Tegra::FramebufferConfig& framebuf
         internal_format = GL_RGBA8;
         framebuffer_texture.gl_format = GL_RGBA;
         framebuffer_texture.gl_type = GL_UNSIGNED_INT_8_8_8_8_REV;
+        break;
+    case Service::android::PixelFormat::Rgba1010102:
+        internal_format = GL_RGB10_A2;
+        framebuffer_texture.gl_format = GL_RGBA;
+        framebuffer_texture.gl_type = GL_UNSIGNED_INT_2_10_10_10_REV;
         break;
     case Service::android::PixelFormat::Rgb565:
         internal_format = GL_RGB565;

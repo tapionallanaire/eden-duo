@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/common_funcs.h"
+#include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/lz4_compression.h"
@@ -324,6 +325,99 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         image_size += static_cast<u32>(code_size);
     }
 
+    // Star Fox output pacing for the tested build. The engine's explicit-rate path
+    // updates its render delta as well; simulation timing and the guest clock stay unchanged.
+    if (name == "main" && process.GetProgramId() == 0x0400E88025B1A000ULL) {
+        constexpr u32 Fps = 60;
+        constexpr size_t Offset = 0xB444ADC;
+        constexpr std::array<u32, 3> Original{0xBD4223E1, 0x1E202028, 0x540000ED};
+        constexpr std::array<u8, 20> BuildId{
+            0xA7, 0x73, 0x0D, 0x0F, 0x74, 0xD1, 0x68, 0xD9, 0x04, 0x22,
+            0x35, 0x4C, 0x83, 0x17, 0xF7, 0x6F, 0xF7, 0x8A, 0xD9, 0x38};
+        const auto& text = nso_header.segments[0];
+        if (std::equal(BuildId.begin(), BuildId.end(), nso_header.build_id.begin()) &&
+            Offset >= text.location && Offset + sizeof(Original) <= u64{text.location} + text.size &&
+            module_start + Offset + sizeof(Original) <= codeset.memory.size() &&
+            std::memcmp(codeset.memory.data() + module_start + Offset, Original.data(),
+                        sizeof(Original)) == 0) {
+            constexpr std::array<u32, 3> replacement{
+                0x52800019U | (Fps << 5), // mov w25, #60
+                0x1E2E1000,              // fmov s0, #1.0
+                0x14000035};             // b main+0xB444BB8 (explicit output-rate path)
+            std::memcpy(codeset.memory.data() + module_start + Offset, replacement.data(),
+                        sizeof(replacement));
+            LOG_INFO(Loader, "Star Fox output interval: {} FPS; guest clock unchanged", Fps);
+        } else {
+            LOG_WARNING(Loader,
+                        "Star Fox output patch skipped: unsupported build or instructions");
+        }
+    }
+
+    // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
+    // 30 FPS mode, or let it choose dynamically using the whole frame time (CPU + GPU wait).
+    // Match the instruction sequence instead of relying on a title-version-specific address.
+    const bool mkw_dynamic = Settings::values.mkw_dynamic_fps.GetValue();
+    bool mkw_dynamic_fps_patch_applied = false;
+    if ((mkw_dynamic || Settings::values.mkw_30fps.GetValue()) && name == "main" &&
+        process.GetProgramId() == Settings::MarioKartWorldProgramId) {
+        constexpr u32 ModeLoadInsn = 0xB9421268; // ldr w8, [x19, #0x210]
+        const u32 mode = mkw_dynamic ? 0U : 2U;
+        const u32 mode_instruction = 0x52800008U | (mode << 5); // mov w8, #mode
+        const auto& text = nso_header.segments[0];
+        u8* const code = codeset.memory.data() + module_start + text.location;
+        const size_t count = text.size / sizeof(u32);
+        const auto word = [code](size_t index) {
+            u32 value;
+            std::memcpy(&value, code + index * sizeof(u32), sizeof(value));
+            return value;
+        };
+        size_t mode_site = 0;
+        size_t mode_matches = 0;
+        for (size_t i = 2; i + 8 < count; ++i) {
+            if (word(i) != ModeLoadInsn || word(i - 2) != 0x6B01013F || // cmp w9, w1
+                (word(i - 1) & 0xFF00001F) != 0x54000001 ||             // b.ne
+                (word(i + 1) & 0xFF00001F) != 0x35000008) {             // cbnz w8
+                continue;
+            }
+            for (size_t j = i + 2; j < i + 8; ++j) {
+                if (word(j) == 0x52A84E08) { // mov w8, #60.0f
+                    mode_site = i;
+                    ++mode_matches;
+                    break;
+                }
+            }
+        }
+
+        size_t frame_time_site = 0;
+        size_t frame_time_matches = 0;
+        if (mode_matches == 1 && mkw_dynamic) {
+            for (size_t i = mode_site + 1; i < mode_site + 32 && i < count; ++i) {
+                if ((word(i) & 0xFFFFFFE0) == 0xF9409660) { // ldr xN, [x19, #0x128]
+                    frame_time_site = i;
+                    ++frame_time_matches;
+                }
+            }
+        }
+
+        if (mode_matches == 1 && (!mkw_dynamic || frame_time_matches == 1)) {
+            std::memcpy(code + mode_site * sizeof(u32), &mode_instruction,
+                        sizeof(mode_instruction));
+            if (mkw_dynamic) {
+                const u32 whole_frame_time = 0xF9407660 | (word(frame_time_site) & 0x1F);
+                std::memcpy(code + frame_time_site * sizeof(u32), &whole_frame_time,
+                            sizeof(whole_frame_time));
+                mkw_dynamic_fps_patch_applied = true;
+            }
+            LOG_INFO(Loader, "Mario Kart World: {} FPS mode enabled (main+{:#x})",
+                     mkw_dynamic ? "dynamic" : "30",
+                     text.location + mode_site * sizeof(u32));
+        } else {
+            LOG_WARNING(Loader,
+                        "Mario Kart World FPS patch skipped (mode matches {}, frame-time matches {})",
+                        mode_matches, frame_time_matches);
+        }
+    }
+
 #ifdef HAS_NCE
     // If we are computing the process code layout and using nce backend, patch.
     const auto& code = codeset.CodeSegment();
@@ -419,7 +513,11 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // Load codeset for current process
+    LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
+    if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
+        process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);
+    }
     return load_base + image_size;
 }
 

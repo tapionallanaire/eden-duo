@@ -544,7 +544,13 @@ void Widget::SetupComponent(const QString& label, std::function<void()>& load_fu
     layout->setContentsMargins(0, 0, 0, 0);
 
     if (other_setting == nullptr) {
-        other_setting = setting.PairedSetting();
+        // A paired setting without the Paired specialization gets a widget of its own, and
+        // several settings can share it, so they must not each save their own checkbox to it
+        auto* const paired_setting = setting.PairedSetting();
+        if (paired_setting != nullptr &&
+            paired_setting->Specialization() == Settings::Specialization::Paired) {
+            other_setting = paired_setting;
+        }
     }
 
     const bool require_checkbox = other_setting != nullptr && other_setting->TypeId() == "bool";
@@ -807,7 +813,7 @@ Builder::~Builder() = default;
 
 static bool IsAndroidOnly(const Settings::BasicSetting& setting) {
     const std::string& label = setting.GetLabel();
-    return label.starts_with("frame_gen") || label == "emulate_bgr565";
+    return label == "emulate_bgr565";
 }
 
 Widget* Builder::BuildWidget(Settings::BasicSetting* setting,

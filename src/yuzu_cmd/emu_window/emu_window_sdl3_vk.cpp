@@ -55,7 +55,8 @@ bool FillWindowSystemInfoFromSDL(SDL_Window* window,
     } else if (SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
                                       nullptr) != nullptr) {
         info.type = Core::Frontend::WindowSystemType::Cocoa;
-        info.render_surface = SDL_Metal_CreateView(window);
+        // MoltenVK takes the view's CAMetalLayer, not the view
+        info.render_surface = SDL_Metal_GetLayer(SDL_Metal_CreateView(window));
     } else if (void* android_window =
                    SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER,
                                           nullptr);
@@ -80,8 +81,7 @@ EmuWindow_SDL3_VK::EmuWindow_SDL3_VK(InputCommon::InputSubsystem* input_subsyste
     render_window =
         SDL_CreateWindow(window_title.c_str(), Layout::ScreenUndocked::Width,
                          Layout::ScreenUndocked::Height,
-                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-
+                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | Nx2HiddenWindowFlags());
 
     SetWindowIcon();
 

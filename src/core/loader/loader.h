@@ -47,6 +47,7 @@ enum class FileType {
     XCZ,
     NAX,
     KIP,
+    NUP,
     DeconstructedRomDirectory,
 };
 
@@ -157,6 +158,8 @@ enum class ResultStatus : u16 {
     ErrorINITooManyKIPs,
     ErrorIntegrityVerificationNotImplemented,
     ErrorIntegrityVerificationFailed,
+    ErrorNUPBadFormat,
+    ErrorNUPNoBasePackage,
 };
 
 std::string GetResultStatusString(ResultStatus status);
@@ -326,6 +329,15 @@ public:
     virtual ResultStatus ReadControlData(FileSys::NACP& control) {
         return ResultStatus::ErrorNotImplemented;
     }
+
+    /**
+     * Get the application's display version ("1.8.0"), from its control data by default
+     *
+     * @param[out] version Reference to store the display version into
+     *
+     * @return ResultStatus result of function
+     */
+    virtual ResultStatus ReadDisplayVersion(std::string& version);
 
     /**
      * Get the RomFS of the manual of the application

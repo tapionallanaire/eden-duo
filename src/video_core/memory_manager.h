@@ -43,6 +43,19 @@ public:
                            u64 big_page_bits_ = 16, u64 page_bits_ = 12);
     ~MemoryManager();
 
+    // Switch 2: GPU address of the read-only syncpoint shim (u32 per syncpoint); 0 = none.
+    void SetNativeSyncpointShim(GPUVAddr address);
+    static constexpr u32 NumShimSyncpoints = 192; // Tegra::Host1x::SyncpointManager
+
+    /// Switch 2 lays out block-linear surfaces with the console's GOB swizzle.
+    void EnableNativeTiling() {
+        native_tiling = true;
+    }
+    bool UsesNativeTiling() const {
+        return native_tiling;
+    }
+    bool IsShuttingDown() const;
+
     static constexpr bool HAS_FLUSH_INVALIDATION = true;
 
     inline size_t GetID() const noexcept {
@@ -100,6 +113,10 @@ public:
      */
     void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+
+    /// Reads `count` consecutive words as Read<u32> would (Switch 2 syncpoint shim included),
+    /// without a translation per word.
+    void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_t count) const;
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 
     /**
@@ -141,6 +158,11 @@ public:
 
     size_t MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const;
 
+    /// Bumped after each page table change: lookups cached under one value stay valid until then.
+    [[nodiscard]] u64 MapSerial() const {
+        return map_serial.load(std::memory_order_acquire);
+    }
+
     bool IsWithinGPUAddressRange(GPUVAddr gpu_addr) const {
         return gpu_addr < address_space_size;
     }
@@ -152,12 +174,20 @@ public:
 
     void FlushCaching();
 
+    /// Leaves the caches' invalidation of a range already written for the next FlushCaching
+    /// (before every draw, dispatch, clear and copy), merged with neighbouring ranges.
+    void AccumulateInvalidation(GPUVAddr gpu_addr, std::size_t size) {
+        accumulator.Add(gpu_addr, size);
+    }
+
     const u8* GetSpan(const GPUVAddr src_addr, const std::size_t size) const;
     u8* GetSpan(const GPUVAddr src_addr, const std::size_t size);
 
 private:
     template <typename FuncMapped, typename FuncReserved, typename FuncUnmapped>
     inline void MemoryOperation(GPUVAddr gpu_src_addr, std::size_t size, bool is_big_page, FuncMapped&& func_mapped, FuncReserved&& func_reserved, FuncUnmapped&& func_unmapped) const;
+
+    size_t MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size) const;
 
     void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
@@ -178,6 +208,7 @@ private:
         GPUVAddr gpu_addr, std::size_t size,
         boost::container::small_vector<std::pair<std::conditional_t<is_gpu_address, GPUVAddr, DAddr>, std::size_t>, 32>& result) const;
 
+    std::atomic<GPUVAddr> native_syncpoint_shim{};
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
 
@@ -213,14 +244,17 @@ private:
     inline void SetEntry(size_t position, EntryType entry, bool is_big_page);
 
     Common::MultiLevelPageTable<u32> page_table;
-    Common::RangeMap<GPUVAddr, PTEKind> kind_map;
+    mutable Common::RangeMap<GPUVAddr, PTEKind> kind_map;
     Common::SparseLargeVector<u32> big_page_table_dev;
 
     std::vector<u64> big_page_continuous;
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash{};
     boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> page_stash2{};
 
+    bool native_tiling{};
     mutable std::mutex guard;
+    /// Bumped after each page table change; MaxContinuousRange answers are kept until then.
+    std::atomic<u64> map_serial{};
 
     static constexpr size_t continuous_bits = 64;
 

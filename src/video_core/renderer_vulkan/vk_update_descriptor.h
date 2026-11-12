@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <span>
+#include <memory>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -136,7 +137,7 @@ private:
     DescriptorUpdateEntry* payload_cursor = nullptr;
     DescriptorUpdateEntry* payload_start = nullptr;
     const DescriptorUpdateEntry* upload_start = nullptr;
-    std::vector<DescriptorUpdateEntry> payload;
+    std::unique_ptr<DescriptorUpdateEntry[]> payload;
 };
 
 // TODO: should these be separate classes instead?

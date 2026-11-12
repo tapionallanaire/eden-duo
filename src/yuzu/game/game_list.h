@@ -78,6 +78,7 @@ public:
     bool IsEmpty() const;
 
     void PopulateAsync(QVector<UISettings::GameDir>& game_dirs);
+    void SetScanEnabled(bool enabled);
 
     void SaveInterfaceLayout();
     void LoadInterfaceLayout();
@@ -90,6 +91,7 @@ public:
     void ResetViewMode();
 
 public slots:
+    void SetNupConversionRunning(bool running);
     void RefreshGameDirectory();
     void RefreshExternalContent();
     void UpdateIconSizes();
@@ -108,6 +110,9 @@ signals:
     void SetPlayTimeRequested(u64 program_id);
     void DumpRomFSRequested(u64 program_id, const std::string& game_path, DumpRomFSTarget target);
     void VerifyIntegrityRequested(const std::string& game_path);
+    void ConvertToNupRequested(const std::string& game_path);
+    void ExtractNupRequested(const std::string& game_path);
+    void EditNupMetadataRequested(const std::string& game_path);
     void CopyTIDRequested(u64 program_id);
     void CreateShortcut(u64 program_id, const std::string& game_path,
                         const QtCommon::Game::ShortcutTarget target);
@@ -168,6 +173,8 @@ private:
     Core::System& system;
 
     bool m_isTreeMode = true;
+    bool m_populating = false;
+    bool nup_conversion_running{};
     QAbstractItemView* m_currentView = nullptr;
 };
 

@@ -8,20 +8,24 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <queue>
 
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -68,11 +72,15 @@ public:
     }
 
     void SyncOperation(std::function<void()>&& func) {
+        // Not only the GPU thread queues these (query cache work runs elsewhere too), while
+        // SignalFence moves the list into pending_operations: unguarded, the list was corrupted
+        // and the fencing thread crashed walking it. Its own lock, held for no callbacks.
+        std::scoped_lock lock{uncommitted_guard};
         uncommitted_operations.emplace_back(std::move(func));
     }
 
     void SignalFence(std::function<void()>&& func) {
-        const bool should_flush = ShouldFlush();
+        Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
         // An immediate fence still waits when a texture download is queued behind it: the guest
         // reads that memory as soon as the fence signals (Hogwarts Legacy's ambient lighting
         // came out black or blown out, differently on every boot).
@@ -80,15 +88,31 @@ public:
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
-        CommitAsyncFlushes();
+        auto [should_flush, committed_flushes] = CommitCacheFlushes();
+        // !should_flush: a fence with downloads to wait for is always made and flushed.
+        if (!delay_fence && !should_flush && committed_flushes == 0 && SkipEmptyFence()) {
+            Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
+            func();
+            rasterizer.InvalidateGPUCache();
+            return;
+        }
+        skipped_fences = 0;
+        should_flush |= query_cache.HasUncommittedFlushes();
+        query_cache.CommitAsyncFlushes();
         TFence new_fence = CreateFence(!should_flush);
         if constexpr (can_async_check) {
             guard.lock();
         }
-        if (delay_fence) {
-            uncommitted_operations.emplace_back(std::move(func));
+        {
+            std::scoped_lock lock{uncommitted_guard};
+            if (delay_fence) {
+                uncommitted_operations.emplace_back(std::move(func));
+            }
+            pending_operations.emplace_back(std::move(uncommitted_operations));
+            uncommitted_operations.clear(); // moved-from: make it empty explicitly
+            uncommitted_operations.reserve(64);
         }
-        pending_operations.emplace_back(std::move(uncommitted_operations));
+        pending_flushes.push_back(committed_flushes);
         QueueFence(new_fence);
         if (!delay_fence) {
             func();
@@ -109,6 +133,13 @@ public:
     }
 
     void SignalSyncPoint(u32 value) {
+        // The id comes from a command list (the 3D engine's sync method, the puller's fence
+        // action). Past the syncpoint table, the increment would walk memory after it as an
+        // action list; command words read wrong carry any id (Splatoon Raiders on Linux).
+        if (value >= Tegra::Host1x::SyncpointManager::NUM_MAX_SYNCPOINTS) {
+            LOG_ERROR(HW_GPU, "Signal of syncpoint {} past the table, ignored", value);
+            return;
+        }
         syncpoint_manager.IncrementGuest(value);
         std::function<void()> func([this, value] { syncpoint_manager.IncrementHost(value); });
         SignalFence(std::move(func));
@@ -130,6 +161,9 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
+            // With delayed fence operations the callback waits for this fence's tick, whose
+            // submission may be deferred to the waiting thread itself (the GPU split's back).
+            SubmitDeferred();
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -165,6 +199,8 @@ protected:
     virtual bool IsFenceSignaled(TFence& fence) const = 0;
     /// Waits until a fence has been signalled by the host GPU.
     virtual void WaitFence(TFence& fence) = 0;
+    /// Submits command work whose submission was deferred (Vulkan: Scheduler::DeferFlush).
+    virtual void SubmitDeferred() {}
 
     VideoCore::RasterizerInterface& rasterizer;
     Tegra::GPU& gpu;
@@ -185,7 +221,8 @@ private:
                     return;
                 }
             }
-            PopAsyncFlushes();
+            PopAsyncFlushes(pending_flushes.front());
+            pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
             pending_operations.pop_front();
             for (auto& operation : operations) {
@@ -208,8 +245,29 @@ private:
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
 
-        TFence current_fence;
-        std::deque<std::function<void()>> current_operations;
+        // Every fence the host GPU has already passed is released together: Switch 2 titles
+        // signal thousands a second and the host GPU completes them in bursts, so each cache's
+        // lock is taken once per burst instead of once per fence (the GPU thread, which holds
+        // them for nearly every command, spun, slept and woke this thread for each one).
+        // EDEN_NX2_FENCE_BATCH=0: one fence at a time (for comparisons).
+        static const size_t MaxBatch = [] {
+            const char* value = std::getenv("EDEN_NX2_FENCE_BATCH");
+            return value != nullptr && value[0] == '0' ? size_t{1} : size_t{64};
+        }();
+        struct Released {
+            TFence fence;
+            OperationList operations;
+            u8 flushes;
+        };
+        std::vector<Released> batch;
+        batch.reserve(MaxBatch);
+        const auto take_front = [&] {
+            batch.push_back({std::move(fences.front()), std::move(pending_operations.front()),
+                             pending_flushes.front()});
+            fences.pop();
+            pending_operations.pop_front();
+            pending_flushes.pop_front();
+        };
         while (!stop_token.stop_requested()) {
             {
                 std::unique_lock lock(guard);
@@ -217,22 +275,50 @@ private:
                 if (stop_token.stop_requested()) [[unlikely]] {
                     return;
                 }
-                current_fence = std::move(fences.front());
-                current_operations = std::move(pending_operations.front());
-                fences.pop();
-                pending_operations.pop_front();
+                take_front();
             }
-            if (!current_fence->IsStubbed()) {
-                WaitFence(current_fence);
+            if (!batch.front().fence->IsStubbed()) {
+                WaitFence(batch.front().fence);
             }
-            PopAsyncFlushes();
-            for (auto& operation : current_operations) {
-                operation();
+            {
+                std::unique_lock lock(guard);
+                while (batch.size() < MaxBatch && !fences.empty() &&
+                       (fences.front()->IsStubbed() || IsFenceSignaled(fences.front()))) {
+                    take_front();
+                }
+            }
+            size_t texture_pops = 0;
+            size_t buffer_pops = 0;
+            for (const Released& released : batch) {
+                texture_pops += (released.flushes & TextureFlushes) != 0 ? 1 : 0;
+                buffer_pops += (released.flushes & BufferFlushes) != 0 ? 1 : 0;
+            }
+            if (texture_pops != 0) {
+                std::scoped_lock lock{texture_cache.mutex};
+                for (size_t i = 0; i < texture_pops; ++i) {
+                    texture_cache.PopAsyncFlushes();
+                }
+            }
+            if (buffer_pops != 0) {
+                std::scoped_lock lock{buffer_cache.mutex};
+                for (size_t i = 0; i < buffer_pops; ++i) {
+                    buffer_cache.PopAsyncFlushes();
+                }
+            }
+            // Queries and operations keep their per-fence order.
+            for (Released& released : batch) {
+                query_cache.PopAsyncFlushes();
+                for (auto& operation : released.operations) {
+                    operation();
+                }
             }
             {
                 std::unique_lock lock(ring_guard);
-                delayed_destruction_ring.Push(std::move(current_fence));
+                for (Released& released : batch) {
+                    delayed_destruction_ring.Push(std::move(released.fence));
+                }
             }
+            batch.clear();
         }
     }
 
@@ -247,36 +333,90 @@ private:
         return texture_cache.HasUncommittedFlushes();
     }
 
-    bool ShouldFlush() const {
-        std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-        return texture_cache.HasUncommittedFlushes() || buffer_cache.HasUncommittedFlushes() ||
-               query_cache.HasUncommittedFlushes();
-    }
+    static constexpr u8 TextureFlushes = 1;
+    static constexpr u8 BufferFlushes = 2;
 
-    void PopAsyncFlushes() {
-        {
-            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    /// committed: what CommitAsyncFlushes returned for this fence.
+    void PopAsyncFlushes(u8 committed) {
+        if (committed & TextureFlushes) {
+            std::scoped_lock lock{texture_cache.mutex};
             texture_cache.PopAsyncFlushes();
+        }
+        if (committed & BufferFlushes) {
+            std::scoped_lock lock{buffer_cache.mutex};
             buffer_cache.PopAsyncFlushes();
         }
         query_cache.PopAsyncFlushes();
     }
 
-    void CommitAsyncFlushes() {
+    struct CacheFlushes {
+        bool should_flush;  ///< Downloads to wait for: the fence must reach the host GPU
+        u8 committed;       ///< TextureFlushes, BufferFlushes: the caches that committed downloads
+    };
+
+    /// Commits the texture and buffer caches' downloads for a new fence (the query cache's are
+    /// committed once a fence is made). Switch 2 titles signal a fence per compute dispatch
+    /// (thousands a second), mostly with nothing or only buffer data to download: each cache's
+    /// lock is taken once, alone, and the fencing thread later takes only the lock of the cache
+    /// with work, instead of holding both while it copies (the GPU thread's draws and uploads
+    /// waited for it).
+    CacheFlushes CommitCacheFlushes() {
+        CacheFlushes flushes{};
         {
-            std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-            texture_cache.CommitAsyncFlushes();
-            buffer_cache.CommitAsyncFlushes();
+            std::scoped_lock lock{texture_cache.mutex};
+            flushes.should_flush = texture_cache.HasUncommittedFlushes();
+            if (texture_cache.HasAsyncFlushWork()) {
+                texture_cache.CommitAsyncFlushes();
+                flushes.committed |= TextureFlushes;
+            }
         }
-        query_cache.CommitAsyncFlushes();
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            if (buffer_cache.HasUncommittedFlushes()) {
+                buffer_cache.CommitAsyncFlushes();
+                flushes.should_flush = true;
+                flushes.committed |= BufferFlushes;
+            }
+        }
+        return flushes;
+    }
+
+    /// Whether a fence with no downloads would do nothing, so need not be made: with fast GPU
+    /// fences its callback runs at once anyway, and most of the per-dispatch fences of Switch 2
+    /// titles have no queries or queued operations either. Making, queueing and retiring them
+    /// cost the GPU thread ~5% and woke the fencing thread for each. One in 64 is still made, so
+    /// the operations fences carry along (query slot cleanup) keep running.
+    bool SkipEmptyFence() {
+        if constexpr (requires { query_cache.HasPendingFenceWork(); }) {
+            if (skipped_fences >= 64 || query_cache.HasPendingFenceWork()) {
+                return false;
+            }
+            {
+                std::scoped_lock lock{uncommitted_guard};
+                if (!uncommitted_operations.empty()) {
+                    return false;
+                }
+            }
+            ++skipped_fences;
+            return true;
+        } else {
+            return false;
+        }
     }
 
     std::queue<TFence> fences;
-    std::deque<std::function<void()>> uncommitted_operations;
-    std::deque<std::deque<std::function<void()>>> pending_operations;
+    // LOCAL TEST (Zelda): vectors, not deques. MSVC's deque of std::function holds one element per
+    // block, so every queued operation (one per query report, ~1000 objects a frame in Ocarina's
+    // Kokiri Forest) allocated a block.
+    using OperationList = std::vector<std::function<void()>>;
+    OperationList uncommitted_operations;
+    std::deque<OperationList> pending_operations;
+    std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
+    u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
 
     std::mutex guard;
     std::mutex ring_guard;
+    std::mutex uncommitted_guard; ///< Guards uncommitted_operations
     std::condition_variable cv;
 
     std::jthread fence_thread;
