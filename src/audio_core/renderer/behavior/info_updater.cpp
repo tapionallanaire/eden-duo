@@ -133,9 +133,9 @@ Result InfoUpdater::UpdateVoices(VoiceContext& voice_context,
             static_assert(offsetof(VoiceInParameterV2, crossfade_curve) == 0x177);
             const auto* vin = reinterpret_cast<const VoiceInParameterV2*>(input + i * in_stride);
             if (behaviour.GetUserRevisionNum() >= 16 && vin->in_use && vin->crossfade_curve != 0) {
+                // Not emulated; the update goes on, as it did when the byte was not read.
                 LOG_ERROR(Service_Audio, "Unsupported voice biquad crossfade curve {}",
                           vin->crossfade_curve);
-                return Service::Audio::ResultInvalidUpdateInfo;
             }
             local_in.id = vin->id;
             local_in.node_id = vin->node_id;
