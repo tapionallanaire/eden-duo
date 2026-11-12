@@ -199,7 +199,7 @@ Kernel::KClientSession* CreateStubSession(Core::System& system, HLERequestContex
         manager->SetSessionHandler(std::make_shared<INx2StreamPlayService>(system));
     } else {
         manager->SetSessionHandler(std::make_shared<INx2StubInterface>(
-            system, INx2StubInterface::InternName(fmt::format("{}{}", Nx2StubPrefix, name))));
+            system, INx2StubInterface::InternName(std::format("{}{}", Nx2StubPrefix, name))));
     }
     ctx.GetManager()->GetServerManager().RegisterSession(&session->GetServerSession(), manager);
     return &session->GetClientSession();

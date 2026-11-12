@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include <fmt/format.h>
+#include <format>
 #include <openssl/evp.h>
 
 #include "core/file_sys/nup_container.h"
@@ -504,7 +504,7 @@ TEST_CASE("NUP output is reproducible", "[nup]") {
 
     std::string hex;
     for (const u8 b : Sha256(ReadAll(archive))) {
-        hex += fmt::format("{:02x}", b);
+        hex += std::format("{:02x}", b);
     }
     // The mixed-case Base/RomFS directory supplies base version 1.0.0 on every platform.
     REQUIRE(hex == "718231e0974ca04c7be7bd6ed4334015b777c6e5f1ed51de23f899f81ee004ab");

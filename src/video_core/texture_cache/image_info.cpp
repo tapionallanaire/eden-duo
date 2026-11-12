@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <vector>
-#include <fmt/ranges.h>
+#include <format>
 #include <format>
 
 #include "common/assert.h"

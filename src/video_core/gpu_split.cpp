@@ -96,7 +96,7 @@ void GpuSplit::CheckOwner(const char* where) {
     const int count = backtrace(frames, 40);
     if (char** const symbols = backtrace_symbols(frames, count)) {
         for (int i = 1; i < count; ++i) {
-            stack += fmt::format("\n  {}", symbols[i]);
+            stack += std::format("\n  {}", symbols[i]);
         }
         std::free(symbols);
     }

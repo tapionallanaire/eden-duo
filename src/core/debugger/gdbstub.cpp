@@ -761,7 +761,7 @@ void GDBStub::HandleRcmd(const std::vector<u8>& command) {
             } else if (auto* event = object->DynamicCast<Kernel::KEvent*>(); event != nullptr) {
                 name = Service::KernelHelpers::ServiceContext::GetEventName(event);
             }
-            reply += fmt::format("  {:#010x} {} {}\n", handle, object->GetTypeObj().GetName(), name);
+            reply += std::format("  {:#010x} {} {}\n", handle, object->GetTypeObj().GetName(), name);
         }
     } else {
         reply += "Commands: fastmem, info, mappings, handles\n";

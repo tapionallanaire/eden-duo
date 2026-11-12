@@ -10,7 +10,7 @@
 #include <string>
 #include <string_view>
 
-#include <fmt/format.h>
+#include <format>
 
 #include "common/cityhash.h"
 #include "common/fs/fs_util.h"
@@ -167,7 +167,7 @@ u8 PreviewByte(float value, bool encode) {
 }
 
 std::string JsonNumber(double value) {
-    return std::isfinite(value) ? fmt::format("{:.6g}", value) : "null";
+    return std::isfinite(value) ? std::format("{:.6g}", value) : "null";
 }
 
 template <typename T>
@@ -180,7 +180,7 @@ std::string JsonArray(std::span<T> values) {
         if constexpr (std::is_floating_point_v<T>) {
             out += JsonNumber(values[i]);
         } else {
-            out += fmt::format("{}", values[i]);
+            out += std::format("{}", values[i]);
         }
     }
     return out + "]";
@@ -220,9 +220,9 @@ std::string SamplerJson(const Sampler* sampler) {
     std::memcpy(words.data(), &sampler->Descriptor(), sizeof(words));
     std::string tsc;
     for (const u32 word : words) {
-        tsc += fmt::format("{}\"{:08x}\"", tsc.empty() ? "" : ",", word);
+        tsc += std::format("{}\"{:08x}\"", tsc.empty() ? "" : ",", word);
     }
-    return fmt::format(
+    return std::format(
         R"(,"sampler":{{"mag":"{}","min":"{}","mip":"{}","wrap":["{}","{}","{}"],)"
         R"("unnormalized":{},"compare":{},"compare_op":{},"lod_bias":{},"min_lod":{},)"
         R"("max_lod":{},"anisotropy":{},"tsc":[{}]}})",
@@ -425,7 +425,7 @@ bool FrameDump::RecordSampled(const Sampled& texture, u32 index, std::string nam
     }
     const Image& image = *texture.view->BackingImage();
     const auto& info = image.info;
-    Enqueue({.tags = fmt::format(
+    Enqueue({.tags = std::format(
                  R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},)"
                  R"("gpu_addr":"{:#x}","skipped":"format"}})",
                  name, tags, info.format, info.size.width, info.size.height, info.size.depth,
@@ -444,9 +444,9 @@ bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
         pass_sampled.push_back(*key);
         recorded |= RecordSampled(
             texture, index,
-            fmt::format("{:04}_pass{:03}_tex{:02}_s{}_tic{}", sequence++, pass_index, index,
+            std::format("{:04}_pass{:03}_tex{:02}_s{}_tic{}", sequence++, pass_index, index,
                         texture.stage, texture.tic),
-            fmt::format(R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})",
+            std::format(R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})",
                         pass_index, draws - 1, texture.stage, texture.tic, index));
     }
     return recorded;
@@ -466,9 +466,9 @@ void FrameDump::NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> te
         dispatch_sampled.push_back(seen);
         RecordSampled(
             texture, index,
-            fmt::format("{:04}_dispatch{:04}_{:016x}_tex{:02}_tic{}", sequence++, dispatches,
+            std::format("{:04}_dispatch{:04}_{:016x}_tex{:02}_tic{}", sequence++, dispatches,
                         shader_hash, index, texture.tic),
-            fmt::format(R"("kind":"sampled","dispatch":{},"after_draws":{},"stage":{},"tic":{},)"
+            std::format(R"("kind":"sampled","dispatch":{},"after_draws":{},"stage":{},"tic":{},)"
                         R"("index":{},{})",
                         dispatches, draws, texture.stage, texture.tic, index,
                         ShaderList(std::array{shader_hash})));
@@ -488,10 +488,10 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
         }
         seen_buffers.push_back(key);
         const std::string owner =
-            compute ? fmt::format(R"("dispatch":{},"after_draws":{})", dispatches, draws)
-                    : fmt::format(R"("pass":{},"draw":{})", pass_index, draws - 1);
+            compute ? std::format(R"("dispatch":{},"after_draws":{})", dispatches, draws)
+                    : std::format(R"("pass":{},"draw":{})", pass_index, draws - 1);
         const bool from_host = buffer.guest.empty();
-        std::string tags = fmt::format(
+        std::string tags = std::format(
             R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","key":"{}","type":"{}",)"
             R"("index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}",)"
             R"("bound_size":{},"size":{},"gpu_modified":{},"source":"{}")",
@@ -511,15 +511,15 @@ void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
                            const std::array<u32, 3>& block, std::optional<GPUVAddr> indirect,
                            std::optional<std::array<u32, 3>> indirect_grid) {
     std::string tags =
-        fmt::format(R"({{"kind":"launch","dispatch":{},"after_draws":{},{},"grid":[{},{},{}],)"
+        std::format(R"({{"kind":"launch","dispatch":{},"after_draws":{},{},"grid":[{},{},{}],)"
                     R"("block":[{},{},{}])",
                     dispatches, draws, ShaderList(std::array{shader_hash}), grid[0], grid[1],
                     grid[2], block[0], block[1], block[2]);
     if (indirect) {
-        tags += fmt::format(R"(,"indirect":"{:#x}")", *indirect);
+        tags += std::format(R"(,"indirect":"{:#x}")", *indirect);
     }
     if (indirect_grid) {
-        tags += fmt::format(R"(,"indirect_grid_guest":[{},{},{}])", (*indirect_grid)[0],
+        tags += std::format(R"(,"indirect_grid_guest":[{},{},{}])", (*indirect_grid)[0],
                             (*indirect_grid)[1], (*indirect_grid)[2]);
     }
     Enqueue({.tags = tags + "}"});
@@ -539,7 +539,7 @@ void FrameDump::NoteKeys(std::span<const u64> shader_hashes, std::span<const u64
 
 std::string FrameDump::KeyOf(u64 shader_hash) const {
     const auto it = std::ranges::find(shader_keys, shader_hash, &std::pair<u64, u64>::first);
-    return it != shader_keys.end() ? fmt::format("{:016x}", it->second) : std::string{};
+    return it != shader_keys.end() ? std::format("{:016x}", it->second) : std::string{};
 }
 
 std::string FrameDump::ShaderList(std::span<const u64> hashes) const {
@@ -547,10 +547,10 @@ std::string FrameDump::ShaderList(std::span<const u64> hashes) const {
     std::string keys;
     for (const u64 hash : hashes) {
         const char* const separator = shaders.empty() ? "" : ",";
-        shaders += fmt::format("{}\"{:016x}\"", separator, hash);
-        keys += fmt::format("{}\"{}\"", separator, KeyOf(hash));
+        shaders += std::format("{}\"{:016x}\"", separator, hash);
+        keys += std::format("{}\"{}\"", separator, KeyOf(hash));
     }
-    return fmt::format(R"("shaders":[{}],"keys":[{}])", shaders, keys);
+    return std::format(R"("shaders":[{}],"keys":[{}])", shaders, keys);
 }
 
 void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
@@ -573,9 +573,9 @@ bool FrameDump::EndPass() {
     for (const Target& target : pass_targets) {
         recorded |=
             Record(target,
-                   fmt::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index,
+                   std::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index,
                                pass_first_draw, draws, target.slot),
-                   fmt::format(
+                   std::format(
                        R"("kind":"pass","pass":{},"first_draw":{},"draw_count":{},"slot":{},{})",
                        pass_index, pass_first_draw, draws - pass_first_draw, target.slot, shaders));
     }
@@ -591,27 +591,27 @@ void FrameDump::CaptureDispatch(u64 shader_hash, std::span<ImageView* const> wri
             continue;
         }
         Record(*target,
-               fmt::format("{:04}_dispatch{:04}_{:016x}_img{}", sequence++, dispatch, shader_hash,
+               std::format("{:04}_dispatch{:04}_{:016x}_img{}", sequence++, dispatch, shader_hash,
                            slot),
-               fmt::format(R"("kind":"dispatch","dispatch":{},"after_draws":{},"slot":{},{})",
+               std::format(R"("kind":"dispatch","dispatch":{},"after_draws":{},"slot":{},{})",
                            dispatch, draws, slot, ShaderList(std::array{shader_hash})));
     }
 }
 
 void FrameDump::CapturePresent(ImageView& view) {
     if (const auto target = MakeTarget(view, 0)) {
-        Record(*target, fmt::format("{:04}_present", sequence++),
-               fmt::format(R"("kind":"present","after_draws":{})", draws));
+        Record(*target, std::format("{:04}_present", sequence++),
+               std::format(R"("kind":"present","after_draws":{})", draws));
     }
 }
 
 bool FrameDump::Record(const Target& target, std::string name, std::string tags) {
-    name += target.depth > 1 ? fmt::format("_{}_{}x{}x{}_{:x}", target.format, target.width,
+    name += target.depth > 1 ? std::format("_{}_{}x{}x{}_{:x}", target.format, target.width,
                                            target.height, target.depth, target.gpu_addr)
-                             : fmt::format("_{}_{}x{}_{:x}", target.format, target.width,
+                             : std::format("_{}_{}x{}_{:x}", target.format, target.width,
                                            target.height, target.gpu_addr);
     if (target.msaa) {
-        Enqueue({.tags = fmt::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags)});
+        Enqueue({.tags = std::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags)});
         return false;
     }
     const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
@@ -762,14 +762,14 @@ void FrameDump::WriterLoop() {
             queue.pop_front();
         }
         if (job.summary) {
-            manifest << fmt::format(
+            manifest << std::format(
                             R"({{"kind":"summary","images":{},{},"bytes":{},"truncated":{}}})",
                             images, job.tags, written_bytes, job.truncated)
                      << '\n';
             manifest.close();
             LOG_INFO(Render_Vulkan, "Frame dump done: {} images, {}, {} MiB in {}{}", images,
                      job.tags, written_bytes >> 20, Common::FS::PathToUTF8String(directory),
-                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
+                     job.truncated ? std::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
                                    : "");
             if (const u64 id = schedule.CaptureId(); id != 0) {
                 VideoCore::Nx2Debug::FinishCapture(id, {});
@@ -845,7 +845,7 @@ void FrameDump::Write(const Job& job) {
         const auto first = [channels](const auto& values) {
             return std::span(values.data(), static_cast<size_t>(channels));
         };
-        stats = fmt::format(R"(,"min":{},"max":{},"mean":{},"nan":{},"inf":{})",
+        stats = std::format(R"(,"min":{},"max":{},"mean":{},"nan":{},"inf":{})",
                             JsonArray(first(lo)), JsonArray(first(hi)), JsonArray(first(mean)),
                             JsonArray(first(nans)), JsonArray(first(infs)));
         std::vector<u8> encoded;
@@ -860,11 +860,11 @@ void FrameDump::Write(const Job& job) {
             static_cast<int>(target.width * 3));
         if (ok != 0) {
             WriteFile(job.name + ".png", encoded);
-            png = fmt::format("\"{}.png\"", job.name);
+            png = std::format("\"{}.png\"", job.name);
         }
     }
     manifest
-        << fmt::format(
+        << std::format(
                R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"level":{},)"
                R"("layer":{},"gpu_addr":"{:#x}","rescaled":{},"depth_encoding":{},)"
                R"("raw":"{}.raw.zst","png":{}{}}})",
@@ -877,13 +877,13 @@ void FrameDump::Write(const Job& job) {
 void FrameDump::WriteBuffer(const Job& job) {
     const u64 hash =
         Common::CityHash64(reinterpret_cast<const char*>(job.data.data()), job.data.size());
-    const std::string name = fmt::format("buffer_{:016x}.bin.zst", hash);
+    const std::string name = std::format("buffer_{:016x}.bin.zst", hash);
     if (std::ranges::find(written_buffers, hash) == written_buffers.end()) {
         written_buffers.push_back(hash);
         WriteFile(name,
                   Common::Compression::CompressDataZSTDDefault(job.data.data(), job.data.size()));
     }
-    manifest << fmt::format(R"({{{},"hash":"{:016x}","raw":"{}"}})", job.tags, hash, name) << '\n';
+    manifest << std::format(R"({{{},"hash":"{:016x}","raw":"{}"}})", job.tags, hash, name) << '\n';
 }
 
 void FrameDump::WriteFile(const std::string& name, std::span<const u8> data) {
@@ -902,7 +902,7 @@ void FrameDump::TickFrame() {
     case FrameDumpSchedule::Step::Finish:
         EndPass();
         Drain();
-        Enqueue({.tags = fmt::format(R"("passes":{},"draws":{},"dispatches":{})", pass_index, draws,
+        Enqueue({.tags = std::format(R"("passes":{},"draws":{},"dispatches":{})", pass_index, draws,
                                      dispatches),
                  .summary = true,
                  .truncated = truncated});
@@ -918,13 +918,13 @@ void FrameDump::TickFrame() {
                   Common::FS::PathToUTF8String(directory));
         if (const u64 id = schedule.CaptureId(); id != 0) {
             VideoCore::Nx2Debug::FinishCapture(
-                id, {.error = fmt::format("cannot write {}", directory.generic_string())});
+                id, {.error = std::format("cannot write {}", directory.generic_string())});
         }
         schedule.Abort();
         return;
     }
     const u64 frame = schedule.Frame();
-    manifest << fmt::format(R"({{"kind":"frame","frame":{},"seconds":{:.3f}}})", frame, elapsed)
+    manifest << std::format(R"({{"kind":"frame","frame":{},"seconds":{:.3f}}})", frame, elapsed)
              << '\n';
     shader_keys.clear();
     writer = std::thread{[this] { WriterLoop(); }};

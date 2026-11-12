@@ -176,18 +176,18 @@ inline void Report(const char* thread_name = "GPU thread") {
         // Per second of wall time: milliseconds spent and calls made.
         const double ms = static_cast<double>(data.exclusive_ns[i]) * 1000.0 / window;
         const double calls = static_cast<double>(data.count[i]) * 1e9 / window;
-        line += fmt::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
+        line += std::format(" | {} {:.1f} ms ({:.0f}/s)", zone_names[i], ms, calls);
     }
-    line += fmt::format(" | buffer downloads {:.0f} KiB in {:.0f} copies ({:.0f} KiB on pages "
+    line += std::format(" | buffer downloads {:.0f} KiB in {:.0f} copies ({:.0f} KiB on pages "
                         "MME DMA reads) | MME DMA reads {:.0f} KiB",
                         static_cast<double>(data.counters[0]) * 1e9 / 1024.0 / window,
                         static_cast<double>(data.counters[1]) * 1e9 / window,
                         static_cast<double>(data.counters[3]) * 1e9 / 1024.0 / window,
                         static_cast<double>(data.counters[2]) * 1e9 / 1024.0 / window);
-    line += fmt::format(" | 3D register writes {:.0f} ({:.0f} same value)",
+    line += std::format(" | 3D register writes {:.0f} ({:.0f} same value)",
                         static_cast<double>(data.counters[4]) * 1e9 / window,
                         static_cast<double>(data.counters[5]) * 1e9 / window);
-    line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
+    line += std::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);

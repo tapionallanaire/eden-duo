@@ -29,7 +29,7 @@
 #include <QStringList>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <fmt/format.h>
+#include <format>
 #include <zlib.h>
 
 #include "common/common_types.h"
@@ -112,7 +112,7 @@ public:
             const size_t slash =
                 scheme == std::string::npos ? std::string::npos : location.find('/', scheme + 3);
             if (result->status < 300 || result->status >= 400 || slash == std::string::npos) {
-                error = fmt::format("HTTP {}", result->status);
+                error = std::format("HTTP {}", result->status);
                 return false;
             }
             host = location.substr(0, slash);
@@ -128,7 +128,7 @@ public:
         }
         const u64 tail_start = zip_size > 65558 ? zip_size - 65558 : 0;
         const std::optional<std::string> tail =
-            Fetch(fmt::format("bytes={}-{}", tail_start, zip_size - 1));
+            Fetch(std::format("bytes={}-{}", tail_start, zip_size - 1));
         if (!tail) {
             return false;
         }
@@ -143,7 +143,7 @@ public:
             tail->compare(end - 20, 4, std::string{"PK\x06\x07", 4}) == 0) {
             const u64 record = U64(*tail, end - 20 + 8);
             const std::optional<std::string> zip64 =
-                Fetch(fmt::format("bytes={}-{}", record, record + 55));
+                Fetch(std::format("bytes={}-{}", record, record + 55));
             if (!zip64 || zip64->size() < 56) {
                 return false;
             }
@@ -151,7 +151,7 @@ public:
             directory_offset = U64(*zip64, 48);
         }
         const std::optional<std::string> directory = Fetch(
-            fmt::format("bytes={}-{}", directory_offset, directory_offset + directory_size - 1));
+            std::format("bytes={}-{}", directory_offset, directory_offset + directory_size - 1));
         if (!directory) {
             return false;
         }
@@ -202,7 +202,7 @@ public:
     std::optional<std::string> Read(const ZipEntry& entry,
                                     const std::function<bool(u64)>& progress = {}) {
         const std::optional<std::string> header =
-            Fetch(fmt::format("bytes={}-{}", entry.offset, entry.offset + 29));
+            Fetch(std::format("bytes={}-{}", entry.offset, entry.offset + 29));
         if (!header) {
             return std::nullopt;
         }
@@ -214,7 +214,7 @@ public:
         std::string data;
         if (entry.compressed != 0) {
             std::optional<std::string> fetched =
-                Fetch(fmt::format("bytes={}-{}", start, start + entry.compressed - 1), progress);
+                Fetch(std::format("bytes={}-{}", start, start + entry.compressed - 1), progress);
             if (!fetched) {
                 return std::nullopt;
             }
@@ -287,7 +287,7 @@ private:
                 return true;
             });
         if (!result || status != 206) {
-            error = result ? fmt::format("HTTP {}", status) : httplib::to_string(result.error());
+            error = result ? std::format("HTTP {}", status) : httplib::to_string(result.error());
             return std::nullopt;
         }
         return body;
@@ -440,7 +440,7 @@ void NvidiaDlssPanel::Download() {
         for (const auto& [title, entry_name] : texts) {
             const ZipEntry* const entry = zip.Find(entry_name);
             const std::optional<std::string> text = entry ? zip.Read(*entry) : std::nullopt;
-            licences += fmt::format("==== {} ====\n\n{}\n\n", title.toStdString(),
+            licences += std::format("==== {} ====\n\n{}\n\n", title.toStdString(),
                                     text ? *text : std::string{"(see the release on GitHub)"});
         }
     }

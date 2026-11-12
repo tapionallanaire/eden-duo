@@ -18,7 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <fmt/format.h>
+#include <format>
 
 #include <windows.h>
 // windows.h first: the other two use its types.
@@ -239,14 +239,14 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
                 sorted.emplace_back(count, name);
             }
             std::sort(sorted.rbegin(), sorted.rend());
-            text += fmt::format("-- {}\n", title);
+            text += std::format("-- {}\n", title);
             for (size_t i = 0; i < (std::min)(limit, sorted.size()); ++i) {
-                text += fmt::format("{:6} {:5.1f}% {}\n", sorted[i].first,
+                text += std::format("{:6} {:5.1f}% {}\n", sorted[i].first,
                                     100.0 * sorted[i].first / (std::max)(total, 1U),
                                     sorted[i].second.c_str());
             }
         };
-        text += fmt::format("=== thread \"{}\": {} samples\n", targets[thread].name, total);
+        text += std::format("=== thread \"{}\": {} samples\n", targets[thread].name, total);
         print("self (where the thread is)", self, 60);
         // The hottest instructions as module offsets, for llvm-symbolizer --relative-address
         // (which line of a function, inlined code included).
@@ -274,7 +274,7 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
                 offset = address - reinterpret_cast<DWORD64>(module);
             }
             const char* base = std::strrchr(module_path, '\\');
-            text += fmt::format("{:6} {}+{:#x} {}\n", hot[i].first,
+            text += std::format("{:6} {}+{:#x} {}\n", hot[i].first,
                                 base != nullptr ? base + 1 : module_path, offset,
                                 symbolizer.Name(address));
         }

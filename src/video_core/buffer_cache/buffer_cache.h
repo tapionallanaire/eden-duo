@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/logging.h"
 #include "common/range_sets.inc"
@@ -137,7 +137,7 @@ void BufferCache<P>::TickFrame() {
         std::partial_sort(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()),
                           largest.end(), std::greater<>{});
         LOG_INFO(HW_GPU, "Buffer cache: {} buffers {} MiB; largest {}", count, total >> 20,
-                 fmt::join(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()),
+                 Common::Join(largest.begin(), largest.begin() + std::min<size_t>(6, largest.size()),
                            ", "));
     }
 

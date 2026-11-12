@@ -206,7 +206,7 @@ private:
         LOG_WARNING(Service, "(STUBBED) nx2:syncpt TIPC 22 slot={:#x}, returning an event", slot);
         auto*& event = m_events[slot];
         if (event == nullptr) {
-            event = m_context.CreateEvent(fmt::format("nx2:syncpt:Slot{:x}", slot));
+            event = m_context.CreateEvent(std::format("nx2:syncpt:Slot{:x}", slot));
         }
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
@@ -237,7 +237,7 @@ private:
                   syncpoint, value, mode);
         auto*& event = m_events[slot];
         if (event == nullptr) {
-            event = m_context.CreateEvent(fmt::format("nx2:syncpt:Slot{:x}", slot));
+            event = m_context.CreateEvent(std::format("nx2:syncpt:Slot{:x}", slot));
         }
         if (syncpoint >= HostSyncpoints) {
             LOG_WARNING(Service, "nx2:syncpt TIPC 201 syncpoint {} out of range, signalling",
@@ -284,7 +284,7 @@ private:
         // pending requests, the player never got to start a movie.
         auto*& event = m_events[slot];
         if (event == nullptr) {
-            event = m_context.CreateEvent(fmt::format("nx2:syncpt:Slot{:x}", slot));
+            event = m_context.CreateEvent(std::format("nx2:syncpt:Slot{:x}", slot));
         }
         event->Signal(system.Kernel());
         TipcReplyWords(ctx, {});
@@ -379,7 +379,7 @@ private:
     Kernel::KEvent* EventFor(u32 id) {
         id %= NumIds;
         if (m_events[id] == nullptr) {
-            m_events[id] = m_context.CreateEvent(fmt::format("nx2:gpu:Event{}", id));
+            m_events[id] = m_context.CreateEvent(std::format("nx2:gpu:Event{}", id));
         }
         return m_events[id];
     }
@@ -505,7 +505,7 @@ private:
     void SubSlotJob(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         LOG_DEBUG(Service, "(STUBBED) nx2:gpu {} words {:08x} slot={}", ctx.GetCommand(),
-                 fmt::join(std::span<const u32>{w + 2, 18}, " "), w[Slot]);
+                 Common::Join(std::span<const u32>{w + 2, 18}, " "), w[Slot]);
         EventFor(w[Slot])->Signal(system.Kernel());
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
@@ -1541,7 +1541,7 @@ private:
         LOG_WARNING(Service, "(STUBBED) nx2:chat:gsv TIPC 11 id={}, returning an event", id);
         auto*& event = m_events[id];
         if (event == nullptr) {
-            event = m_context.CreateEvent(fmt::format("nx2:chat:gsv:Event{}", id));
+            event = m_context.CreateEvent(std::format("nx2:chat:gsv:Event{}", id));
         }
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
@@ -2080,7 +2080,7 @@ private:
         std::string path;
         if (VideoCommon::Nx2Diag::Active() && !VideoCommon::Nx2Diag::DrawListDir().empty()) {
             if (const auto id = VideoCommon::Nx2Diag::Diagnostics::Get().TakeScreenshotRequest()) {
-                path = fmt::format("{}/capture-{}.tga", VideoCommon::Nx2Diag::DrawListDir().string(), *id);
+                path = std::format("{}/capture-{}.tga", VideoCommon::Nx2Diag::DrawListDir().string(), *id);
             }
         }
         // A "burst" file holding N in <dir> saves the next N presents instead (one-frame artifacts).
@@ -2098,7 +2098,7 @@ private:
         }
         if (path.empty() && directory != nullptr &&
             (m_burst_left > 0 || (m_presents % 120) == 1)) {
-            path = fmt::format("{}/nx2-frame-{:05}.tga", directory, m_presents);
+            path = std::format("{}/nx2-frame-{:05}.tga", directory, m_presents);
             if (m_burst_left > 0 && !m_capture_pending->load()) {
                 m_burst_left--;
             }
@@ -2149,7 +2149,7 @@ private:
                         LOG_INFO(Service,
                                  "nx2: flash watch: present {} has {} near-white pixels (median {})",
                                  present, white, median);
-                        const auto saved = fmt::format("{}/flash-{:05}.tga", watch_dir, present);
+                        const auto saved = std::format("{}/flash-{:05}.tga", watch_dir, present);
                         if (std::FILE* file = std::fopen(saved.c_str(), "wb")) {
                             std::fwrite(header.data(), 1, header.size(), file);
                             std::fwrite(pixels->data(), 1, pixels->size(), file);
@@ -2157,7 +2157,7 @@ private:
                         }
                         // The present before it, to diff against.
                         if (last_capture != nullptr && last_capture->size() == pixels->size()) {
-                            const auto before = fmt::format("{}/before-{:05}.tga", watch_dir, present);
+                            const auto before = std::format("{}/before-{:05}.tga", watch_dir, present);
                             if (std::FILE* file = std::fopen(before.c_str(), "wb")) {
                                 std::fwrite(header.data(), 1, header.size(), file);
                                 std::fwrite(last_capture->data(), 1, last_capture->size(), file);
@@ -2199,7 +2199,7 @@ private:
             const u64 address = std::strtoull(spec.c_str() + position + 1, &end, 16);
             const u64 size = *end == ':' ? std::strtoull(end + 1, &end, 16) : 0;
             position = spec.find(',', position + 1); // the next "address:size"
-            const std::string path = fmt::format("{}/nx2-dump-{:x}.bin", directory ? directory : ".", address);
+            const std::string path = std::format("{}/nx2-dump-{:x}.bin", directory ? directory : ".", address);
             // On the GPU thread: waiting for it here can deadlock with a GPU wait on this present.
             static_cast<void>(system.GPU().RunOnGpuThread([&system = system, address, size, path] {
                 std::vector<u8> bytes(size);
@@ -2298,7 +2298,7 @@ private:
     void ReturnEvent(HLERequestContext& ctx) {
         LOG_WARNING(Service, "(STUBBED) nx2:vi2 TIPC {} [2]={:#x} [3]={:#x}, returning an event",
                     ctx.GetCommand(), ctx.CommandBuffer()[2], ctx.CommandBuffer()[3]);
-        auto* event = m_context.CreateEvent(fmt::format("nx2:vi2:Event{}", m_events.size()));
+        auto* event = m_context.CreateEvent(std::format("nx2:vi2:Event{}", m_events.size()));
         m_events.push_back(event);
         IPC::ResponseBuilder rb{ctx, 2, 1, 0};
         rb.Push(ResultSuccess);
@@ -2381,7 +2381,7 @@ private:
     void ReplyNativeEvent(HLERequestContext& ctx, u32 index) {
         auto*& event = m_native_events[index];
         if (!event) {
-            event = m_context.CreateEvent(fmt::format("nx2:vi2:Native{}", index));
+            event = m_context.CreateEvent(std::format("nx2:vi2:Native{}", index));
             m_events.push_back(event);
             SetVsyncSlot(index, true);
             StartVsyncTimer();
@@ -2585,7 +2585,7 @@ private:
         const auto* w = ctx.CommandBuffer();
         if (Nx2FirstVideoCommand(GetServiceName(), ctx.GetCommand())) {
             LOG_INFO(Service, "{} TIPC {} {} (first use): words {:08x}", GetServiceName(),
-                     ctx.GetCommand(), what, fmt::join(std::span<const u32>{w, 12}, " "));
+                     ctx.GetCommand(), what, Common::Join(std::span<const u32>{w, 12}, " "));
         } else if (static const bool trace = std::getenv("EDEN_NX2_VDEC_TRACE") != nullptr; trace) {
             // EDEN_NX2_VDEC_TRACE=1: every video decoder call at Info level.
             LOG_INFO(Service, "{} TIPC {} {}: [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x}",
@@ -2641,7 +2641,7 @@ private:
             }
             if (codec.empty()) {
                 LOG_INFO(Service, "{} configure: no codec name in {:02x}", GetServiceName(),
-                         fmt::join(name_buf, " "));
+                         Common::Join(name_buf, " "));
             }
         }
         Log(ctx, "configure");
@@ -2665,7 +2665,7 @@ private:
     void GetEvent(HLERequestContext& ctx) {
         Log(ctx, "event");
         if (m_event == nullptr) {
-            m_event = m_context.CreateEvent(fmt::format("{}:Ready", GetServiceName()));
+            m_event = m_context.CreateEvent(std::format("{}:Ready", GetServiceName()));
             // The client attaches it auto-clearing, so one signal is consumed by the first wait:
             // while the input queue has room, re-signal every 4 ms; a spurious wake only makes it
             // check again.
@@ -3120,7 +3120,7 @@ private:
         const u32 bpp = layout.format == Tegra::Host1x::Nx2PictureFormat::Nv12 ? 1 : 4;
         const u32 w = width / 4;
         const u32 h = height / 4;
-        const std::string path = fmt::format("{}/nx2-vdec-{:05}.pgm", directory, m_frames_out + 1);
+        const std::string path = std::format("{}/nx2-vdec-{:05}.pgm", directory, m_frames_out + 1);
         if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
             std::fprintf(file, "P5 %u %u 255\n", w, h);
             for (u32 y = 0; y < h; ++y) {

@@ -49,7 +49,7 @@ KeplerCompute::KeplerCompute(MemoryManager& memory_manager_)
     if (std::getenv("EDEN_NX2_QMD_TRACE")) {
         native_qmd.trace = [this](std::string_view event, u64 address, s32 value) {
             LOG_INFO(HW_GPU, "QMD trace {} {:#x} {} (engine {} as {})", event, address, value,
-                     fmt::ptr(this), memory_manager.GetID());
+                     static_cast<const void*>(this), memory_manager.GetID());
         };
     }
     execution_mask.reset();
@@ -156,21 +156,21 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             [](u32 parameter) { return (parameter & ~0xfU) == watch; });
         if (watched) {
             LOG_INFO(HW_GPU, "Semaphore watch: compute macro start={:#x} parameters={:08x}",
-                     native_macro_positions[entry], fmt::join(native_parameters, ","));
+                     native_macro_positions[entry], Common::Join(native_parameters, ","));
         }
         // EDEN_NX2_MME_DUMP: write the compute macro code once per engine, and log each macro
         // call with its entry and parameters (diagnostics).
         if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr; mme_dump) {
             if (!native_mme_dumped && native_macro_positions[entry] == 0xda) {
                 native_mme_dumped = true;
-                std::ofstream dump(fmt::format("native-compute-mme-{}.bin", fmt::ptr(this)),
+                std::ofstream dump(std::format("native-compute-mme-{}.bin", static_cast<const void*>(this)),
                                    std::ios::binary);
                 dump.write(reinterpret_cast<const char*>(native_macro->native_code.data()),
                            sizeof(native_macro->native_code));
             }
             LOG_INFO(HW_GPU, "MME call engine {} method {:#x} start={:#x} parameters={:08x}",
-                     fmt::ptr(this), *native_executing_macro_logged, native_macro_positions[entry],
-                     fmt::join(native_parameters, ","));
+                     static_cast<const void*>(this), *native_executing_macro_logged, native_macro_positions[entry],
+                     Common::Join(native_parameters, ","));
         }
         if (native_data_ram) native_macro->native_interpreter.active_dram = native_data_ram;
         const u32 dram0_before = (*native_macro->native_interpreter.active_dram)[0x27];
@@ -255,7 +255,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr;
             mme_dump && (*native_macro->native_interpreter.active_dram)[0x27] != dram0_before) {
             LOG_INFO(HW_GPU, "MME data RAM[0x27] {:#x} -> {:#x} by engine {} macro start={:#x}",
-                     dram0_before, (*native_macro->native_interpreter.active_dram)[0x27], fmt::ptr(this),
+                     dram0_before, (*native_macro->native_interpreter.active_dram)[0x27], static_cast<const void*>(this),
                      native_macro_positions[entry]);
         }
         if (!result.success) {
@@ -267,7 +267,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             }
             LOG_ERROR(HW_GPU, "Native MME failed: compute start={:#x}, pc={:#x}, consumed={}/{}, error={}, parameters={:08x}",
                 native_macro_positions[entry], result.pc, result.consumed, native_parameters.size(), result.error,
-                fmt::join(native_parameters, ","));
+                Common::Join(native_parameters, ","));
         }
         native_parameters.clear();
         return true;
@@ -343,7 +343,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 std::ofstream dump("native-increment-qmd.bin", std::ios::binary);
                 dump.write(reinterpret_cast<const char*>(descriptor.data()), sizeof(descriptor));
                 LOG_WARNING(HW_GPU, "Native increment dependency descriptor: address={:#x}, words={:08x}",
-                    qmd_address, fmt::join(descriptor, ","));
+                    qmd_address, Common::Join(descriptor, ","));
             }
         }
         const auto error = native_qmd.Signal(qmd_address, argument,
@@ -353,9 +353,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 if (static u32 logged{}; (descriptor[53] & (1U << 23)) && logged < 8) {
                     ++logged;
                     LOG_INFO(HW_GPU, "Native QMD {:#x} releases: {:08x} | {:08x} | {:08x}", address,
-                             fmt::join(std::span{descriptor}.subspan(24, 4), ","),
-                             fmt::join(std::span{descriptor}.subspan(28, 4), ","),
-                             fmt::join(std::span{descriptor}.subspan(52, 4), ","));
+                             Common::Join(std::span{descriptor}.subspan(24, 4), ","),
+                             Common::Join(std::span{descriptor}.subspan(28, 4), ","),
+                             Common::Join(std::span{descriptor}.subspan(52, 4), ","));
                 }
                 for (u32 slot = 0; slot < 2; ++slot) {
                     const u32 flags = descriptor[25 + slot * 4];
@@ -436,7 +436,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             registers.write(reinterpret_cast<const char*>(native_registers.data()), sizeof(native_registers));
         }
         LOG_ERROR(HW_GPU, "Native compute dispatch unsupported: method={:#x}, value={:#x}, QMD={:#x}, words={:08x}", method, argument,
-                  qmd_address, fmt::join(qmd, ","));
+                  qmd_address, Common::Join(qmd, ","));
         return true;
     }
     default:
@@ -585,7 +585,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
             diag.Note(true, diag_code, 0, outcome, diag_groups, diag_threads, detail);
         }
         if (diag.Capturing()) {
-            diag.Row(fmt::format("{}\tdispatch\t{:#x}\t0x0\t{}\t{}\t{}\t0\t0x0\t0\t0\t0x0\t0\t0\t0x0\tgrid={}x{}x{} block={}x{}x{}\t{:016x}\t0000000000000000",
+            diag.Row(std::format("{}\tdispatch\t{:#x}\t0x0\t{}\t{}\t{}\t0\t0x0\t0\t0\t0x0\t0\t0\t0x0\tgrid={}x{}x{} block={}x{}x{}\t{:016x}\t0000000000000000",
                                  diag.NextSeq(), diag_code, outcome, diag_threads, diag_groups,
                                  launch_description.grid_dim_x.Value(), launch_description.grid_dim_y.Value(),
                                  launch_description.grid_dim_z.Value(), launch_description.block_dim_x.Value(),
@@ -1273,7 +1273,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     // 32-bit placeholder surface and the texture cache samples it as E5B9G9R9.
     const bool shared_exponent_input = input->format == Texture::TextureFormat::E5B9G9R9;
     if ((!blit_format(*input) && !shared_exponent_input) || !blit_format(*output)) {
-        return skip(fmt::format("formats {} -> {}", static_cast<u32>(input->format.Value()),
+        return skip(std::format("formats {} -> {}", static_cast<u32>(input->format.Value()),
                                 static_cast<u32>(output->format.Value())));
     }
     const auto surface = [&](const Texture::TICEntry& tic) {

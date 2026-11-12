@@ -862,7 +862,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
 
     const auto shader_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir)};
-    auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
+    auto base_dir{shader_dir / std::format("{:016x}", title_id)};
     if (title_id == 0x0400C3F00006E000ULL) {
         base_dir /= "mkw_zero_depth_v1";
     }
@@ -1353,22 +1353,22 @@ void ReportNewPipelineKey(const GraphicsPipelineCacheKey& key) {
     const FixedPipelineState& now = key.state;
     const FixedPipelineState& before = it->second.state;
     std::string diffs;
-    if (now.raw1 != before.raw1) diffs += fmt::format(" raw1^{:#x}", now.raw1 ^ before.raw1);
-    if (now.raw2 != before.raw2) diffs += fmt::format(" raw2^{:#x}", now.raw2 ^ before.raw2);
+    if (now.raw1 != before.raw1) diffs += std::format(" raw1^{:#x}", now.raw1 ^ before.raw1);
+    if (now.raw2 != before.raw2) diffs += std::format(" raw2^{:#x}", now.raw2 ^ before.raw2);
     if (now.color_formats != before.color_formats) {
-        diffs += fmt::format(" color_formats {:02x} -> {:02x}", fmt::join(before.color_formats, ""),
-                             fmt::join(now.color_formats, ""));
+        diffs += std::format(" color_formats {:02x} -> {:02x}", Common::Join(before.color_formats, ""),
+                             Common::Join(now.color_formats, ""));
     }
     if (now.alpha_test_ref != before.alpha_test_ref) {
-        diffs += fmt::format(" alpha_test_ref {:#x} -> {:#x} (func {})", before.alpha_test_ref,
+        diffs += std::format(" alpha_test_ref {:#x} -> {:#x} (func {})", before.alpha_test_ref,
                              now.alpha_test_ref, now.alpha_test_func.Value());
     }
     if (now.point_size != before.point_size) {
-        diffs += fmt::format(" point_size {:#x} -> {:#x}", before.point_size, now.point_size);
+        diffs += std::format(" point_size {:#x} -> {:#x}", before.point_size, now.point_size);
     }
     if (now.viewport_swizzles != before.viewport_swizzles) diffs += " viewport_swizzles";
     if (now.attribute_types != before.attribute_types) {
-        diffs += fmt::format(" attribute_types^{:#x}", now.attribute_types ^ before.attribute_types);
+        diffs += std::format(" attribute_types^{:#x}", now.attribute_types ^ before.attribute_types);
     }
     if (std::memcmp(&now.dynamic_state, &before.dynamic_state, sizeof(now.dynamic_state)) != 0) {
         diffs += " dynamic_state";
@@ -1378,7 +1378,7 @@ void ReportNewPipelineKey(const GraphicsPipelineCacheKey& key) {
     }
     const size_t size = now.Size();
     if (diffs.empty() && size > offsetof(FixedPipelineState, attachments)) {
-        diffs = fmt::format(" past attachments (key size {})", size);
+        diffs = std::format(" past attachments (key size {})", size);
     }
     it->second = key;
     if (logged++ < 400) {

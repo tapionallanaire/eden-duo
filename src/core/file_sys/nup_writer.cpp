@@ -30,7 +30,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/deconstructed_rom_directory.h"
 
-#include <fmt/format.h>
+#include <format>
 
 namespace FileSys::Nup {
 namespace {
@@ -1797,7 +1797,7 @@ ExtractResult ExtractNup(const std::filesystem::path& archive, const std::filesy
                 dest = out_dir / "updates" / std::to_string(package.version);
             } else {
                 const size_t idx = addon_index[package.title_id]++;
-                dest = out_dir / "dlc" / fmt::format("{:016X}", package.title_id) /
+                dest = out_dir / "dlc" / std::format("{:016X}", package.title_id) /
                        std::to_string(idx);
             }
             targets.emplace_back(i, dest);

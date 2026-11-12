@@ -533,7 +533,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         const auto status = capture.Observe(instruction, index);
         if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
             if (const char* dir = std::getenv("EDEN_NX2_SHADER_DUMP")) {
-                const auto path = fmt::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
+                const auto path = std::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
                 if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
                     std::fwrite(native.data(), sizeof(Instruction), std::min<size_t>(native.size(), 4096), file);
                     std::fclose(file);
@@ -558,7 +558,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             return text ? "," + std::string{text} + "," : std::string{};
         }();
         !reject_list.empty() &&
-        reject_list.find(fmt::format(",{:x},", program_base)) != std::string::npos) {
+        reject_list.find(std::format(",{:x},", program_base)) != std::string::npos) {
         throw Shader::RuntimeError("Native shader at {:#x} rejected by EDEN_NX2_REJECT", program_base);
     }
     if (VideoCommon::Nx2Diag::Active()) {
@@ -570,7 +570,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
         dump_directory != nullptr) {
         const auto folder = std::filesystem::path{dump_directory};
-        const auto path = folder / fmt::format("{:016x}-{}-{:x}.bin", Shader::Ampere::NativeProgramKey(native),
+        const auto path = folder / std::format("{:016x}-{}-{:x}.bin", Shader::Ampere::NativeProgramKey(native),
                                                source_header_size == 0 ? "cs" : "gfx", program_base);
         if (!std::filesystem::exists(path)) {
             std::filesystem::create_directories(folder);
@@ -581,7 +581,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     if (!lowered) {
         if (const char* directory = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_DIR")) {
-            const auto key = fmt::format("{:016x}", Shader::Ampere::NativeProgramKey(native));
+            const auto key = std::format("{:016x}", Shader::Ampere::NativeProgramKey(native));
             const auto folder = std::filesystem::path{directory};
             std::filesystem::create_directories(folder);
             const auto source_path = folder / (key + ".source.bin");
@@ -683,7 +683,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             }();
         !reject_hashes.empty()) {
         for (const u64 hash : {result->native_program_key, shader_hash}) {
-            if (reject_hashes.find(fmt::format(",{:016x},", hash)) != std::string::npos) {
+            if (reject_hashes.find(std::format(",{:016x},", hash)) != std::string::npos) {
                 throw Shader::RuntimeError(
                     "Native shader at {:#x} ({:016x}) rejected by EDEN_NX2_REJECT_HASH",
                     program_base, hash);
@@ -737,7 +737,7 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
             if (table.enabled && table.size && table.size <= Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize) {
                 std::vector<u8> bytes(table.size);
                 gpu_memory->ReadBlock(table.address, bytes.data(), bytes.size());
-                std::ofstream dump(fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program)), std::ios::binary);
+                std::ofstream dump(std::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program)), std::ios::binary);
                 dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
             }
         }
@@ -1227,7 +1227,7 @@ void RewritePipelines(const std::filesystem::path& filename, u32 cache_version, 
         }
     }
     auto backup{filename};
-    backup += fmt::format(".v{}.bak", old_version);
+    backup += std::format(".v{}.bak", old_version);
     std::filesystem::rename(filename, backup);
     std::filesystem::rename(temporary, filename);
     std::error_code error;
@@ -1237,7 +1237,7 @@ void RewritePipelines(const std::filesystem::path& filename, u32 cache_version, 
               Common::FS::PathToUTF8String(filename), e.what());
     // Keep the old file when the new one couldn't take its place.
     auto backup{filename};
-    backup += fmt::format(".v{}.bak", old_version);
+    backup += std::format(".v{}.bak", old_version);
     std::error_code error;
     if (!std::filesystem::exists(filename, error) && std::filesystem::exists(backup, error)) {
         std::filesystem::rename(backup, filename, error);

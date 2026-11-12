@@ -612,7 +612,7 @@ Kernel::KEvent* nvhost_gpu::QueryEvent(u32 event_id) {
             // Nothing signals it yet.
             auto*& event = nx2_events[event_id];
             if (event == nullptr) {
-                event = events_interface.CreateEvent(fmt::format("GpuChannelNx2Event{}", event_id));
+                event = events_interface.CreateEvent(std::format("GpuChannelNx2Event{}", event_id));
             }
             LOG_WARNING(Service_NVDRV, "(STUBBED) Switch 2 channel event {}", event_id);
             return event;

@@ -13,7 +13,7 @@
 #include <type_traits>
 #include <vector>
 
-#include <fmt/format.h>
+#include <format>
 
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
@@ -125,8 +125,8 @@ std::string VersionText(const std::filesystem::path& path) {
         return {};
     }
     const Version& v = *version;
-    return v[3] == 0 ? fmt::format("{}.{}.{}", v[0], v[1], v[2])
-                     : fmt::format("{}.{}.{}.{}", v[0], v[1], v[2], v[3]);
+    return v[3] == 0 ? std::format("{}.{}.{}", v[0], v[1], v[2])
+                     : std::format("{}.{}.{}.{}", v[0], v[1], v[2], v[3]);
 }
 
 /// The NVIDIA app keeps every DLSS it downloads under ProgramData; pick the newest.

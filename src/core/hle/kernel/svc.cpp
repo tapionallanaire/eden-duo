@@ -2533,7 +2533,7 @@ void Call(Core::System& system, u32 imm) {
                 const u32 handle = process.GetMemory().Read32(GetArg64(args, 1) + 4 * i);
                 KScopedAutoObject event =
                     process.GetHandleTable().GetObject<KReadableEvent>(kernel, handle);
-                list += fmt::format(" {:#x}{}", handle,
+                list += std::format(" {:#x}{}", handle,
                                     event.IsNotNull()
                                         ? "=" + Service::KernelHelpers::DebugEventName(event.GetPointerUnsafe())
                                         : std::string{});

@@ -12,7 +12,7 @@
 #include <span>
 #include <unordered_map>
 
-#include <fmt/format.h>
+#include <format>
 #include <openssl/evp.h>
 #include <zstd.h>
 
@@ -264,7 +264,7 @@ private:
         std::error_code ec;
         std::filesystem::create_directories(cache->spill_dir, ec);
         spill.path =
-            cache->spill_dir / fmt::format("{:08x}{:08x}-{}.tmp", random(), random(), cache_index);
+            cache->spill_dir / std::format("{:08x}{:08x}-{}.tmp", random(), random(), cache_index);
         Common::FS::IOFile out{spill.path, Common::FS::FileAccessMode::Write};
         if (!out.IsOpen()) {
             return fail("cannot create the temporary file");

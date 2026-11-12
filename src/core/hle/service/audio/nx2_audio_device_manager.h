@@ -16,7 +16,7 @@
 #include <string_view>
 #include <vector>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include "audio_core/audio_core.h"
 #include "common/string_util.h"
@@ -595,7 +595,7 @@ private:
             }
         }
         LOG_INFO(Service_Audio, "{} streams {}", engaged ? "engage" : "disengage",
-                 fmt::join(ids, ","));
+                 Common::Join(ids, ","));
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }

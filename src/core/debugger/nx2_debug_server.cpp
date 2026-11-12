@@ -91,7 +91,7 @@ std::optional<Endpoint> ParseEndpoint(std::string_view text, std::string& error)
         host = "127.0.0.1";
     }
     if (host != "127.0.0.1" && host != "::1") {
-        error = fmt::format(
+        error = std::format(
             "host {} is not loopback; only 127.0.0.1, ::1 and localhost are allowed", host);
         return std::nullopt;
     }
@@ -100,7 +100,7 @@ std::optional<Endpoint> ParseEndpoint(std::string_view text, std::string& error)
         std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
     if (port_text.empty() || result != std::errc{} || end != port_text.data() + port_text.size() ||
         port > 65535) {
-        error = fmt::format("bad port \"{}\"", port_text);
+        error = std::format("bad port \"{}\"", port_text);
         return std::nullopt;
     }
     return Endpoint{std::string{host}, static_cast<u16>(port)};
@@ -118,7 +118,7 @@ std::string HandleRequest(const Handlers& handlers, std::string_view line,
         const std::string method = request.value("method", std::string{});
         const auto it = handlers.find(method);
         if (it == handlers.end()) {
-            throw std::runtime_error{fmt::format("unknown method \"{}\"", method)};
+            throw std::runtime_error{std::format("unknown method \"{}\"", method)};
         }
         const nlohmann::json params = request.value("params", nlohmann::json::object());
         if (!params.is_object()) {

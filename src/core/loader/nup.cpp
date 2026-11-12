@@ -100,7 +100,7 @@ std::string DecodeVersion(u32 version) {
     if (version == 0) {
         return {};
     }
-    return fmt::format("{}.{}.{}", version >> 16, (version >> 8) & 0xFF, version & 0xFF);
+    return std::format("{}.{}.{}", version >> 16, (version >> 8) & 0xFF, version & 0xFF);
 }
 
 } // namespace

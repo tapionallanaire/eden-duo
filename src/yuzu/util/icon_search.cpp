@@ -16,7 +16,7 @@
 #include <vector>
 
 #include <boost/algorithm/string/replace.hpp>
-#include <fmt/format.h>
+#include <format>
 #include <nlohmann/json.hpp>
 
 #include <QBuffer>
@@ -226,7 +226,7 @@ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_
         if (res->status != 200) {
             result.status = res->status == 401 || res->status == 403 ? HttpStatus::Unauthorized
                                                                       : HttpStatus::NetworkError;
-            result.detail = fmt::format("HTTP {}", res->status);
+            result.detail = std::format("HTTP {}", res->status);
             return result;
         }
         if (res->body.empty() || res->body.size() > MaxHttpBodySize) {
@@ -449,7 +449,7 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
             std::ranges::stable_sort(
                 scored, [](const auto& a, const auto& b) { return a.first > b.first; });
             for (std::size_t i = 0; i < scored.size() && i < MaxIconDownloads; ++i) {
-                const auto res = HttpGet(fmt::format("{}/images/100/{}.png", IconSiteHost,
+                const auto res = HttpGet(std::format("{}/images/100/{}.png", IconSiteHost,
                                                      scored[i].second.id),
                                          primary_deadline, cancel);
                 if (res.status != HttpStatus::Ok) {
@@ -498,7 +498,7 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
             return out;
         }
         const auto icons =
-            sgdb_get(fmt::format("/icons/game/{}?dimensions=256,512&mimes=image/png", game_id));
+            sgdb_get(std::format("/icons/game/{}?dimensions=256,512&mimes=image/png", game_id));
         if (icons.status != HttpStatus::Ok) {
             out.status = to_status(icons);
             out.error = icons.detail;

@@ -1360,7 +1360,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
         // EDEN_NX2_MME_LOG: log every macro call (runs ~750,000 times a second in title 1).
         if (static const bool log_calls = std::getenv("EDEN_NX2_MME_LOG") != nullptr; log_calls) {
             LOG_DEBUG(HW_GPU, "Native MME context={:#x}", context);
-            LOG_DEBUG(HW_GPU, "Native MME start={:#x}, parameters={}, data={:08x}", method, parameters.size(), fmt::join(parameters, ","));
+            LOG_DEBUG(HW_GPU, "Native MME start={:#x}, parameters={}, data={:08x}", method, parameters.size(), Common::Join(parameters, ","));
         }
         // Reused between calls (a macro never calls another: methods >= 0xe00 are refused below);
         // filled only for calls that are interpreted.
@@ -1453,7 +1453,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         std::array<u32, 8> words{};
                         for (u32 i = 0; i < std::min<u32>(value, 8); ++i) words[i] = memory.Read<u32>(source + u64{i} * 4);
                         LOG_INFO(HW_GPU, "Native MME DMA read{} start={:#x} source={:#x} count={} words={:08x}",
-                                 address == DmaReadFifoed ? " fifoed" : "", method, source, value, fmt::join(words, ","));
+                                 address == DmaReadFifoed ? " fifoed" : "", method, source, value, Common::Join(words, ","));
                     }
                     const u32 word_count = std::min<u32>(value, 0x1000);
                     std::array<u32, 0x1000> dma_words;
@@ -1466,7 +1466,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                             if (static const bool mme_dump = std::getenv("EDEN_NX2_MME_DUMP") != nullptr;
                                 mme_dump && ram + i == 0x27 && (*native_interpreter.active_dram)[0x27] != word) {
                                 LOG_INFO(HW_GPU, "MME data RAM[0x27] {:#x} -> {:#x} by 3D engine {} (DMA from {:#x})",
-                                         (*native_interpreter.active_dram)[0x27], word, fmt::ptr(&maxwell3d), source);
+                                         (*native_interpreter.active_dram)[0x27], word, static_cast<const void*>(&maxwell3d), source);
                             }
                             (*native_interpreter.active_dram)[ram + i] = word;
                         }

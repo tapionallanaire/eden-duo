@@ -9,7 +9,7 @@
 #include <functional>
 #include <string>
 #include <unordered_set>
-#include <fmt/ranges.h>
+#include <format>
 #include <array>
 #include <chrono>
 #include <vector>
@@ -194,7 +194,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                     std::array<u32, sizeof(shader_config) / sizeof(u32)> config{};
                     std::memcpy(config.data(), &shader_config, sizeof(config));
                     LOG_ERROR(HW_GPU, "Rejected program {:#x} is bound to stage {}: header {:08x}, slot {:08x}",
-                              shader_addr, index, fmt::join(header, " "), fmt::join(config, " "));
+                              shader_addr, index, Common::Join(header, " "), Common::Join(config, " "));
                 }
                 throw;
             }
@@ -235,7 +235,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             std::array<u32, 24> words{};
             gpu_memory->ReadBlockUnsafe(buffer.address, words.data(), sizeof(words));
             LOG_INFO(HW_GPU, "VS cbuf {} at {:#x} size {:#x}: {:08x}", slot, buffer.address, buffer.size,
-                     fmt::join(words, " "));
+                     Common::Join(words, " "));
         }
     }
     return false;

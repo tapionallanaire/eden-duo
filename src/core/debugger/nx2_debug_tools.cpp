@@ -99,7 +99,7 @@ struct ToolState {
 namespace {
 
 std::string Hex(u64 value) {
-    return fmt::format("{:016x}", value);
+    return std::format("{:016x}", value);
 }
 
 json HexList(const std::vector<u64>& values) {
@@ -117,7 +117,7 @@ T Param(const json& params, const char* name, T fallback, T low, T high) {
 }
 
 std::string HexAddress(u64 value) {
-    return fmt::format("{:#x}", value);
+    return std::format("{:#x}", value);
 }
 
 /// A path as UTF-8 with forward slashes, for results and logs.
@@ -133,7 +133,7 @@ u64 AddressParam(const json& params, const char* name) {
     }
     if (!value.is_string()) {
         throw std::runtime_error{
-            fmt::format("{} must be a hex string or a non-negative number", name)};
+            std::format("{} must be a hex string or a non-negative number", name)};
     }
     const std::string text = value.get<std::string>();
     const std::string_view view{text};
@@ -144,7 +144,7 @@ u64 AddressParam(const json& params, const char* name) {
         std::from_chars(digits.data(), digits.data() + digits.size(), address, 16);
     if (digits.empty() || error != std::errc{} || end != digits.data() + digits.size()) {
         throw std::runtime_error{
-            fmt::format("bad {} \"{}\": want hex, e.g. 0x8012345000", name, text)};
+            std::format("bad {} \"{}\": want hex, e.g. 0x8012345000", name, text)};
     }
     return address;
 }
@@ -153,7 +153,7 @@ u64 AddressParam(const json& params, const char* name) {
 u64 ReadSize(const json& params, u64 address) {
     const json& value = params.at("size");
     if (!value.is_number_integer() || value.get<s64>() < 1 || value.get<u64>() > MAX_READ) {
-        throw std::runtime_error{fmt::format("size must be 1 to {} bytes", MAX_READ)};
+        throw std::runtime_error{std::format("size must be 1 to {} bytes", MAX_READ)};
     }
     const u64 size = value.get<u64>();
     if (address + size < address) {
@@ -214,7 +214,7 @@ json Status(ToolState& state, const json& params) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
     return {
         {"title", state.title},
-        {"program_id", fmt::format("{:016X}", state.program_id)},
+        {"program_id", std::format("{:016X}", state.program_id)},
         {"build", std::string{Common::g_build_fullname}},
         {"scm_rev", std::string{Common::g_scm_rev}},
         {"switch2", Settings::CurrentProgramIsSwitch2()},
@@ -247,7 +247,7 @@ json Screenshot(ToolState& state, const json& params) {
     const int timeout = Param<int>(params, "timeout_s", 5, 1, 30);
     if (!WaitReady(state, future, std::chrono::seconds{timeout})) {
         throw std::runtime_error{
-            fmt::format("no frame was presented within {} s (paused or loading?)", timeout)};
+            std::format("no frame was presented within {} s (paused or loading?)", timeout)};
     }
     const bool invert_y = future.get();
     std::vector<u8> rgb(size_t{layout.width} * layout.height * 3);
@@ -270,13 +270,13 @@ json Screenshot(ToolState& state, const json& params) {
     json result = {{"width", layout.width}, {"height", layout.height}};
     if (params.value("save", false)) {
         std::filesystem::create_directories(state.dump_directory);
-        const auto path = state.dump_directory / fmt::format("screenshot-{}-{:04}.png",
+        const auto path = state.dump_directory / std::format("screenshot-{}-{:04}.png",
                                                              state.session, ++state.screenshots);
         std::ofstream file{path, std::ios::binary};
         file.write(reinterpret_cast<const char*>(png.data()),
                    static_cast<std::streamsize>(png.size()));
         if (!file) {
-            throw std::runtime_error{fmt::format("cannot write {}", PathText(path))};
+            throw std::runtime_error{std::format("cannot write {}", PathText(path))};
         }
         result["path"] = PathText(path);
     }
@@ -332,7 +332,7 @@ json CaptureFrame(ToolState& state, const json& params) {
     }
     const u64 id = ++state.captures;
     const auto directory =
-        state.dump_directory / fmt::format("capture-{}-{:03}", state.session, id);
+        state.dump_directory / std::format("capture-{}-{:03}", state.session, id);
     std::filesystem::create_directories(directory);
     const bool sampled = params.value("sampled", false);
     const bool buffers = params.value("buffers", false);
@@ -342,7 +342,7 @@ json CaptureFrame(ToolState& state, const json& params) {
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
     if (!finished) {
         VideoCore::Nx2Debug::CancelCapture(id);
-        throw std::runtime_error{fmt::format(
+        throw std::runtime_error{std::format(
             "the capture did not finish within {} s (paused or loading?); if it started, its "
             "files are still being written to {}",
             timeout, PathText(directory))};
@@ -384,7 +384,7 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"entries_total", total},
         {"entries", std::move(entries)},
         {"index_command",
-         fmt::format("python3 -I tools/nx2/frame_dump_index.py \"{}\"", PathText(directory))},
+         std::format("python3 -I tools/nx2/frame_dump_index.py \"{}\"", PathText(directory))},
     };
 }
 
@@ -414,7 +414,7 @@ json SampleThreads(ToolState& state, const json& params) {
     const double seconds = Param<double>(params, "seconds", 10.0, 1.0, 60.0);
     std::filesystem::create_directories(state.dump_directory);
     const auto path =
-        state.dump_directory / fmt::format("samples-{}-{:03}.txt", state.session, ++state.samples);
+        state.dump_directory / std::format("samples-{}-{:03}.txt", state.session, ++state.samples);
     std::string report = Nx2Sampler::Sample(threads.c_str(), seconds, PathText(path));
     report.resize((std::min)(report.size(), Param<size_t>(params, "max_chars", 60000, 0, 4000000)));
     return {{"file", PathText(path)}, {"report", std::move(report)}};
@@ -428,7 +428,7 @@ json ReadMemory(ToolState& state, const json& params) {
     std::vector<u8> bytes(size);
     if (const auto unmapped = ReadGuestMemory(Application(state).GetMemory(), address, bytes)) {
         throw std::runtime_error{
-            fmt::format("guest address {:#x} is not mapped (reading {} bytes at {:#x})", *unmapped,
+            std::format("guest address {:#x} is not mapped (reading {} bytes at {:#x})", *unmapped,
                         size, address)};
     }
     json result = {{"address", HexAddress(address)}, {"size", size}};
@@ -455,14 +455,14 @@ json WriteMemory(ToolState& state, const json& params) {
         bytes = ParseHexBytes(params.at("hex").get<std::string>());
     }
     if (bytes.empty() || bytes.size() > MAX_WRITE) {
-        throw std::runtime_error{fmt::format("write 1 to {} bytes", MAX_WRITE)};
+        throw std::runtime_error{std::format("write 1 to {} bytes", MAX_WRITE)};
     }
     if (address + bytes.size() < address) {
         throw std::runtime_error{"address + size wraps around"};
     }
     std::vector<u8> before(bytes.size());
     if (const auto unmapped = ReadGuestMemory(Application(state).GetMemory(), address, before)) {
-        throw std::runtime_error{fmt::format("guest address {:#x} is not mapped", *unmapped)};
+        throw std::runtime_error{std::format("guest address {:#x} is not mapped", *unmapped)};
     }
     Application(state).GetMemory().WriteBlock(address, bytes.data(), bytes.size());
     LOG_INFO(Debug, "Debug server wrote {} bytes at {:#x}", bytes.size(), address);
@@ -487,7 +487,7 @@ json SearchMemory(ToolState& state, const json& params) {
         region_start = GetInteger(process.GetPageTable().GetAddressSpaceStart());
         region_size = process.GetPageTable().GetAddressSpaceSize();
     } else {
-        throw std::runtime_error{fmt::format("regions \"{}\": want heap or all", regions)};
+        throw std::runtime_error{std::format("regions \"{}\": want heap or all", regions)};
     }
     const u64 start = params.contains("start")
                           ? (std::max)(region_start, AddressParam(params, "start"))
@@ -536,7 +536,7 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     if (!read) {
         VideoCore::Nx2Debug::CancelGpuRead(id);
         throw std::runtime_error{
-            fmt::format("no frame was presented within {} s (paused or loading?)", timeout)};
+            std::format("no frame was presented within {} s (paused or loading?)", timeout)};
     }
     if (!read->error.empty()) {
         throw std::runtime_error{read->error};
@@ -559,7 +559,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
     }
     if (total > MAX_INPUT_FRAMES) {
         throw std::runtime_error{
-            fmt::format("{} frames in total; at most {} per call", total, MAX_INPUT_FRAMES)};
+            std::format("{} frames in total; at most {} per call", total, MAX_INPUT_FRAMES)};
     }
     auto& hid = state.system.HIDCore();
     HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
@@ -595,7 +595,7 @@ json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json&
             throw std::runtime_error{"the client disconnected; input released"};
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            throw std::runtime_error{fmt::format(
+            throw std::runtime_error{std::format(
                 "{} of {} frames were presented within {} s (paused or loading?); input released",
                 now >= start ? now - start : 0, total, timeout)};
         }
@@ -620,14 +620,14 @@ json Input(ToolState& state, const json& params, const ClientGone& client_gone) 
 json InputSequence(ToolState& state, const json& params, const ClientGone& client_gone) {
     const json& list = params.at("steps");
     if (!list.is_array() || list.empty() || list.size() > MAX_INPUT_STEPS) {
-        throw std::runtime_error{fmt::format("steps must be an array of 1 to {}", MAX_INPUT_STEPS)};
+        throw std::runtime_error{std::format("steps must be an array of 1 to {}", MAX_INPUT_STEPS)};
     }
     std::vector<InputStep> steps;
     for (size_t index = 0; index < list.size(); ++index) {
         try {
             steps.push_back(ParseInputStep(list[index]));
         } catch (const std::exception& error) {
-            throw std::runtime_error{fmt::format("step {}: {}", index, error.what())};
+            throw std::runtime_error{std::format("step {}: {}", index, error.what())};
         }
     }
     return RunInput(state, steps, params, client_gone);
@@ -670,7 +670,7 @@ u64 ParseShaderHash(std::string_view text) {
     const auto [end, error] =
         std::from_chars(digits.data(), digits.data() + digits.size(), value, 16);
     if (digits.size() != 16 || error != std::errc{} || end != digits.data() + digits.size()) {
-        throw std::runtime_error{fmt::format(
+        throw std::runtime_error{std::format(
             "bad hash \"{}\": want all 16 hex digits of a native program key (shader dump file "
             "name) or shader hash (frame dump \"shaders\"); a shorter one would match nothing",
             text)};
@@ -697,7 +697,7 @@ std::vector<u8> ParseHexBytes(std::string_view text) {
         }
     }
     if (bytes.empty() || digits.size() % 2 != 0) {
-        throw std::runtime_error{fmt::format(
+        throw std::runtime_error{std::format(
             "bad pattern \"{}\": want hex byte pairs in memory order (little endian: 1.0f is "
             "0000803f)",
             text)};
@@ -710,16 +710,16 @@ json FormatMemory(std::span<const u8> bytes, std::string_view as) {
         std::string hex;
         hex.reserve(bytes.size() * 2);
         for (const u8 byte : bytes) {
-            fmt::format_to(std::back_inserter(hex), "{:02x}", byte);
+            std::format_to(std::back_inserter(hex), "{:02x}", byte);
         }
         return {{"hex", std::move(hex)}};
     }
     const size_t element = as == "u32" || as == "f32" ? 4 : as == "u64" ? 8 : 0;
     if (element == 0) {
-        throw std::runtime_error{fmt::format("as \"{}\": want hex, u32, u64 or f32", as)};
+        throw std::runtime_error{std::format("as \"{}\": want hex, u32, u64 or f32", as)};
     }
     if (bytes.size() % element != 0) {
-        throw std::runtime_error{fmt::format("size must be a multiple of {} for {}", element, as)};
+        throw std::runtime_error{std::format("size must be a multiple of {} for {}", element, as)};
     }
     json values = json::array();
     for (size_t offset = 0; offset < bytes.size(); offset += element) {
@@ -817,7 +817,7 @@ InputStep ParseInputStep(const json& step) {
     }
     for (const auto& [key, value] : step.items()) {
         if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames") {
-            throw std::runtime_error{fmt::format(
+            throw std::runtime_error{std::format(
                 "unknown key \"{}\": want buttons, left_stick, right_stick, frames", key)};
         }
     }
@@ -825,7 +825,7 @@ InputStep ParseInputStep(const json& step) {
     const json& frames = step.at("frames");
     if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
         frames.get<u64>() > MAX_INPUT_FRAMES) {
-        throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
+        throw std::runtime_error{std::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
     }
     result.frames = frames.get<u64>();
     for (const json& button : step.value("buttons", json::array())) {
@@ -838,7 +838,7 @@ InputStep ParseInputStep(const json& step) {
                 names += names.empty() ? "" : ", ";
                 names += known;
             }
-            throw std::runtime_error{fmt::format("unknown button {}: want one of {}", text, names)};
+            throw std::runtime_error{std::format("unknown button {}: want one of {}", text, names)};
         }
         result.input.buttons |= it->second;
     }
@@ -850,7 +850,7 @@ InputStep ParseInputStep(const json& step) {
         const auto axis = [&](size_t index) {
             if (!value.is_array() || value.size() != 2 || !value[index].is_number() ||
                 std::abs(value[index].get<double>()) > 1.0) {
-                throw std::runtime_error{fmt::format("{} must be [x, y] with both in -1..1", key)};
+                throw std::runtime_error{std::format("{} must be [x, y] with both in -1..1", key)};
             }
             return static_cast<s32>(
                 std::lround(value[index].get<double>() * HID::HID_JOYSTICK_MAX));

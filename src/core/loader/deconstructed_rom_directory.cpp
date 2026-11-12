@@ -323,7 +323,7 @@ std::string RomFSProductVersion(const FileSys::VirtualDir& romfs_dir) {
     if (best.empty()) {
         return {};
     }
-    return fmt::format("{}.{}.{}", best[0], best[1], best[2]);
+    return std::format("{}.{}.{}", best[0], best[1], best[2]);
 }
 
 // Loose ExeFS dumps carry no control data, but icon/nacp sidecars can be dropped next to the

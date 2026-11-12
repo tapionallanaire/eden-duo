@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <type_traits>
 #include <format>
+#include <iterator>
+#include <string_view>
 #include "common/swap.h"
 
 // adapted from https://github.com/fmtlib/fmt/issues/2704
@@ -32,6 +34,40 @@ struct std::formatter<SwapStructT<T, U>> {
     template <typename FormatContext>
     auto format(const SwapStructT<T, U>& reg, FormatContext& ctx) const {
         return std::format_to(ctx.out(), "{}", T(reg));
+    }
+};
+
+// Stand-in for fmt::join: formats every element with the given spec, separated by `sep`.
+namespace Common {
+template <typename It>
+struct JoinView {
+    It first;
+    It last;
+    std::string_view sep;
+};
+template <typename It>
+JoinView<It> Join(It first, It last, std::string_view sep) {
+    return {first, last, sep};
+}
+template <typename Range>
+auto Join(const Range& range, std::string_view sep) {
+    return Join(std::begin(range), std::end(range), sep);
+}
+} // namespace Common
+
+template <typename It>
+struct std::formatter<Common::JoinView<It>> : std::formatter<std::iter_value_t<It>> {
+    template <typename FormatContext>
+    auto format(const Common::JoinView<It>& view, FormatContext& ctx) const -> decltype(ctx.out()) {
+        auto out = ctx.out();
+        for (auto it = view.first; it != view.last; ++it) {
+            if (it != view.first) {
+                out = std::copy(view.sep.begin(), view.sep.end(), out);
+            }
+            ctx.advance_to(out);
+            out = std::formatter<std::iter_value_t<It>>::format(*it, ctx);
+        }
+        return out;
     }
 };
 

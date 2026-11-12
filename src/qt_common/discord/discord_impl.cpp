@@ -115,7 +115,7 @@ void DiscordImpl::UpdateGameStatus(std::string_view game_url, bool has_boxart) {
     presence.state = game_title.c_str();
     presence.status_display_type = DiscordStatusDisplayType_State;
     const std::string details =
-        game_version.empty() ? "Currently in game" : fmt::format("Version {}", game_version);
+        game_version.empty() ? "Currently in game" : std::format("Version {}", game_version);
     presence.details = details.c_str();
     presence.startTimestamp = start_time;
     Discord_UpdatePresence(&presence);
@@ -137,14 +137,14 @@ void DiscordImpl::Update() {
             system.GetAppLoader().ReadDisplayVersion(game_version);
         }
 
-        const auto title_id = fmt::format("{:016X}", system.GetApplicationProcessProgramID());
+        const auto title_id = std::format("{:016X}", system.GetApplicationProcessProgramID());
         if (const auto name = FetchFromCovers(title_id + ".txt", true)) {
             if (auto stripped = Common::StripSpaces(*name); !stripped.empty()) {
                 game_title = std::move(stripped);
             }
         }
         if (FetchFromCovers(title_id + ".png", false)) {
-            UpdateGameStatus(fmt::format("https://{}{}{}.png", COVERS_HOST, COVERS_PATH, title_id),
+            UpdateGameStatus(std::format("https://{}{}{}.png", COVERS_HOST, COVERS_PATH, title_id),
                              true);
             return;
         }
