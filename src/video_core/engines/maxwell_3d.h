@@ -21,6 +21,7 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/math_util.h"
+#include "common/settings.h"
 #include "video_core/engines/const_buffer_info.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
@@ -3309,12 +3310,14 @@ private:
     void CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters);
 
     /// Whether state register writes that keep the register's value are dropped (CallMethod).
+    /// Switch 2 titles only: a Switch 1 title's same-value writes still raise the dirty flags
+    /// (the shader re-validation Hogwarts Legacy needs runs from them).
     static bool SkipSameValueWrites() {
         static const bool skip = [] {
             const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
             return value == nullptr || value[0] != '0';
         }();
-        return skip;
+        return skip && Settings::CurrentProgramIsSwitch2();
     }
 
     /// Handles writes to the macro uploading register.
