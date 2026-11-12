@@ -1253,6 +1253,11 @@ void HoldHleReply(KernelCore& kernel, KThread* client_thread) {
     if (hold.count() <= 0) {
         return;
     }
+    // Switch 2 processes only: a Switch 1 title's replies are not held.
+    if (const KProcess* const process = client_thread->GetOwnerProcess();
+        process == nullptr || !process->IsSwitch2()) {
+        return;
+    }
     const s32 core = client_thread->GetActiveCore();
     if (core < 0 || core >= static_cast<s32>(Core::Hardware::NUM_CPU_CORES)) {
         return;

@@ -113,8 +113,9 @@ Result StartThread(Core::System& system, Handle thread_handle) {
     // On hardware a started thread that can run begins within microseconds. An emulated core takes
     // longer (wake-up, JIT), so let the thread reach its first SVC before the caller carries on.
     // Mario Tennis Fever's boot stub reuses the stack arguments it gave its threads right after
-    // starting them.
+    // starting them. Switch 2 processes only: a Switch 1 title's caller carries on at once.
     auto& kernel = system.Kernel();
+    R_SUCCEED_IF(!GetCurrentProcess(kernel).IsSwitch2());
     const s32 core = thread->GetActiveCore();
     if (core == GetCurrentCoreId(kernel) || !kernel.IsMulticore()) {
         // Sleeping lets this core run the new thread; in single-core mode the idle core passes

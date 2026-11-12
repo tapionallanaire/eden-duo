@@ -240,6 +240,11 @@ Result KPageTableBase::InitializeForProcess(Svc::CreateProcessFlag as_type, bool
     if (m_address_space_width == 39) {
         alias_region_size = GetSpaceSize(KAddressSpaceInfo::Type::Alias);
         heap_region_size = GetSpaceSize(KAddressSpaceInfo::Type::Heap);
+        // The table's 16 GiB heap region is for Switch 2 titles; a Switch 1 title keeps 8 GiB.
+        // (The process's own Switch 2 flag is set after its page table is laid out.)
+        if (!Settings::CurrentProgramIsSwitch2()) {
+            heap_region_size = 8ULL << 30;
+        }
         stack_region_size = GetSpaceSize(KAddressSpaceInfo::Type::Stack);
         kernel_map_region_size = GetSpaceSize(KAddressSpaceInfo::Type::MapSmall);
         m_code_region_start = m_address_space_start + aslr_space_start +
