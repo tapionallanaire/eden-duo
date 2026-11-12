@@ -6,8 +6,6 @@
 
 #pragma once
 
-#include <chrono>
-
 #include "core/file_sys/vfs/vfs.h"
 #include "core/hle/service/cmif_types.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -21,10 +19,6 @@ public:
 
 private:
     FileSys::VirtualFile backend;
-
-    static constexpr s64 ReadBytesPerSecond = 40'000'000;
-    static constexpr s64 MaxChargedReadSize = 64 * 1024;
-    std::chrono::steady_clock::time_point next_read_tick{};
 
     Result Read(
         OutBuffer<BufferAttr_HipcMapAlias | BufferAttr_HipcMapTransferAllowsNonSecure> out_bytes,
