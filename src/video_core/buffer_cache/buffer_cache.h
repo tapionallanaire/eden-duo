@@ -1988,6 +1988,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         }
         const std::span<BufferCopy> copies_span(copies.data(), copies.size());
         UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
+        any_buffer_uploaded = true;
         return false;
     }
 }
