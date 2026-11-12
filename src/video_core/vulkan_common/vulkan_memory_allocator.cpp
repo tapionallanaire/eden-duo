@@ -210,9 +210,11 @@ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicat
 {
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
-            // should fill before VMA takes another block.
-            .flags = static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT |
-                                                           VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT) |
+            // should fill before VMA takes another block. Switch 2 titles only.
+            .flags = static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT) |
+                     (Settings::CurrentProgramIsSwitch2()
+                          ? VmaAllocationCreateFlags{VMA_ALLOCATION_CREATE_STRATEGY_MIN_MEMORY_BIT}
+                          : VmaAllocationCreateFlags{0}) |
                      (dedicated ? VmaAllocationCreateFlags{VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT}
                                : VmaAllocationCreateFlags{0}),
             .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
