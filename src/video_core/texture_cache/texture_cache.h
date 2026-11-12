@@ -212,6 +212,12 @@ void TextureCache<P>::RunGarbageCollector() {
     // emptiest blocks go first, so blocks drain and go back to the driver; placement already
     // prefers the fullest blocks (best fit). Images with memory of their own sit in the middle.
     const auto Collect = [&] {
+        // Switch 1 titles: every image past the age threshold, as their budgets were tuned
+        // (Hogwarts Legacy); a window of the oldest can hold nothing collectable.
+        if (gpu_memory == nullptr || !gpu_memory->UsesNativeTiling()) {
+            lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
+            return;
+        }
         if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
             std::vector<ImageId> candidates;
             const size_t limit = num_iterations * 8;
