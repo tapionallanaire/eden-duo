@@ -161,6 +161,14 @@ public:
     }
 
     /**
+     * Whether this stream is playing buffers it has been given, so that its queue level says
+     * how far ahead of the host device the renderer is.
+     */
+    bool IsDraining() const {
+        return !paused && queued_buffer_frames.load(std::memory_order_relaxed) != 0;
+    }
+
+    /**
      * Set the maximum buffer queue size.
      */
     void SetRingSize(u32 ring_size) {
@@ -249,6 +257,10 @@ private:
     std::atomic<u32> queued_buffers{};
     /// The ring size for audio out buffers (usually 4, rarely 2 or 8)
     u32 max_queue_size{};
+    /// Largest number of frames the host device has asked for in one callback
+    std::atomic<u32> device_request_frames{};
+    /// Frames in the buffers being queued (240 for the audio renderer)
+    std::atomic<u32> queued_buffer_frames{};
     /// Locks access to sample count tracking info
     std::mutex sample_count_lock;
     /// Minimum number of total samples that have been played since the last callback

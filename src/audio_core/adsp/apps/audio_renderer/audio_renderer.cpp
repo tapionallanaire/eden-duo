@@ -131,7 +131,10 @@ void AudioRenderer::CreateSinkStreams() {
 
 void AudioRenderer::Main(std::stop_token stop_token) {
     Common::SetCurrentThreadName("DSP_AudioRenderer_Main");
-    Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+    // The emulated CPU cores and the GPU thread run at Critical. At High this thread lost the
+    // core to them while a level loaded and the sink ran dry: renders came up to 54 ms apart for
+    // 5 ms of audio each (Retroid Pocket Flip 2, Crash Team Racing). It uses about 1 % of a core.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
 
     // TODO: Create buffer map/unmap thread + mailbox
     // TODO: Create gMix devices, initialize them here
@@ -163,6 +166,27 @@ void AudioRenderer::Main(std::stop_token stop_token) {
             std::array<u64, MaxRendererSessions> render_times_taken{};
             const auto start_time{system.CoreTiming().GetGlobalTimeUs().count()};
 
+            // Every session gets one buffer per render and its own host stream drains it, so the
+            // render rate has to follow the stream with the least queued. Pacing on the first
+            // session alone left the second one a buffer or two lower, and its device callback
+            // (1024 frames on Android) came up short several times a minute: Crash Team Racing
+            // plays through two sessions (Retroid Pocket Flip 2).
+            u32 wait_index{MaxRendererSessions};
+            u32 lowest_queue{~0u};
+            for (u32 index = 0; index < MaxRendererSessions; index++) {
+                if (command_buffers[index].buffer != 0 && streams[index]->IsDraining() &&
+                    streams[index]->GetQueueSize() < lowest_queue) {
+                    lowest_queue = streams[index]->GetQueueSize();
+                    wait_index = index;
+                }
+            }
+            if (wait_index == MaxRendererSessions && command_buffers[0].buffer != 0) {
+                wait_index = 0; // nothing is playing yet: the first session paces, as before
+            }
+            if (wait_index < MaxRendererSessions) {
+                streams[wait_index]->WaitFreeSpace(stop_token);
+            }
+
             for (u32 index = 0; index < MaxRendererSessions; index++) {
                 auto& command_buffer{command_buffers[index]};
                 auto& command_list_processor{command_list_processors[index]};
@@ -193,10 +217,6 @@ void AudioRenderer::Main(std::stop_token stop_token) {
 
                     max_time = (std::min)(command_buffer.time_limit, max_time);
                     command_list_processor.SetProcessTimeMax(max_time);
-
-                    if (index == 0) {
-                        streams[index]->WaitFreeSpace(stop_token);
-                    }
 
                     // Process the command list
                     {
