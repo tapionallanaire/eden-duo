@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <span>
 
@@ -541,6 +542,9 @@ Result System::Update(std::span<const u8> input, std::span<u8> performance, std:
     }
 
     adsp_rendered_event->Clear(core.Kernel());
+    prompt_updates = renders_since_update <= 2 ? (std::min)(prompt_updates + 1, PromptUpdates) : 0;
+    renders_since_update = 0;
+    update_cv.notify_all();
     num_times_updated++;
 
     const auto end_time{core.CoreTiming().GetGlobalTimeNs().count()};
@@ -585,6 +589,27 @@ bool System::IsActive() const {
     return active;
 }
 
+void System::WaitForUpdate() {
+    // FMOD's Switch output (Crash Team Racing) wakes on the rendered event, updates once, and
+    // refills one of its four 16 ms wave buffers per wake-up that saw a buffer come back. Two
+    // buffers finishing between two updates lose one of them for good: after three such gaps a
+    // single buffer circulates and the sound stays in pieces until the game restarts. The
+    // console's audio thread is never that late; an emulated one is (updates up to 27 ms after
+    // the render, a few times a minute on the Retroid Pocket Flip 2). So a game that has been
+    // answering every render is never left more than two renders (10 ms) behind: the renderer
+    // waits for its update. A stalled game then gets a pause in its sound, not a lasting fault.
+    // Games that update on their own schedule never qualify, and one that stops answering for
+    // half a second has to qualify again.
+    std::unique_lock l{lock};
+    if (!initialized || !active || prompt_updates < PromptUpdates || renders_since_update < 2) {
+        return;
+    }
+    if (!update_cv.wait_for(l, std::chrono::milliseconds(500),
+                            [this] { return renders_since_update < 2 || !active; })) {
+        prompt_updates = 0;
+    }
+}
+
 void System::SendCommandToDsp() {
     std::scoped_lock l{lock};
 
@@ -624,6 +649,7 @@ void System::SendCommandToDsp() {
             reset_command_buffers = false;
             command_buffer_size = command_size;
             if (remaining_command_count == 0) {
+                renders_since_update = (std::min)(renders_since_update + 1, 1000U);
                 adsp_rendered_event->Signal(core.Kernel());
             }
         } else {
