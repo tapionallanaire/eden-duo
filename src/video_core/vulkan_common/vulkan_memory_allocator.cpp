@@ -378,8 +378,9 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
     if (usage != MemoryUsage::DeviceLocal || ci.size > Device::SeparatePoolBlockSize / 2) {
         return false;
     }
-    // A title with reserved device memory (Hogwarts Legacy) keeps its buffers in that pool.
-    if (device.GetPinnedPool() != nullptr) {
+    // Switch 2 titles only; a Switch 1 title's buffers stay in the default blocks, or in its
+    // reserved device memory (Hogwarts Legacy), as in Duet Plus 1.1.18.
+    if (!Settings::CurrentProgramIsSwitch2() || device.GetPinnedPool() != nullptr) {
         return false;
     }
     u32 memory_type{};
