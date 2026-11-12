@@ -114,7 +114,8 @@ VfsEntryType RealVfsFilesystem::GetEntryType(std::string_view path_) const {
 }
 
 VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::optional<u64> size,
-                                                 OpenMode perms) {
+                                                 OpenMode perms,
+                                                 [[maybe_unused]] std::string parent_path) {
     const auto path = FS::SanitizePath(path_, FS::DirectorySeparator::PlatformDefault);
     std::scoped_lock lk{list_lock};
 
@@ -132,6 +133,9 @@ VirtualFile RealVfsFilesystem::OpenFileFromEntry(std::string_view path_, std::op
     this->InsertReferenceIntoListLocked(*reference);
 
     auto file = std::make_shared<RealVfsFile>(*this, std::move(reference), path, perms, size);
+#ifdef __ANDROID__
+    file->parent_path = std::move(parent_path);
+#endif
     cache[path] = file;
 
     return file;
@@ -351,8 +355,17 @@ bool RealVfsFile::Resize(std::size_t new_size) {
     return reference->file ? reference->file->SetSize(new_size) : false;
 }
 
+std::string RealVfsFile::ParentPath() const {
+#ifdef __ANDROID__
+    if (!parent_path.empty()) {
+        return parent_path;
+    }
+#endif
+    return FS::GetParentPath(path);
+}
+
 VirtualDir RealVfsFile::GetContainingDirectory() const {
-    return base.OpenDirectory(FS::GetParentPath(path), perms);
+    return base.OpenDirectory(ParentPath(), perms);
 }
 
 bool RealVfsFile::IsWritable() const {
@@ -381,7 +394,7 @@ std::size_t RealVfsFile::Write(const u8* data, std::size_t length, std::size_t o
 }
 
 bool RealVfsFile::Rename(std::string_view name) {
-    return base.MoveFile(path, FS::GetParentPath(path) + '/' + std::string(name)) != nullptr;
+    return base.MoveFile(path, ParentPath() + '/' + std::string(name)) != nullptr;
 }
 
 // TODO(DarkLordZach): MSVC would not let me combine the following two functions using 'if
@@ -399,7 +412,7 @@ std::vector<VirtualFile> RealVfsDirectory::IterateEntries<RealVfsFile, VfsFile>(
         for (const auto& entry : FS::Android::ListDocumentEntries(path)) {
             if (!entry.directory) {
                 out.emplace_back(
-                    base.OpenFileFromEntry(path + '/' + entry.name, entry.size, path, perms));
+                    base.OpenFileFromEntry(path + '/' + entry.name, entry.size, perms, path));
             }
         }
         return out;

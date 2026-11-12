@@ -1656,7 +1656,7 @@ KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
     if (!front) [[unlikely]] {
         // Copy the back's state and take the macros over while it is idle.
         split.Drain();
-        front = std::make_unique<FrontState>();
+        front = std::make_shared<FrontState>();
         front->registers = native_registers;
         front->executing_macro = native_executing_macro;
         front->parameters = std::move(native_parameters);

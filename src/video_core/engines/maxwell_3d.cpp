@@ -931,7 +931,7 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         // still holds in its method sink first).
         split.Drain();
         ConsumeSink(system);
-        front = std::make_unique<FrontState>();
+        front = std::make_shared<FrontState>();
         std::memcpy(front->regs.data(), regs.reg_array.data(), sizeof(front->regs));
         std::memcpy(front->shadow.data(), shadow_state.reg_array.data(), sizeof(front->shadow));
         front->control = shadow_state.shadow_ram_control;

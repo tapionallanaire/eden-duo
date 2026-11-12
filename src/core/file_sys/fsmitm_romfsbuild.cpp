@@ -206,14 +206,14 @@ RomFSBuildContext::~RomFSBuildContext() {
 
 void RomFSBuildContext::Unlink() {
     for (auto& dir : directories) {
-        dir->parent.reset();
-        dir->child.reset();
-        dir->sibling.reset();
-        dir->file.reset();
+        dir->parent = nullptr;
+        dir->child = nullptr;
+        dir->sibling = nullptr;
+        dir->file = nullptr;
     }
     for (auto& file : files) {
-        file->parent.reset();
-        file->sibling.reset();
+        file->parent = nullptr;
+        file->sibling = nullptr;
     }
     root.reset();
 }

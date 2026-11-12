@@ -67,7 +67,7 @@ private:
 private:
     friend class RealVfsDirectory;
     VirtualFile OpenFileFromEntry(std::string_view path, std::optional<u64> size,
-                                  OpenMode perms = OpenMode::Read);
+                                  OpenMode perms = OpenMode::Read, std::string parent_path = {});
 
 private:
     void EvictSingleReferenceLocked();
@@ -102,6 +102,12 @@ private:
     std::unique_ptr<FileReference> reference;
     // Only the path: a loose RomFS keeps one of these per file (title 1: 206k).
     std::string path;
+#ifdef __ANDROID__
+    // The directory's URI for a file listed from a content URI directory: the file's path is
+    // "<directory URI>/<name>", which is not a document the parent can be asked of. Else empty.
+    std::string parent_path;
+#endif
+    std::string ParentPath() const;
     std::optional<u64> size;
     OpenMode perms;
 };
