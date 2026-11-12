@@ -6,6 +6,7 @@
 
 #include <array>
 #include <chrono>
+#include <thread>
 
 #include "audio_core/adsp/apps/audio_renderer/audio_renderer.h"
 #include "audio_core/audio_core.h"
@@ -149,6 +150,8 @@ void AudioRenderer::Main(std::stop_token stop_token) {
     // 0.12 seconds (2,304,000 / 19,200,000)
     constexpr u64 max_process_time{2'304'000ULL};
 
+    // When the next render is due on the host clock, see the pacing below.
+    auto next_render{std::chrono::steady_clock::now()};
     while (!stop_token.stop_requested()) {
         auto msg{mailbox.Receive(Direction::DSP)};
         switch (msg) {
@@ -184,7 +187,40 @@ void AudioRenderer::Main(std::stop_token stop_token) {
                 wait_index = 0; // nothing is playing yet: the first session paces, as before
             }
             if (wait_index < MaxRendererSessions) {
-                streams[wait_index]->WaitFreeSpace(stop_token);
+                auto& pace_stream{*streams[wait_index]};
+                const u32 need{pace_stream.DeviceRequestBuffers()};
+                if (need == 0) {
+                    pace_stream.WaitFreeSpace(stop_token);
+                } else {
+                    // The game's audio thread wakes on the event each render signals and feeds
+                    // one 5 ms frame per wake-up. Rendering whenever the stream had room meant
+                    // four renders back to back after every device callback (1024 frames on
+                    // Android) and then nothing for 21 ms: the wake-ups merged, the game made
+                    // about 880 updates in 5 s instead of 1000 and its sound came out in pieces
+                    // (Crash Team Racing, Retroid Pocket Flip 2, at a steady 30 FPS). Render on
+                    // a 5 ms clock instead; the queue only bounds it: at once when it runs low,
+                    // held back while a callback's worth plus a margin is already waiting.
+                    // A callback takes `need` buffers at once, so that many stay queued behind
+                    // it (25 ms on Android): with three, a 10 ms delay of this thread ran the
+                    // stream dry a few times in three minutes.
+                    const u32 low{need};
+                    const u32 high{low + need + 2};
+                    constexpr std::chrono::microseconds period{5000};
+                    auto now{std::chrono::steady_clock::now()};
+                    if (pace_stream.GetQueueSize() < low) {
+                        next_render = now;
+                    } else {
+                        if (next_render > now) {
+                            std::this_thread::sleep_until(next_render);
+                        }
+                        pace_stream.WaitBelow(high, stop_token);
+                        now = std::chrono::steady_clock::now();
+                        if (now - next_render > 4 * period) {
+                            next_render = now; // held back or late: do not replay the missed ticks
+                        }
+                    }
+                    next_render += period;
+                }
             }
 
             for (u32 index = 0; index < MaxRendererSessions; index++) {

@@ -264,6 +264,11 @@ void SinkStream::WaitFreeSpace(std::stop_token stop_token) {
     }
 }
 
+void SinkStream::WaitBelow(u32 level, std::stop_token stop_token) {
+    std::unique_lock lk{release_mutex};
+    release_cv.wait(lk, stop_token, [this, level] { return paused || queued_buffers < level; });
+}
+
 void SinkStream::SignalPause() {
     {
         std::scoped_lock lk{release_mutex};

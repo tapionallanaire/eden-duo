@@ -169,6 +169,21 @@ public:
     }
 
     /**
+     * Number of queued buffers the host device takes in one callback, rounded up; 0 until the
+     * device has asked for samples.
+     */
+    u32 DeviceRequestBuffers() const {
+        const u32 request = device_request_frames.load(std::memory_order_relaxed);
+        const u32 buffer_frames = queued_buffer_frames.load(std::memory_order_relaxed);
+        return request != 0 && buffer_frames != 0 ? (request + buffer_frames - 1) / buffer_frames : 0;
+    }
+
+    /**
+     * Wait until fewer than level buffers are queued, or the stream is paused.
+     */
+    void WaitBelow(u32 level, std::stop_token stop_token);
+
+    /**
      * Set the maximum buffer queue size.
      */
     void SetRingSize(u32 ring_size) {

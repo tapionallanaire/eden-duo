@@ -35,8 +35,10 @@ void SystemManager::InitializeUnsafe() {
             while (active && !stop_token.stop_requested()) {
                 {
                     std::scoped_lock l{mutex1};
-                    for (auto system : systems)
+                    for (auto system : systems) {
+                        system->WaitForUpdate();
                         system->SendCommandToDsp();
+                    }
                 }
                 audio_renderer.Signal();
                 audio_renderer.Wait();
