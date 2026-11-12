@@ -1012,6 +1012,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
         const auto& rt0 = maxwell3d->regs.rt[0];
         const u64 area = u64{rt0.width} * u64{rt0.height};
         if (rt0.width != 0 && area < u64{640} * 360) {
+            pipeline->BuildUrgently(urgent_workers);
             return pipeline;
         }
     }
@@ -1022,12 +1023,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     const bool side_effects{pipeline->HasSideEffects() || regs.transform_feedback_enabled != 0 ||
                             regs.rasterize_enable == 0};
     if (side_effects) {
+        pipeline->BuildUrgently(urgent_workers);
         return pipeline;
-    }
-    // If something is using depth, we can assume that games are not rendering anything which
-    // will be used one time.
-    if (regs.zeta_enable) {
-        return nullptr;
     }
     // If games are using a small index count, we can assume these are full screen quads.
     // Usually these shaders are only used once for building textures so we can assume they
@@ -1037,6 +1034,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
         pipeline->BuildUrgently(urgent_workers);
         return pipeline;
     }
+    // Upstream #4639 skips every unbuilt draw with a depth target (regs.zeta_enable) ahead of the
+    // rule above; here that rule decides first, and whatever it leaves is skipped anyway.
     return nullptr;
 }
 
