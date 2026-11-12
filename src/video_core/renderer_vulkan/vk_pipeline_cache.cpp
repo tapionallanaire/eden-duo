@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -777,10 +778,10 @@ void PipelineCache::AppendRecordingLine(const GraphicsPipelineCacheKey& key) {
     }
     // Text, one line per recorded pipeline: the stage hashes and the state's own hash. Counted by
     // the UI, and greppable when a recording looks wrong.
-    log << fmt::format("{:016x}", key.Hash());
+    log << std::format("{:016x}", key.Hash());
     for (const u64 hash : key.unique_hashes) {
         if (hash != 0) {
-            log << ' ' << fmt::format("{:016x}", hash);
+            log << ' ' << std::format("{:016x}", hash);
         }
     }
     log << '\n';
@@ -1169,9 +1170,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
             if (should_log || should_dump) {
                 static constexpr std::array stage_names{"vertex", "tess_control", "tess_eval", "geometry", "fragment"};
-                const std::string shader_name = fmt::format("shader_{:016x}_{}", unique_hashes[index], stage_names[stage_index]);
+                const std::string shader_name = std::format("shader_{:016x}_{}", unique_hashes[index], stage_names[stage_index]);
                 if (should_log) {
-                    const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
+                    const std::string shader_info = std::format("SPIR-V size: {} bytes, hash: {:016x}",
                         code.size() * sizeof(u32), unique_hashes[index]);
                     GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
                 }
@@ -1182,7 +1183,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
 
             if (device.HasDebuggingToolAttached()) {
-                const std::string name{fmt::format("Shader {:016x}", unique_hashes[index])};
+                const std::string name{std::format("Shader {:016x}", unique_hashes[index])};
                 modules[stage_index].SetObjectNameEXT(name.c_str());
             }
         }

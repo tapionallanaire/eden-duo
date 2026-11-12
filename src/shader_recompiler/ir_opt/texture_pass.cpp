@@ -351,6 +351,8 @@ OffsetLattice AnalyzeOffset(const IR::Value& value, int depth = 0) {
     default:
         return {1, 0};
     }
+}
+
 struct UniformIndex {
     u32 cbuf_index;
     u32 cbuf_offset;
@@ -1124,8 +1126,7 @@ public:
                     (IsHandleTable(desc) && IsHandleTable(existing))) &&
                    desc.size_shift == existing.size_shift &&
                    desc.live_stride == existing.live_stride &&
-                   desc.live_phase == existing.live_phase;
-                   desc.count == existing.count && desc.size_shift == existing.size_shift &&
+                   desc.live_phase == existing.live_phase &&
                    desc.has_index_cbuf == existing.has_index_cbuf &&
                    desc.index_cbuf_index == existing.index_cbuf_index &&
                    desc.index_cbuf_offset == existing.index_cbuf_offset &&
