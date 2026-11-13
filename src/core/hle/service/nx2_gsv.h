@@ -2999,9 +2999,12 @@ private:
                 LOG_INFO(Service, "{} empty codec, detected H.264 stream: using \"{}\"",
                          GetServiceName(), codec);
             }
+            const u32 configured_width = m_width;
+            const u32 configured_height = m_height;
             lk.unlock();
             if (!decoder || decoder->Name() != codec) {
-                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec);
+                decoder = std::make_unique<Tegra::Host1x::Nx2VideoDecoder>(codec, configured_width,
+                                                                           configured_height);
             }
             pictures.clear();
             decoder->Decode(input.data, input.pts, pictures);

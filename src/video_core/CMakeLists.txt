@@ -521,6 +521,11 @@ if (ANDROID AND ARCHITECTURE_arm64)
     target_link_libraries(video_core PRIVATE adrenotools)
 endif()
 
+if (ANDROID)
+    # The platform's AV1 decoder (host1x/nx2_video_decoder.cpp)
+    target_link_libraries(video_core PRIVATE mediandk)
+endif()
+
 include(dsmod/duo_video_core.cmake) # Eden Duo: second-screen presenter sources
 # NVIDIA DLSS through NVIDIA Streamline, in place of a game's DLSS (before FSR 3.1) when the
 # setting is on. Only Streamline's MIT-licensed headers are compiled in and nothing of NVIDIA's is
