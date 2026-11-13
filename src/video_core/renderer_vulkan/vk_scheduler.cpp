@@ -4,6 +4,11 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+#include <algorithm>
+#include <vector>
+#include <string>
+#include <map>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
@@ -131,14 +136,97 @@ bool Scheduler::WaitSubmitted(u64 tick) {
     return true;
 }
 
-void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore) {
+void Scheduler::GpuSection(u64 key) {
+    static const bool enabled = std::getenv("EDEN_NX2_SECTION_GPU") != nullptr;
+    if (!enabled || key == gpu_section_key) {
+        return;
+    }
+    struct Row {
+        u64 count{}, ns{}, draws{};
+    };
+    // Keyed by the section's place in its frame too: the frame's passes in order.
+    static std::map<std::pair<u64, u64>, Row> rows;
+    static u64 reported_frame{}, ordinal{}, ordinal_frame{};
+    const auto start = std::chrono::steady_clock::now();
+    Finish();
+    const u64 frame = gpu_section_frames.load(std::memory_order_relaxed);
+    if (frame != ordinal_frame) {
+        ordinal_frame = frame;
+        ordinal = 0;
+    }
+    Row& row = rows[{ordinal++, gpu_section_key}];
+    ++row.count;
+    row.ns += static_cast<u64>((std::chrono::steady_clock::now() - start).count());
+    row.draws += gpu_section_draws;
+    gpu_section_draws = 0;
+    gpu_section_key = key;
+    if (frame - reported_frame < 200) {
+        return;
+    }
+    const double frames = static_cast<double>(frame - reported_frame);
+    reported_frame = frame;
+    std::string text;
+    for (const auto& [place, value] : rows) {
+        const u64 section = place.second;
+        if (value.count < frames / 4) {
+            continue; // a place only some frames have
+        }
+        const std::string name =
+            section == 1   ? "compute"
+            : section == 0 ? "other"
+                           : std::format("{}x{}", (section >> 16) & 0xffff, section & 0xffff);
+        text += std::format("#{} {} {:.0f} draws {:.2f} ms; ", place.first, name,
+                            static_cast<double>(value.draws) / value.count,
+                            value.ns / 1e6 / value.count);
+    }
+    LOG_INFO(Render_Vulkan, "GPU time by section, per frame (sections, ms incl. ~0.24 each): {}",
+             text);
+    rows.clear();
+}
+
+void Scheduler::NoteGpuWait(std::source_location where, std::chrono::nanoseconds waited) {
+    struct Site {
+        u64 count{}, ns{};
+    };
+    static std::mutex mutex;
+    static std::map<std::pair<std::string_view, u32>, Site> sites;
+    static std::chrono::steady_clock::time_point reported = std::chrono::steady_clock::now();
+    std::scoped_lock lock{mutex};
+    Site& site = sites[{where.file_name(), where.line()}];
+    ++site.count;
+    site.ns += static_cast<u64>(waited.count());
+    const auto now = std::chrono::steady_clock::now();
+    if (now - reported < std::chrono::seconds{5}) {
+        return;
+    }
+    reported = now;
+    std::vector<std::pair<u64, std::string>> rows;
+    for (const auto& [key, value] : sites) {
+        const size_t slash = key.first.find_last_of("/\\");
+        rows.emplace_back(value.ns,
+                          std::format("{}:{} x{} {} ms",
+                                      slash == std::string_view::npos ? key.first
+                                                                      : key.first.substr(slash + 1),
+                                      key.second, value.count, value.ns / 1000000));
+    }
+    std::ranges::sort(rows, std::greater{});
+    std::string line;
+    for (size_t i = 0; i < rows.size() && i < 8; ++i) {
+        line += rows[i].second + "; ";
+    }
+    LOG_INFO(Render_Vulkan, "GPU waits by caller (last 5 s): {}", line);
+    sites.clear();
+}
+
+void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
+                       std::source_location where) {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::Finish");
     }
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitExecution(signal_semaphore, wait_semaphore);
-    Wait(presubmit_tick);
+    Wait(presubmit_tick, 0.0, true, where);
     AllocateNewContext();
 }
 
@@ -214,6 +302,8 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     state.renderpass = framebuffer->RenderPass();
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
+    // A pass that starts with a clear holds values the stored copy does not.
+    render_pass_wrote_depth_stencil = clear_value_count != 0;
 
     if (GPU::Logging::IsActive() && Settings::values.gpu_log_vulkan_calls.GetValue()) {
         const std::string render_pass_info =
@@ -327,7 +417,7 @@ void Scheduler::FlushDeferredClear() {
     EndRenderPass();
 }
 
-void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
+void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location where) {
     if (deferred_clear.framebuffer == framebuffer) {
         RealizeDeferredClear();
         return;
@@ -341,6 +431,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer) {
         return;
     }
     // Ends any active pass and realizes a deferred clear
+    end_reason = where;
     EndRenderPass();
     BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
 }
@@ -527,9 +618,35 @@ void Scheduler::EndRenderPass()
         if (!state.renderpass) {
             return;
         }
+        {
+            // Diagnostic: render pass ends by the call site that asked, every 20000 ends.
+            static std::map<std::pair<std::string_view, u32>, u32> sites;
+            static u32 total{};
+            ++sites[{end_reason.file_name(), end_reason.line()}];
+            end_reason = std::source_location{};
+            if (++total % 20000 == 0) {
+                std::vector<std::pair<u32, std::string>> rows;
+                for (const auto& [site, count] : sites) {
+                    const size_t slash = site.first.find_last_of("/\\");
+                    rows.emplace_back(count, std::format("{}:{} x{}",
+                                                         slash == std::string_view::npos
+                                                             ? site.first
+                                                             : site.first.substr(slash + 1),
+                                                         site.second, count));
+                }
+                std::ranges::sort(rows, std::greater{});
+                std::string line;
+                for (size_t i = 0; i < rows.size() && i < 10; ++i) {
+                    line += rows[i].second + "; ";
+                }
+                LOG_INFO(Render_Vulkan, "Render pass ends by caller (last 20000): {}", line);
+                sites.clear();
+            }
+        }
         ++recording_epoch;
         fragment_barrier.Reset();
         render_pass_has_stores = false;
+        render_pass_wrote_depth_stencil = false;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);
 

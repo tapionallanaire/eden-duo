@@ -216,6 +216,9 @@ public:
     /// Notify the rasterizer to send all written commands to the host GPU.
     virtual void FlushCommands() = 0;
 
+    /// Submits the recorded commands and waits for the host GPU to finish them (diagnostics).
+    virtual void FinishCommands() {}
+
     /// Notify rasterizer that a frame is about to finish
     virtual void TickFrame() = 0;
 

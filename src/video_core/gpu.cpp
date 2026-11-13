@@ -811,6 +811,10 @@ void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
     impl->InvalidateRegion(addr, size, preserve_gpu_writes);
 }
 
+bool GPU::InvalidateRegionWithoutSync(DAddr addr, u64 size) {
+    return impl->renderer->ReadRasterizer()->OnCacheInvalidationIfNotGpuModified(addr, size);
+}
+
 bool GPU::OnCPUWrite(DAddr addr, u64 size) {
     return impl->OnCPUWrite(addr, size);
 }

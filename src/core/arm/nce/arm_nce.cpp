@@ -193,8 +193,19 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     const Common::ProcessAddress addr =
         (reinterpret_cast<u64>(info->si_addr) & ~Memory::YUZU_PAGEMASK);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
+    const auto fault_start = std::chrono::steady_clock::now();
+    static std::atomic<u64> handed{}, handler_ns{}, handed_ns{};
+    const auto spent = [&] {
+        handler_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - fault_start)
+                                           .count());
+    };
     const auto result = memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE);
     if (result == Memory::NCEAccessFaultAction::Retry) {
+        ++handed;
+        handed_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - fault_start)
+                                          .count());
         return true;
     }
     if (result == Memory::NCEAccessFaultAction::Instruction) {
@@ -207,13 +218,16 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
                             .count();
         if (s64 last = reported.load(); now - last >= 5 && reported.compare_exchange_strong(last, now)) {
             LOG_INFO(Core_ARM, "NCE: {} writes to GPU-tracked pages emulated in the last 5 s, {} "
-                               "left to the page-wide path",
-                     emulated.exchange(0), refused.exchange(0));
+                               "left to the page-wide path, {} pages handed over whole; {} ms "
+                               "emulating, {} ms handing pages over",
+                     emulated.exchange(0), refused.exchange(0), handed.exchange(0),
+                     handler_ns.exchange(0) / 1000000, handed_ns.exchange(0) / 1000000);
         }
         if (const auto next_pc = MatchAndExecuteOneInstruction(
                 memory, &instruction_ctx, GetFloatingPointState(instruction_ctx))) {
             instruction_ctx.pc = *next_pc;
             ++emulated;
+            spent();
             return true;
         }
         ++refused;

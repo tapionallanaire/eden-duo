@@ -15,6 +15,7 @@
 #include <thread>
 #include <utility>
 #include <queue>
+#include <source_location>
 #include <span>
 
 #include "common/alignment.h"
@@ -53,7 +54,19 @@ public:
     u64 Flush(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {});
+    void Finish(VkSemaphore signal_semaphore = {}, VkSemaphore wait_semaphore = {},
+                std::source_location where = std::source_location::current());
+
+    /// EDEN_NX2_SECTION_GPU=1 (diagnostic): the host GPU is made to finish whenever the work
+    /// changes section (a render target size, the game's compute dispatches, the mesh
+    /// emulation's), which gives each section its GPU time. Reported every 200 frames.
+    void GpuSection(u64 key);
+    static inline std::atomic<u64> gpu_section_frames{};
+    static inline u64 gpu_section_draws{}; ///< Draws and clears since the section began
+    u64 gpu_section_key{};
+
+    /// Diagnostic: time spent waiting for the host GPU, by the call site that asked.
+    static void NoteGpuWait(std::source_location where, std::chrono::nanoseconds waited);
 
     /// On the split GPU thread, a fence or a command list copy submits only if the last
     /// submission is older than a window (EDEN_NX2_FENCE_FLUSH_US, default 500 us, 0 submits at
@@ -93,7 +106,8 @@ public:
     void DispatchWork();
 
     /// Requests to begin a renderpass.
-    void RequestRenderpass(const Framebuffer* framebuffer);
+    void RequestRenderpass(const Framebuffer* framebuffer,
+                           std::source_location where = std::source_location::current());
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
     bool DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot, const VkClearValue& value);
@@ -106,12 +120,16 @@ public:
 
     /// Requests the current execution context to be able to execute operations only allowed outside
     /// of a renderpass.
-    void RequestOutsideRenderPassOperationContext() {
+    void RequestOutsideRenderPassOperationContext(
+        std::source_location where = std::source_location::current()) {
         if (!state.renderpass && deferred_clear.framebuffer == nullptr) {
             return;
         }
+        end_reason = where;
         EndRenderPass();
     }
+    /// Diagnostic: who asked for the render pass to end (logged per call site by EndRenderPass).
+    std::source_location end_reason{};
 
     void DeferFragmentBarrier() {
         fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
@@ -119,6 +137,17 @@ public:
 
     bool HasFragmentBarrier() const {
         return fragment_barrier.Pending();
+    }
+
+    /// Depth or stencil may have been written since the current render pass began (a draw with
+    /// depth or stencil writes, a clear). Until then a draw that samples the depth target reads
+    /// what the previous pass stored, and the pass need not end for it.
+    void NoteDepthStencilWrites() {
+        render_pass_wrote_depth_stencil = true;
+    }
+
+    bool RenderPassWroteDepthStencil() const {
+        return render_pass_wrote_depth_stencil;
     }
 
     void NoteRenderPassStores() {
@@ -261,12 +290,15 @@ public:
     /// into the current chunk while that thread does (corrupt command buffers, crashes). They
     /// wait for the recording thread to submit the tick instead, and give up after 20 ms (it may
     /// be waiting for them).
-    void Wait(u64 tick, double target_fps = 0.0, bool may_flush = true) {
+    void Wait(u64 tick, double target_fps = 0.0, bool may_flush = true,
+              std::source_location where = std::source_location::current()) {
         if (tick > 0 && (may_flush || WaitForSubmission(tick))) {
             if (tick >= master_semaphore->CurrentTick()) {
                 Flush();
             }
+            const auto wait_start = std::chrono::steady_clock::now();
             master_semaphore->Wait(tick);
+            NoteGpuWait(where, std::chrono::steady_clock::now() - wait_start);
         }
         if (Settings::values.use_speed_limit.GetValue() && target_fps > 0.0) {
             auto now = std::chrono::steady_clock::now();
@@ -437,6 +469,7 @@ private:
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
     bool render_pass_has_stores{};
+    bool render_pass_wrote_depth_stencil{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;

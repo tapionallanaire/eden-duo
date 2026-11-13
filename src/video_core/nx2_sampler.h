@@ -7,9 +7,11 @@
 
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include <array>
@@ -60,10 +62,54 @@ private:
         return instance;
     }
 
-    static void Handler(int, siginfo_t*, void*) {
+    static void Handler(int, siginfo_t*, [[maybe_unused]] void* raw_context) {
         Sampler& self = Get();
         const s32 who = self.who_of_tid.load(std::memory_order_relaxed);
         (void)who;
+#if defined(__ANDROID__) && defined(__aarch64__)
+        // Unwinding from here crashed inside the GPU driver's frames (libunwind's DWARF step):
+        // the interrupted instruction and its return address only.
+        {
+            const auto& context = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+            const size_t slot = self.head.fetch_add(1, std::memory_order_relaxed) % RingSize;
+            Sample& sample = self.ring[slot];
+            sample.depth = 2;
+            sample.pc[0] = reinterpret_cast<void*>(context.pc);
+            sample.pc[1] = reinterpret_cast<void*>(context.regs[30]);
+            // The callers above, along the frame pointers (kept on arm64), inside this thread's
+            // stack only.
+            static thread_local uintptr_t stack_low{};
+            static thread_local uintptr_t stack_high{};
+            if (stack_high == 0) {
+                pthread_attr_t attributes;
+                if (pthread_getattr_np(pthread_self(), &attributes) == 0) {
+                    void* base{};
+                    size_t size{};
+                    pthread_attr_getstack(&attributes, &base, &size);
+                    stack_low = reinterpret_cast<uintptr_t>(base);
+                    stack_high = stack_low + size;
+                    pthread_attr_destroy(&attributes);
+                }
+            }
+            uintptr_t frame = context.regs[29];
+            const uintptr_t stack_pointer = context.sp;
+            while (sample.depth < Depth && frame >= stack_pointer && frame >= stack_low &&
+                   frame + 16 <= stack_high && (frame & 15) == 0) {
+                const uintptr_t next = reinterpret_cast<const uintptr_t*>(frame)[0];
+                const uintptr_t caller = reinterpret_cast<const uintptr_t*>(frame)[1];
+                if (caller == 0) {
+                    break;
+                }
+                sample.pc[sample.depth++] = reinterpret_cast<void*>(caller);
+                if (next <= frame) {
+                    break;
+                }
+                frame = next;
+            }
+            sample.who = static_cast<s32>(syscall(SYS_gettid));
+            return;
+        }
+#endif
         void* frames[Depth + 2];
         const int n = backtrace(frames, Depth + 2);
         const size_t slot = self.head.fetch_add(1, std::memory_order_relaxed) % RingSize;
@@ -76,8 +122,10 @@ private:
     }
 
     void Start() {
+#if !(defined(__ANDROID__) && defined(__aarch64__))
         void* warm[4];
         backtrace(warm, 4); // Loads libgcc outside a signal handler
+#endif
         struct sigaction action{};
         action.sa_sigaction = &Handler;
         action.sa_flags = SA_SIGINFO | SA_RESTART;
@@ -98,6 +146,7 @@ private:
         const char* module = slash != nullptr ? slash + 1 : (info.dli_fname != nullptr ? info.dli_fname : "?");
         char text[160];
         if (info.dli_sname != nullptr && std::strstr(module, "eden") == nullptr &&
+            std::strstr(module, "yuzu") == nullptr &&
             std::strstr(module, "eglantine") == nullptr) {
             std::snprintf(text, sizeof(text), "%s:%s", module, info.dli_sname);
         } else {

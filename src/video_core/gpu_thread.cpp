@@ -8,6 +8,9 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
+#include <format>
+#include <string>
 #include <thread>
 #if defined(ARCHITECTURE_x86_64)
 #include <immintrin.h>
@@ -162,6 +165,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto& split = VideoCommon::GpuSplit::Get();
         const bool pending_wake = Tegra::Nx2PendingWake::On();
         PendingWakeStats pending_wake_stats;
+        size_t list_gpu_index = 0; ///< EDEN_NX2_LIST_GPU: lists since the present
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
@@ -286,7 +290,46 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 Profile::Scope scope{Profile::Zone::Push};
                 VideoCommon::Nx2Hazard::SetListEpoch(submit_list->epoch);
                 const u64 timeline_seq = submit_list->timeline_seq;
-                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                // EDEN_NX2_LIST_GPU=1 (diagnostic, single GPU thread): the host GPU is made to
+                // finish after every command list, which gives each list of a frame its own CPU
+                // and GPU time. Lists are numbered from the present's in-order command.
+                static const bool list_gpu = std::getenv("EDEN_NX2_LIST_GPU") != nullptr;
+                if (list_gpu) {
+                    using Clock = std::chrono::steady_clock;
+                    struct Row {
+                        u64 count{}, entries{}, cpu_ns{}, gpu_ns{};
+                    };
+                    static std::array<Row, 40> rows{};
+                    static u64 frames{};
+                    if (list_gpu_index == 0 && ++frames % 200 == 0) {
+                        std::string text;
+                        for (size_t i = 0; i < rows.size(); ++i) {
+                            const Row& row = rows[i];
+                            if (row.count < 20) {
+                                continue;
+                            }
+                            text += std::format("#{} x{} {} entries cpu {:.2f} gpu {:.2f}; ", i,
+                                                row.count, row.entries / row.count,
+                                                row.cpu_ns / 1e6 / row.count,
+                                                row.gpu_ns / 1e6 / row.count);
+                        }
+                        LOG_INFO(HW_GPU, "Command lists of a frame (200 frames, ms each): {}", text);
+                        rows = {};
+                    }
+                    Row& row = rows[(std::min)(list_gpu_index++, rows.size() - 1)];
+                    ++row.count;
+                    row.entries += submit_list->entries.command_lists.size();
+                    const auto start = Clock::now();
+                    scheduler.Push(system.GPU(), submit_list->channel,
+                                   std::move(submit_list->entries));
+                    const auto pushed = Clock::now();
+                    renderer.ReadRasterizer()->FinishCommands();
+                    row.cpu_ns += static_cast<u64>((pushed - start).count());
+                    row.gpu_ns += static_cast<u64>((Clock::now() - pushed).count());
+                } else {
+                    scheduler.Push(system.GPU(), submit_list->channel,
+                                   std::move(submit_list->entries));
+                }
                 VideoCommon::Nx2Timeline::OnFront(timeline_seq);
                 VideoCommon::Nx2Timeline::OnBack(timeline_seq);
             } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
@@ -294,6 +337,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 system.GPU().TickWork();
             } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                 Profile::Scope scope{Profile::Zone::Run};
+                list_gpu_index = 0;
                 run->func();
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                 Profile::Scope scope{Profile::Zone::FlushInvalidate};

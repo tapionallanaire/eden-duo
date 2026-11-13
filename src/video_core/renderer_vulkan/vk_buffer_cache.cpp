@@ -493,7 +493,9 @@ void BufferCacheRuntime::WaitSubmittedTick(u64 tick) {
         scheduler.Wait(tick);
         return;
     }
+    const auto gpu_wait_start = std::chrono::steady_clock::now();
     master.Wait(tick);
+    Scheduler::NoteGpuWait(std::source_location::current(), std::chrono::steady_clock::now() - gpu_wait_start);
 }
 
 void BufferCacheRuntime::Finish() {

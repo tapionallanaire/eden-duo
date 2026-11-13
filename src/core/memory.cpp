@@ -967,6 +967,9 @@ struct Memory::Impl {
                     return;
                 }
             }
+            if (Core::g_nx2_barrier.load(std::memory_order_relaxed)) [[unlikely]] {
+                Core::Nx2WaitGpuThreadDone();
+            }
             VideoCommon::Nx2Hazard::NoteGuestWrite(address, size);
             gpu_dirty_managers[core].Collect(address, size);
         });
@@ -983,7 +986,14 @@ struct Memory::Impl {
         // so the page-wide path below downloaded and waited for the GPU thread at nearly every
         // first write to a page: 700-1000 waits a second, 4-5 s of every 5 s on an Odin 2. An
         // exact range is patched into the buffer with no wait (BufferCache::WriteMemory).
-        if (!whole_page && Settings::CurrentProgramIsSwitch2()) {
+        // A page with no GPU-written bytes on it needs none of that: it is handed to the CPU whole,
+        // without a wait, and its further writes run natively (EDEN_NX2_NCE_HAND_PAGES=0: off).
+        const bool exact_only = !whole_page && Settings::CurrentProgramIsSwitch2();
+        static const bool hand_pages = [] {
+            const char* value = std::getenv("EDEN_NX2_NCE_HAND_PAGES");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (exact_only && !hand_pages) {
             return false;
         }
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
@@ -1006,6 +1016,14 @@ struct Memory::Impl {
         // to the page as upstream #4604 does; the download path is the one measured in Pokemon
         // Scarlet and FINAL FANTASY RESONANCE. Never asks for NCEAccessFaultAction::Instruction.
         auto& gpu = system.GPU();
+        if (exact_only) {
+            bool any = false, handed = true;
+            gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
+                any = true;
+                handed = handed && gpu.InvalidateRegionWithoutSync(address, size);
+            });
+            return any && handed;
+        }
         gpu_device_memory->ApplyOpOnPointer(
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
         return true;

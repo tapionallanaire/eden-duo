@@ -971,6 +971,10 @@ void DiagRecordDraw(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& 
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, bool is_indirect, Func&& draw_func) {
+    // Before anything of this draw is set up: the timer submits and waits.
+    scheduler.GpuSection((u64{1} << 40) | (u64{maxwell3d->regs.surface_clip.width} << 16) |
+                         maxwell3d->regs.surface_clip.height);
+    ++Scheduler::gpu_section_draws;
 
     SCOPE_EXIT {
         gpu.TickWork();
@@ -1847,6 +1851,8 @@ void RasterizerVulkan::DrawTexture() {
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
+    scheduler.GpuSection((u64{1} << 40) | (u64{maxwell3d->regs.surface_clip.width} << 16) |
+                         maxwell3d->regs.surface_clip.height);
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
         const auto& regs = maxwell3d->regs;
@@ -1959,6 +1965,9 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                                  (!use_color || color_full_channels) && ds_deferrable;
     if (!can_defer_clear) {
         scheduler.RequestRenderpass(framebuffer);
+        if (use_depth || use_stencil) {
+            scheduler.NoteDepthStencilWrites();
+        }
     }
 
     query_cache.NotifySegment(true);
@@ -2061,6 +2070,7 @@ bool SyncFixEnabled() {
 } // namespace
 
 void RasterizerVulkan::DispatchCompute() {
+    scheduler.GpuSection(1);
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     FlushWork();
     gpu_memory->FlushCaching();
@@ -2581,14 +2591,37 @@ bool RasterizerVulkan::OnCacheInvalidationIfNotGpuModified(DAddr addr, u64 size)
     {
         // The GPU thread records GPU writes under these same locks, so none can land between the
         // check and the invalidation and be dropped without a download.
+        // Diagnostic: where a hand-over's time goes, every 5 s.
+        using Clock = std::chrono::steady_clock;
+        static std::atomic<u64> stat_count{}, stat_lock_ns{}, stat_held_ns{}, stat_refused{};
+        static std::atomic<s64> stat_reported{};
+        const auto lock_start = Clock::now();
         guest_cache_waiters.fetch_add(1, std::memory_order_acq_rel);
         LockCachesFromGuest(texture_cache.mutex, buffer_cache.mutex);
         std::scoped_lock lock{std::adopt_lock, texture_cache.mutex, buffer_cache.mutex};
         guest_cache_waiters.fetch_sub(1, std::memory_order_acq_rel);
+        const auto locked = Clock::now();
+        stat_lock_ns += static_cast<u64>((locked - lock_start).count());
+        ++stat_count;
+        SCOPE_EXIT {
+            const auto done = Clock::now();
+            stat_held_ns += static_cast<u64>((done - locked).count());
+            const s64 now = std::chrono::duration_cast<std::chrono::seconds>(done.time_since_epoch())
+                                .count();
+            if (s64 last = stat_reported.load();
+                now - last >= 5 && stat_reported.compare_exchange_strong(last, now)) {
+                LOG_INFO(Render_Vulkan,
+                         "Page hand-overs (last 5 s): {} asked, {} refused (GPU data on the page), "
+                         "{} ms waiting for the cache locks, {} ms holding them",
+                         stat_count.exchange(0), stat_refused.exchange(0),
+                         stat_lock_ns.exchange(0) / 1000000, stat_held_ns.exchange(0) / 1000000);
+            }
+        };
         // A GPU-written image in the page is downloaded first, like buffer data: handing the page
         // to the CPU would otherwise re-upload the image from guest memory without the GPU's part.
         if (buffer_cache.IsRegionGpuModified(addr, size) ||
             texture_cache.HasUnsavedGpuWrites(addr, size)) {
+            ++stat_refused;
             return false;
         }
         if (Settings::CurrentProgramIsSwitch2()) {
@@ -2729,6 +2762,11 @@ void RasterizerVulkan::TiledCacheBarrier() {
     // TODO: Implementing tiled barriers requires rewriting a good chunk of the Vulkan backend
 }
 
+void RasterizerVulkan::FinishCommands() {
+    draw_counter = 0;
+    scheduler.Finish();
+}
+
 void RasterizerVulkan::FlushCommands() {
     if (draw_counter == 0) {
         return;
@@ -2753,6 +2791,7 @@ void RasterizerVulkan::RecoverMemory() {
 
 void RasterizerVulkan::TickFrame() {
     draw_counter = 0;
+    Scheduler::gpu_section_frames.fetch_add(1, std::memory_order_relaxed);
 #ifdef __ANDROID__
     // Diagnostic (EDEN_GPU_MEMORY_MAP=1 in env.txt): the map of GPU memory, rewritten every 300
     // frames of a Switch 2 title.

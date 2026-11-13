@@ -1350,6 +1350,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
+    if (const auto& draw_regs = maxwell3d->regs;
+        (draw_regs.depth_test_enable != 0 && draw_regs.depth_write_enabled != 0) ||
+        draw_regs.stencil_enable != 0) {
+        scheduler.NoteDepthStencilWrites();
+    }
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built. PipelineCache already asked for it with
         // BuildUrgently, so it is not also built here on the scheduler thread.

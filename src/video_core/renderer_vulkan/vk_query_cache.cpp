@@ -108,9 +108,11 @@ public:
                    std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::microseconds{200});
             }
+            const auto gpu_wait_start = std::chrono::steady_clock::now();
             if (last_used_tick < semaphore.CurrentTick()) {
                 semaphore.Wait(last_used_tick);
             }
+            Scheduler::NoteGpuWait(std::source_location::current(), std::chrono::steady_clock::now() - gpu_wait_start);
             query_result = read(0);
         }
         if (query_result == VK_NOT_READY) {

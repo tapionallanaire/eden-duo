@@ -27,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/tools/renderdoc.h"
+#include "common/fs/path_util.h"
 #include "common/alignment.h"
 #include "common/div_ceil.h"
 #include "common/game_presets.h"
@@ -1802,6 +1804,18 @@ private:
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
+        // Diagnostic: <log directory>/capture.rdc makes RenderDoc (when attached, with
+        // renderdoc_hotkey on) capture the next two presents. Looked for twice a second.
+        if ((m_presents % 30) == 0 && Settings::values.enable_renderdoc_hotkey.GetValue()) {
+            std::error_code ec;
+            const auto trigger =
+                Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "capture.rdc";
+            if (std::filesystem::exists(trigger, ec)) {
+                std::filesystem::remove(trigger, ec);
+                system.GetRenderdocAPI().TriggerCapture(2);
+                LOG_INFO(Service, "nx2:vi2 present #{}: RenderDoc capture requested", m_presents);
+            }
+        }
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -1867,13 +1881,36 @@ private:
                 return value != nullptr && value[0] == '0';
             }();
             const bool ocarina_back_wait = app_program_id == OcarinaOfTimeProgramId && !back_wait_off;
-            if (ocarina_back_wait ||
+            // EDEN_NX2_BARRIER=1 (experiment): no wait for this frame here. The GPU thread notes
+            // when it has run it, and only the guest's writes into GPU-written buffers wait for
+            // that (Core::Nx2WaitGpuThreadDone), so the rest of the next frame's work overlaps.
+            static const bool barrier = [] {
+                const char* value = std::getenv("EDEN_NX2_BARRIER");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (ocarina_back_wait && barrier) {
+                Core::g_nx2_barrier.store(true, std::memory_order_relaxed);
+                system.GPU().RunInOrder(
+                    [present = Core::g_nx2_present_count.load(std::memory_order_relaxed)] {
+                        Core::Nx2NoteGpuThreadDone(present);
+                    });
+                WaitForFrame(m_previous_fence_id, m_previous_fence_value);
+            } else if (ocarina_back_wait ||
                 VideoCommon::Nx2Knob::Live(back_wait_start, VideoCommon::Nx2Knob::BackWait)) {
                 // The GPU back thread has read the guest memory this frame's commands use and
                 // recorded them (what the guest must not overwrite yet), but the GPU may still be
                 // running them: wait for the frame before that, so it runs at most one behind.
+                const auto back_start = std::chrono::steady_clock::now();
                 WaitForBackThread();
+                const auto back_done = std::chrono::steady_clock::now();
                 WaitForFrame(m_previous_fence_id, m_previous_fence_value);
+                m_stats.back_wait_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                            back_done - back_start)
+                                            .count();
+                m_stats.previous_wait_us +=
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - back_done)
+                        .count();
             } else {
                 WaitForFrame(~w[22], w[24]);
             }
@@ -1951,6 +1988,14 @@ private:
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
                          m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.release_backstops);
+                LOG_INFO(Service,
+                         "nx2:vi2 present wait: {} us for the GPU back thread, {} us for the "
+                         "previous frame's fence; write barrier: {} waits, {} us a frame, {} "
+                         "timed out",
+                         m_stats.back_wait_us / 600, m_stats.previous_wait_us / 600,
+                         Core::g_nx2_barrier_stats.waits.exchange(0),
+                         Core::g_nx2_barrier_stats.wait_ns.exchange(0) / 600 / 1000,
+                         Core::g_nx2_barrier_stats.timeouts.exchange(0));
                 VideoCommon::Nx2Hazard::LogSummary();
                 m_stats = {.last_present = entered};
             }
@@ -2062,6 +2107,7 @@ private:
     u32 m_wait_timeouts{};
     struct PresentStats {
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
+        long long back_wait_us{}, previous_wait_us{}; ///< The two parts of the back-thread wait
         long long max_frame_us{}, hitches{};
         u32 presents{}, ran_ahead{};
         u32 release_backstops{}; ///< Presents ReleaseBackstop held for an old release fence

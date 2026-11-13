@@ -1462,6 +1462,14 @@ void TextureCacheRuntime::EraseResolveShadow(VkImage msaa_image) {
 }
 
 void TextureCacheRuntime::BarrierFeedbackLoop() {
+    // The draw samples the depth target through another view. Ending the pass makes what the pass
+    // wrote readable; when it has written no depth or stencil since it began there is nothing to
+    // make readable, and ending it anyway cost a store and reload of every attachment on tilers.
+    // Ocarina of Time (Switch 2): 390 of the 484 render passes of a frame were this, one per draw
+    // of a run of 366 draws on one framebuffer (RenderDoc capture, Kokiri Forest).
+    if (!scheduler.RenderPassWroteDepthStencil()) {
+        return;
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
 }
 

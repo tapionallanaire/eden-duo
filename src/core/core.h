@@ -130,6 +130,20 @@ namespace Core {
 /// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
 extern std::atomic<u64> g_nx2_present_count;
 
+/// Write barrier for a present that returns before the GPU thread has run its frame (nx2_gsv.h,
+/// EDEN_NX2_BARRIER=1). The game may prepare its next frame meanwhile, but its writes into
+/// buffers the GPU also writes (draw arguments its compute dispatches fill in) must not reach
+/// the caches before the previous frame's dispatches ran: such a write waits for the GPU thread.
+extern std::atomic<bool> g_nx2_barrier;
+struct Nx2BarrierStats {
+    std::atomic<u64> waits{}, wait_ns{}, timeouts{};
+};
+extern Nx2BarrierStats g_nx2_barrier_stats;
+/// GPU thread: every command list submitted before present number `present` has run.
+void Nx2NoteGpuThreadDone(u64 present);
+/// Guest threads: waits (bounded) until the GPU thread has run the lists of every present made.
+void Nx2WaitGpuThreadDone();
+
 class CpuManager;
 class Debugger;
 class DeviceMemory;

@@ -4,6 +4,9 @@
 #include <array>
 #include <cstdlib>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -88,6 +91,42 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
+std::atomic<bool> g_nx2_barrier{};
+Nx2BarrierStats g_nx2_barrier_stats;
+
+namespace {
+std::mutex nx2_barrier_mutex;
+std::condition_variable nx2_barrier_cv;
+std::atomic<u64> nx2_gpu_thread_done{};
+} // namespace
+
+void Nx2NoteGpuThreadDone(u64 present) {
+    {
+        std::scoped_lock lock{nx2_barrier_mutex};
+        nx2_gpu_thread_done.store(present, std::memory_order_release);
+    }
+    nx2_barrier_cv.notify_all();
+}
+
+void Nx2WaitGpuThreadDone() {
+    const u64 want = g_nx2_present_count.load(std::memory_order_acquire);
+    if (nx2_gpu_thread_done.load(std::memory_order_acquire) >= want) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock lock{nx2_barrier_mutex};
+    // Bounded: the GPU thread may itself be waiting for this thread (a semaphore it releases).
+    const bool done = nx2_barrier_cv.wait_for(lock, std::chrono::milliseconds{100}, [want] {
+        return nx2_gpu_thread_done.load(std::memory_order_acquire) >= want;
+    });
+    g_nx2_barrier_stats.waits.fetch_add(1, std::memory_order_relaxed);
+    g_nx2_barrier_stats.timeouts.fetch_add(done ? 0 : 1, std::memory_order_relaxed);
+    g_nx2_barrier_stats.wait_ns.fetch_add(
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count()),
+        std::memory_order_relaxed);
+}
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {

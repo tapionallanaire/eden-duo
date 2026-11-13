@@ -46,7 +46,9 @@ void InnerFence::Wait() {
     // has stopped, nothing else uses the scheduler and Wait below submits it.
     if (!scheduler.IsSubmitted(wait_tick) && VideoCommon::GpuSplit::Get().Active() &&
         !VideoCommon::GpuSplit::OnBackThread() && scheduler.WaitSubmitted(wait_tick)) {
+        const auto gpu_wait_start = std::chrono::steady_clock::now();
         scheduler.GetMasterSemaphore().Wait(wait_tick);
+        Scheduler::NoteGpuWait(std::source_location::current(), std::chrono::steady_clock::now() - gpu_wait_start);
         return;
     }
     scheduler.Wait(wait_tick);
