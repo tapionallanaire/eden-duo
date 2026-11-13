@@ -59,6 +59,8 @@ enum class TitleID : std::uint64_t {
     HogwartsLegacy = 0x0100F7E00C70E000ULL,
     /// The launcher; its games are programs 1 to 3 of the same application.
     KingdomHearts1525 = 0x010090C022978000ULL,
+    /// Switch 2 title.
+    OcarinaOfTimeNx2 = 0x0400486024DEC000ULL,
 };
 
 struct EnvironmentInfo {

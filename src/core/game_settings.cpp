@@ -264,6 +264,15 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
             // (OptimalDriver), which owns driver_path.
             return true;
+        case TitleID::OcarinaOfTimeNx2:
+            // Eglantine's desktop preset for this title (Settings::SetOcarinaOfTimeRecommended-
+            // Settings), which only its Qt frontend applies. Not measured on Android yet.
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Docked);
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+            LOG_INFO(Core, "Title defaults: docked, async shaders, reactive flushing, FifoRelaxed");
+            return true;
         default:
             return false;
     }
