@@ -4643,13 +4643,16 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     UseRenderPass(runtime, renderpass_key);
     render_area.width = (std::min)(render_area.width, width);
     render_area.height = (std::min)(render_area.height, height);
-    const FramebufferSize size = ClampFramebufferSize(
-        {render_area.width, render_area.height,
-         static_cast<u32>((std::max)(num_layers, 1))},
-        {runtime.device.GetMaxFramebufferWidth(), runtime.device.GetMaxFramebufferHeight(),
-         runtime.device.GetMaxFramebufferLayers()});
-    render_area = VkExtent2D{.width = size.width, .height = size.height};
-    num_layers = static_cast<s32>(size.layers);
+    // Switch 2 titles only: a Switch 1 title's framebuffers are created as before.
+    if (Settings::CurrentProgramIsSwitch2()) {
+        const FramebufferSize size = ClampFramebufferSize(
+            {render_area.width, render_area.height,
+             static_cast<u32>((std::max)(num_layers, 1))},
+            {runtime.device.GetMaxFramebufferWidth(), runtime.device.GetMaxFramebufferHeight(),
+             runtime.device.GetMaxFramebufferLayers()});
+        render_area = VkExtent2D{.width = size.width, .height = size.height};
+        num_layers = static_cast<s32>(size.layers);
+    }
 
     if (do_resolve_color) {
         const u32 layers = static_cast<u32>((std::max)(num_layers, 1));

@@ -15,6 +15,7 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/settings.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -94,7 +95,8 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = stream_buffer_size + STREAM_BUFFER_TAIL,
+        .size = stream_buffer_size +
+                (Settings::CurrentProgramIsSwitch2() ? STREAM_BUFFER_TAIL : VkDeviceSize{0}),
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
