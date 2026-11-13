@@ -967,11 +967,11 @@ struct Memory::Impl {
                     return;
                 }
             }
-            if (Core::g_nx2_barrier.load(std::memory_order_relaxed)) [[unlikely]] {
-                Core::Nx2WaitGpuThreadDone();
-            }
             VideoCommon::Nx2Hazard::NoteGuestWrite(address, size);
-            gpu_dirty_managers[core].Collect(address, size);
+            const size_t set = Core::g_nx2_collect_set.load(std::memory_order_relaxed) != 0
+                                   ? Core::Hardware::NUM_CPU_CORES
+                                   : 0;
+            gpu_dirty_managers[set + core].Collect(address, size);
         });
     }
 

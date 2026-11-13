@@ -92,6 +92,7 @@ namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
 std::atomic<bool> g_nx2_barrier{};
+std::atomic<u32> g_nx2_collect_set{};
 Nx2BarrierStats g_nx2_barrier_stats;
 
 namespace {
@@ -108,15 +109,24 @@ void Nx2NoteGpuThreadDone(u64 present) {
     nx2_barrier_cv.notify_all();
 }
 
-void Nx2WaitGpuThreadDone() {
-    const u64 want = g_nx2_present_count.load(std::memory_order_acquire);
+u64 Nx2GpuThreadDone() {
+    return nx2_gpu_thread_done.load(std::memory_order_acquire);
+}
+
+void Nx2BarrierReset() {
+    g_nx2_barrier.store(false, std::memory_order_relaxed);
+    g_nx2_collect_set.store(0, std::memory_order_relaxed);
+    nx2_gpu_thread_done.store(0, std::memory_order_release);
+}
+
+void Nx2WaitGpuThreadDone(u64 want) {
     if (nx2_gpu_thread_done.load(std::memory_order_acquire) >= want) {
         return;
     }
     const auto start = std::chrono::steady_clock::now();
     std::unique_lock lock{nx2_barrier_mutex};
     // Bounded: the GPU thread may itself be waiting for this thread (a semaphore it releases).
-    const bool done = nx2_barrier_cv.wait_for(lock, std::chrono::milliseconds{100}, [want] {
+    const bool done = nx2_barrier_cv.wait_for(lock, std::chrono::milliseconds{2000}, [want] {
         return nx2_gpu_thread_done.load(std::memory_order_acquire) >= want;
     });
     g_nx2_barrier_stats.waits.fetch_add(1, std::memory_order_relaxed);
@@ -827,7 +837,9 @@ struct System::Impl {
     std::optional<Tools::RenderdocAPI> renderdoc_api;
     std::optional<Tegra::GPU> gpu_core;
 
-    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES> gpu_dirty_memory_managers;
+    // Two sets (Core::g_nx2_collect_set): [0, NUM_CPU_CORES) and [NUM_CPU_CORES, 2 * NUM_CPU_CORES).
+    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES * 2>
+        gpu_dirty_memory_managers;
     std::vector<std::vector<u8>> user_channel;
     std::vector<std::vector<u8>> general_channel;
 
@@ -966,8 +978,17 @@ std::span<GPUDirtyMemoryManager> System::GetGPUDirtyMemoryManager() {
 }
 
 void System::GatherGPUDirtyMemory(std::function<void(PAddr, size_t)>& callback) {
-    for (auto& manager : impl->gpu_dirty_memory_managers) {
-        manager.Gather(callback);
+    if (!g_nx2_barrier.load(std::memory_order_relaxed)) {
+        for (auto& manager : impl->gpu_dirty_memory_managers) {
+            manager.Gather(callback);
+        }
+        return;
+    }
+    // Only the writes made for the frame the GPU thread is running: those after the last
+    // present it has finished, and before the next one.
+    const size_t first = (Nx2GpuThreadDone() & 1) != 0 ? Core::Hardware::NUM_CPU_CORES : 0;
+    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; ++i) {
+        impl->gpu_dirty_memory_managers[first + i].Gather(callback);
     }
 }
 

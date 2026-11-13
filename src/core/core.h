@@ -131,18 +131,25 @@ namespace Core {
 extern std::atomic<u64> g_nx2_present_count;
 
 /// Write barrier for a present that returns before the GPU thread has run its frame (nx2_gsv.h,
-/// EDEN_NX2_BARRIER=1). The game may prepare its next frame meanwhile, but its writes into
-/// buffers the GPU also writes (draw arguments its compute dispatches fill in) must not reach
-/// the caches before the previous frame's dispatches ran: such a write waits for the GPU thread.
+/// EDEN_NX2_BARRIER). The game prepares its next frame meanwhile, but its writes into buffers the
+/// GPU also writes (draw arguments its compute dispatches fill in) must not reach the caches
+/// before the previous frame's dispatches ran. Those writes are collected in two sets
+/// (GPUDirtyMemoryManager, one per frame parity): the guest collects into g_nx2_collect_set,
+/// which the present flips, and the GPU thread gathers only the set of the frame it is running.
 extern std::atomic<bool> g_nx2_barrier;
+extern std::atomic<u32> g_nx2_collect_set;
 struct Nx2BarrierStats {
     std::atomic<u64> waits{}, wait_ns{}, timeouts{};
 };
 extern Nx2BarrierStats g_nx2_barrier_stats;
 /// GPU thread: every command list submitted before present number `present` has run.
 void Nx2NoteGpuThreadDone(u64 present);
-/// Guest threads: waits (bounded) until the GPU thread has run the lists of every present made.
-void Nx2WaitGpuThreadDone();
+/// The last present the GPU thread has finished (Nx2NoteGpuThreadDone).
+[[nodiscard]] u64 Nx2GpuThreadDone();
+/// Guest threads: waits (bounded) until the GPU thread has run the lists of present `present`.
+void Nx2WaitGpuThreadDone(u64 present);
+/// A new emulation session starts.
+void Nx2BarrierReset();
 
 class CpuManager;
 class Debugger;

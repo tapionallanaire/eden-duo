@@ -1881,12 +1881,17 @@ private:
                 return value != nullptr && value[0] == '0';
             }();
             const bool ocarina_back_wait = app_program_id == OcarinaOfTimeProgramId && !back_wait_off;
-            // Write barrier: no wait for this frame here. The GPU thread notes when it has run
-            // it, and only the guest's writes into GPU-written buffers wait for that
-            // (Core::Nx2WaitGpuThreadDone), so the rest of the next frame's work overlaps.
-            // Desktop, Kokiri Forest, five 40 s recordings: no one-frame blink, 28-30 ms a frame
-            // against 31-32 ms with the back-thread wait below. On where it was measured (x86-64);
-            // EDEN_NX2_BARRIER=1/0 turns it on elsewhere or off.
+            // Write barrier: no wait for this frame here, the game prepares the next one while
+            // the GPU thread runs this one. What made that blink (the haze layer missing for a
+            // frame) is the game's handful of writes a frame into buffers its compute dispatches
+            // also write: they reached the caches before the previous frame's dispatches had run.
+            // They are held back instead (Core::g_nx2_collect_set): collected per frame, and the
+            // GPU thread gathers a frame's set only once it has finished the frame before.
+            // Desktop, Kokiri Forest, 40 s recordings: 20-25 ms a frame and no brightness jump in
+            // a still scene (two recordings) or one-frame blink while moving (three), against
+            // 31-32 ms with the back-thread wait below; a frame ahead without this, 98 jumps in
+            // the still scene. On where it was measured (x86-64); EDEN_NX2_BARRIER=1/0 turns it
+            // on elsewhere or off.
             static const bool barrier = [] {
                 const char* value = std::getenv("EDEN_NX2_BARRIER");
 #ifdef ARCHITECTURE_x86_64
@@ -1896,11 +1901,18 @@ private:
 #endif
             }();
             if (ocarina_back_wait && barrier) {
+                const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
                 Core::g_nx2_barrier.store(true, std::memory_order_relaxed);
-                system.GPU().RunInOrder(
-                    [present = Core::g_nx2_present_count.load(std::memory_order_relaxed)] {
-                        Core::Nx2NoteGpuThreadDone(present);
-                    });
+                // After this frame's lists: what the guest wrote for it and nothing gathered yet,
+                // then the next frame's writes may follow.
+                system.GPU().RunInOrder([&gpu = system.GPU(), present] {
+                    gpu.InvalidateGPUCache();
+                    Core::Nx2NoteGpuThreadDone(present);
+                });
+                Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
+                                              std::memory_order_relaxed);
+                // At most one frame ahead: the two sets hold this frame's writes and the next's.
+                Core::Nx2WaitGpuThreadDone(present - 1);
                 WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             } else if (ocarina_back_wait ||
                 VideoCommon::Nx2Knob::Live(back_wait_start, VideoCommon::Nx2Knob::BackWait)) {
@@ -1997,8 +2009,8 @@ private:
                          m_stats.pace_us / 600, m_stats.ran_ahead, m_stats.release_backstops);
                 LOG_INFO(Service,
                          "nx2:vi2 present wait: {} us for the GPU back thread, {} us for the "
-                         "previous frame's fence; write barrier: {} waits, {} us a frame, {} "
-                         "timed out",
+                         "previous frame's fence; write barrier: {} waits for the frame before, {} "
+                         "us a frame, {} timed out",
                          m_stats.back_wait_us / 600, m_stats.previous_wait_us / 600,
                          Core::g_nx2_barrier_stats.waits.exchange(0),
                          Core::g_nx2_barrier_stats.wait_ns.exchange(0) / 600 / 1000,
