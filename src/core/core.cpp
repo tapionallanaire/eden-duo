@@ -6,6 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
+#include <shared_mutex>
+#include <vector>
 #include <mutex>
 #include <memory>
 #include <unordered_map>
@@ -118,6 +121,77 @@ void Nx2BarrierReset() {
     g_nx2_collect_set.store(0, std::memory_order_relaxed);
     nx2_gpu_thread_done.store(0, std::memory_order_release);
 }
+
+namespace Nx2PageStore {
+Stats g_stats;
+namespace {
+std::mutex record_mutex;
+std::vector<u64> recorded;        ///< Pages handed over since the last present
+std::shared_mutex store_mutex;
+std::unordered_map<u64, std::unique_ptr<std::array<u8, PageSize>>> pages;
+std::unordered_map<u64, u32> hot; ///< Pages rewritten ahead of their upload: presents left
+u64 store_present{};              ///< The present the copies were taken at
+} // namespace
+
+void Record(u64 device_address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    std::scoped_lock lock{record_mutex};
+    for (u64 page = device_address & ~(PageSize - 1); page < device_address + size;
+         page += PageSize) {
+        if (recorded.empty() || recorded.back() != page) {
+            recorded.push_back(page);
+        }
+    }
+}
+
+void Snapshot(u64 present, const std::function<const u8*(u64)>& read) {
+    std::vector<u64> wanted;
+    {
+        std::scoped_lock lock{record_mutex};
+        wanted.swap(recorded);
+    }
+    std::unique_lock lock{store_mutex};
+    for (auto it = hot.begin(); it != hot.end();) {
+        wanted.push_back(it->first);
+        it = --it->second == 0 ? hot.erase(it) : std::next(it);
+    }
+    pages.clear();
+    for (const u64 page : wanted) {
+        if (pages.contains(page)) {
+            continue;
+        }
+        if (const u8* const memory = read(page); memory != nullptr) {
+            auto copy = std::make_unique<std::array<u8, PageSize>>();
+            std::memcpy(copy->data(), memory, PageSize);
+            pages.emplace(page, std::move(copy));
+        }
+    }
+    store_present = present;
+    g_stats.copied.fetch_add(pages.size(), std::memory_order_relaxed);
+}
+
+const u8* Find(u64 device_page) {
+    std::shared_lock lock{store_mutex};
+    // Only while the guest is ahead: the frame the GPU thread runs has been presented.
+    if (store_present != Nx2GpuThreadDone() + 1) {
+        return nullptr;
+    }
+    const auto it = pages.find(device_page);
+    if (it == pages.end()) {
+        return nullptr;
+    }
+    g_stats.served.fetch_add(1, std::memory_order_relaxed);
+    return it->second->data();
+}
+
+void NoteRewritten(u64 device_page) {
+    std::unique_lock lock{store_mutex};
+    hot[device_page] = 600;
+    g_stats.rewritten.fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace Nx2PageStore
 
 void Nx2WaitGpuThreadDone(u64 want) {
     if (nx2_gpu_thread_done.load(std::memory_order_acquire) >= want) {
@@ -978,7 +1052,7 @@ std::span<GPUDirtyMemoryManager> System::GetGPUDirtyMemoryManager() {
 }
 
 void System::GatherGPUDirtyMemory(std::function<void(PAddr, size_t)>& callback) {
-    if (g_nx2_barrier.load(std::memory_order_relaxed) != 2) {
+    if (g_nx2_barrier.load(std::memory_order_relaxed) < 2) {
         for (auto& manager : impl->gpu_dirty_memory_managers) {
             manager.Gather(callback);
         }

@@ -17,6 +17,7 @@
 #include <vector>
 #include <format>
 
+#include "core/nx2_barrier.h"
 #include "common/logging.h"
 #include "common/range_sets.inc"
 #include "video_core/buffer_cache/buffer_cache_base.h"
@@ -3398,6 +3399,21 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 }
 
 template <class P>
+void BufferCache<P>::Nx2FrameDone() {
+    // The pages uploaded from a present's copy that the guest had rewritten meanwhile: their
+    // next frame's content is still to upload.
+    for (size_t i = 0; i < nx2_rewritten_pages.size(); ++i) {
+        const DAddr page = nx2_rewritten_pages[i];
+        if (i < nx2_untracked_pages) {
+            device_memory.UpdatePagesCachedCount(page, Core::Nx2PageStore::PageSize, 1);
+        }
+        memory_tracker.MarkRegionAsCpuModified(page, Core::Nx2PageStore::PageSize);
+    }
+    nx2_rewritten_pages.clear();
+    nx2_untracked_pages = 0;
+}
+
+template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
@@ -3445,9 +3461,36 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         for (BufferCopy& copy : copies) {
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            VideoCommon::Nx2Hazard::CheckRead(VideoCommon::Nx2Hazard::Site::MappedUpload,
-                                              device_addr, copy.size);
             device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            bool late = false;
+            if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 3) [[unlikely]] {
+                // The guest may be a frame ahead: pages it wrote for the frame being run come
+                // from the copy taken at that frame's present (Core::Nx2PageStore). A page it has
+                // rewritten since stays CPU-modified, for the next frame's upload.
+                constexpr u64 page_size = Core::Nx2PageStore::PageSize;
+                const DAddr end = device_addr + copy.size;
+                for (DAddr page = device_addr & ~(page_size - 1); page < end; page += page_size) {
+                    const u8* const stored = Core::Nx2PageStore::Find(page);
+                    if (stored == nullptr) {
+                        late = true;
+                        continue;
+                    }
+                    const DAddr from = (std::max)(page, device_addr);
+                    const DAddr to = (std::min)(page + page_size, end);
+                    u8* const out = src_pointer + (from - device_addr);
+                    if (std::memcmp(out, stored + (from - page), to - from) != 0) {
+                        std::memcpy(out, stored + (from - page), to - from);
+                        Core::Nx2PageStore::NoteRewritten(page);
+                        nx2_rewritten_pages.push_back(page);
+                    }
+                }
+            } else {
+                late = true;
+            }
+            if (late) {
+                VideoCommon::Nx2Hazard::CheckRead(VideoCommon::Nx2Hazard::Site::MappedUpload,
+                                                  device_addr, copy.size);
+            }
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {
@@ -3458,6 +3501,15 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        // The guest keeps writing these pages for the next frame: no write tracking until the
+        // frame ends (each tracked write would take the cache locks this thread holds), when
+        // Nx2FrameDone marks them CPU-modified.
+        for (size_t i = nx2_untracked_pages; i < nx2_rewritten_pages.size(); ++i) {
+            device_memory.UpdatePagesCachedCount(nx2_rewritten_pages[i],
+                                                 Core::Nx2PageStore::PageSize, -1);
+        }
+        nx2_untracked_pages = nx2_rewritten_pages.size();
+
     }
 }
 

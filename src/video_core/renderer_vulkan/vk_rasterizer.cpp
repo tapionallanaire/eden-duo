@@ -2762,6 +2762,11 @@ void RasterizerVulkan::TiledCacheBarrier() {
     // TODO: Implementing tiled barriers requires rewriting a good chunk of the Vulkan backend
 }
 
+void RasterizerVulkan::Nx2FrameDone() {
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache.Nx2FrameDone();
+}
+
 void RasterizerVulkan::FinishCommands() {
     draw_counter = 0;
     scheduler.Finish();

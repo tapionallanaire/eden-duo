@@ -533,6 +533,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(DAddr addr, size_t size);
 
+    /// Barrier mode 2: the GPU thread has run a frame's command lists.
+    void Nx2FrameDone();
+
     /// Visits the uniform and storage buffers bound for the last draw or dispatch with the cached
     /// host buffer holding each range, if one does, for the frame dump. Nothing is created or
     /// synchronized. Stage 5 is compute.
@@ -1095,6 +1098,8 @@ private:
         bool draw_written{};
         std::optional<Nx2Staging> copy;
     };
+    std::vector<DAddr> nx2_rewritten_pages; ///< MappedUploadMemory: pages to mark CPU-modified
+    size_t nx2_untracked_pages{}; ///< How many of them have their write tracking taken off
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.

@@ -219,6 +219,9 @@ public:
     /// Submits the recorded commands and waits for the host GPU to finish them (diagnostics).
     virtual void FinishCommands() {}
 
+    /// Barrier mode 2: the GPU thread has run a frame's command lists.
+    virtual void Nx2FrameDone() {}
+
     /// Notify rasterizer that a frame is about to finish
     virtual void TickFrame() = 0;
 

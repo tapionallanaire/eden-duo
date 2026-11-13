@@ -964,6 +964,14 @@ struct Memory::Impl {
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {
+                    // Handed to the CPU: its later writes are not seen (barrier mode 2 copies
+                    // the page at the present).
+                    if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 3) [[unlikely]] {
+                        // With the pages after it that the buffer cache marks along
+                        // (BufferCache::CPU_WRITE_WINDOW_PAGES = 8).
+                        Core::Nx2PageStore::Record(address,
+                                                   size + 7 * Core::Nx2PageStore::PageSize);
+                    }
                     return;
                 }
             }

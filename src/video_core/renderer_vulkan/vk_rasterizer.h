@@ -141,6 +141,7 @@ public:
     void TiledCacheBarrier() override;
     void FlushCommands() override;
     void FinishCommands() override;
+    void Nx2FrameDone() override;
     void TickFrame() override;
 
     /// Eden Duo: drop textures and buffers nothing is using, so the device gets the memory back.

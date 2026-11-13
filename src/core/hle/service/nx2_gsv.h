@@ -1898,25 +1898,60 @@ private:
             // the frame rules out).
             static const u32 barrier = [] {
                 const char* value = std::getenv("EDEN_NX2_BARRIER");
-                return value != nullptr && (value[0] == '1' || value[0] == '2')
+                return value != nullptr && value[0] >= '1' && value[0] <= '3'
                            ? static_cast<u32>(value[0] - '0')
                            : u32{0};
             }();
-            if (ocarina_back_wait && barrier != 0) {
-                const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
-                Core::g_nx2_barrier.store(barrier, std::memory_order_relaxed);
+            // Only in steady gameplay: twice a run read garbage command words in the first second
+            // of the 3D scene after the title (the game rewrites command memory there as if the
+            // present had waited). A frame counts as steady when the GPU thread needed 6-80 ms
+            // after the present; 300 of them in a row engage the barrier, any other frame (a
+            // menu, a loading hitch) goes back to the wait for the frame.
+            const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
+            const auto note_lag = [this](s64 lag_us) {
+                m_barrier_steady = lag_us >= 6000 && lag_us <= 80000 ? m_barrier_steady + 1 : 0;
+            };
+            if (ocarina_back_wait && barrier != 0 && m_barrier_steady >= 300) {
+                if (Core::g_nx2_barrier.exchange(barrier, std::memory_order_relaxed) == 0) {
+                    LOG_INFO(Service, "nx2:vi2 present #{}: write barrier mode {} engaged", present,
+                             barrier);
+                }
+                note_lag(m_barrier_lag_us->load(std::memory_order_relaxed));
+                if (m_barrier_steady == 0) {
+                    LOG_INFO(Service,
+                             "nx2:vi2 present #{}: write barrier off for 300 frames, the GPU "
+                             "thread needed {} us for a frame",
+                             present, m_barrier_lag_us->load(std::memory_order_relaxed));
+                }
                 // After this frame's lists: what the guest wrote for it and nothing gathered yet,
                 // then the next frame's writes may follow.
-                system.GPU().RunInOrder([&gpu = system.GPU(), present] {
+                system.GPU().RunInOrder([&gpu = system.GPU(), present, lag = m_barrier_lag_us,
+                                         presented = std::chrono::steady_clock::now()] {
                     gpu.InvalidateGPUCache();
+                    gpu.Renderer().ReadRasterizer()->Nx2FrameDone();
                     Core::Nx2NoteGpuThreadDone(present);
+                    lag->store(std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - presented)
+                                   .count(),
+                               std::memory_order_relaxed);
                 });
-                if (barrier == 2) {
+                if (barrier >= 2) {
                     Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
                                                   std::memory_order_relaxed);
                     // At most one frame ahead: the two sets hold this frame's writes and the
                     // next's.
                     Core::Nx2WaitGpuThreadDone(present - 1);
+                    // The GPU thread has finished the frame before and reads this one's pages
+                    // from guest memory until the copies below exist.
+                    const auto copy_start = std::chrono::steady_clock::now();
+                    if (barrier == 3) {
+                        Core::Nx2PageStore::Snapshot(present, [this](u64 page) -> const u8* {
+                            return system.Host1x().MemoryManager().GetPointer<u8>(page);
+                        });
+                    }
+                    m_barrier_copy_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::steady_clock::now() - copy_start)
+                                             .count();
                 }
                 WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             } else if (ocarina_back_wait ||
@@ -1927,6 +1962,18 @@ private:
                 const auto back_start = std::chrono::steady_clock::now();
                 WaitForBackThread();
                 const auto back_done = std::chrono::steady_clock::now();
+                // Keeps the barrier's state current for the frame it engages on: nothing is held
+                // back now, the GPU thread has run this frame, and the next frame's writes are
+                // collected in its own set.
+                Core::g_nx2_barrier.store(0, std::memory_order_relaxed);
+                Core::Nx2NoteGpuThreadDone(present);
+                Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
+                                              std::memory_order_relaxed);
+                const s64 lag_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       back_done - back_start)
+                                       .count();
+                note_lag(lag_us);
+                m_barrier_lag_us->store(lag_us, std::memory_order_relaxed);
                 WaitForFrame(m_previous_fence_id, m_previous_fence_value);
                 m_stats.back_wait_us += std::chrono::duration_cast<std::chrono::microseconds>(
                                             back_done - back_start)
@@ -2020,6 +2067,15 @@ private:
                          Core::g_nx2_barrier_stats.waits.exchange(0),
                          Core::g_nx2_barrier_stats.wait_ns.exchange(0) / 600 / 1000,
                          Core::g_nx2_barrier_stats.timeouts.exchange(0));
+                if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 3) {
+                    LOG_INFO(Service,
+                             "nx2:vi2 page copies a frame: {} us, {} taken, {} served to uploads, "
+                             "{} found rewritten",
+                             std::exchange(m_barrier_copy_us, 0) / 600,
+                             Core::Nx2PageStore::g_stats.copied.exchange(0) / 600,
+                             Core::Nx2PageStore::g_stats.served.exchange(0) / 600,
+                             Core::Nx2PageStore::g_stats.rewritten.exchange(0) / 600);
+                }
                 VideoCommon::Nx2Hazard::LogSummary();
                 m_stats = {.last_present = entered};
             }
@@ -2138,6 +2194,9 @@ private:
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     VideoCommon::Nx2Timeline::FrameStats m_timeline;
+    u32 m_barrier_steady{}; ///< Presents in a row whose frame took the GPU thread 6-80 ms
+    s64 m_barrier_copy_us{}; ///< Time spent in Nx2PageStore::Snapshot since the last report
+    std::shared_ptr<std::atomic<s64>> m_barrier_lag_us{std::make_shared<std::atomic<s64>>(0)};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
 
