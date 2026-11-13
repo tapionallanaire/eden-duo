@@ -60,23 +60,31 @@ std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
 class PlatformAv1Decoder {
 public:
     PlatformAv1Decoder(u32 width, u32 height) {
-        codec = AMediaCodec_createDecoderByType("video/av01");
-        if (codec == nullptr) {
-            return;
-        }
-        AMediaFormat* format = AMediaFormat_new();
-        AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/av01");
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH,
-                              static_cast<int32_t>(width != 0 ? width : 1920));
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT,
-                              static_cast<int32_t>(height != 0 ? height : 1080));
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, ColorFlexible);
-        const bool configured =
-            AMediaCodec_configure(codec, format, nullptr, nullptr, 0) == AMEDIA_OK;
-        AMediaFormat_delete(format);
-        if (!configured || AMediaCodec_start(codec) != AMEDIA_OK) {
+        // A concrete layout is asked for: a "flexible" request comes back as flexible
+        // (0x7F420888 from c2.qti.av1.decoder on the Galaxy S24 Ultra), which names no layout a
+        // byte buffer can be read by.
+        for (const int32_t color : {ColorSemiPlanar, ColorPlanar}) {
+            codec = AMediaCodec_createDecoderByType("video/av01");
+            if (codec == nullptr) {
+                return;
+            }
+            AMediaFormat* format = AMediaFormat_new();
+            AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/av01");
+            AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH,
+                                  static_cast<int32_t>(width != 0 ? width : 1920));
+            AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT,
+                                  static_cast<int32_t>(height != 0 ? height : 1080));
+            AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, color);
+            const bool configured =
+                AMediaCodec_configure(codec, format, nullptr, nullptr, 0) == AMEDIA_OK;
+            AMediaFormat_delete(format);
+            if (configured && AMediaCodec_start(codec) == AMEDIA_OK) {
+                break;
+            }
             AMediaCodec_delete(codec);
             codec = nullptr;
+        }
+        if (codec == nullptr) {
             return;
         }
         if (char* codec_name{}; AMediaCodec_getName(codec, &codec_name) == AMEDIA_OK) {
@@ -239,6 +247,12 @@ private:
         AVPixelFormat pixel_format{};
         size_t sample{1}; // bytes per sample
         bool semi_planar{true};
+        // ponytail: a decoder that still answers "flexible" is read by its vendor's usual layout
+        // (Qualcomm: NV12, others: I420); the output format's image-data plane offsets are the
+        // exact answer if a device shows wrong colours here.
+        if (color == ColorFlexible) {
+            color = name.find("qti") != std::string::npos ? ColorSemiPlanar : ColorPlanar;
+        }
         switch (color) {
         case ColorPlanar:
             pixel_format = AV_PIX_FMT_YUV420P;
