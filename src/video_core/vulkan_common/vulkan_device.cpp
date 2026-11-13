@@ -1703,7 +1703,9 @@ void Device::RemoveUnsuitableExtensions() {
     // 32-lane warp. The matrices hold 16-bit floats, so the device needs shaderFloat16. Shaders
     // with them use the Vulkan memory model and run with full subgroups.
     {
-        const bool has_shape = std::ranges::any_of(
+        // Queried only where the device has the extension: through a custom driver loader the
+        // entry point can be a stub that jumps to null (Odin 2, Turnip).
+        const bool has_shape = extensions.cooperative_matrix && std::ranges::any_of(
             physical.GetCooperativeMatrixPropertiesKHR(),
             [](const VkCooperativeMatrixPropertiesKHR& shape) {
                 return shape.MSize == 16 && shape.NSize == 8 && shape.KSize == 16 &&

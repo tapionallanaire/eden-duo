@@ -705,7 +705,7 @@ struct Values {
     // texture caches), and without them a phone kills the app for memory (Ocarina of Time).
     Setting<ColdHintMode> cold_hint_mode{linkage,
 #ifdef __ANDROID__
-                                         ColdHintMode::Always,
+                                         ColdHintMode::WhenRamIsLow,
 #else
                                          ColdHintMode::Off,
 #endif

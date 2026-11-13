@@ -894,7 +894,19 @@ bool ReadMemoryIsLow() {
     if (total == 0 || available == 0) {
         return false;
     }
+#ifdef __ANDROID__
+    // Android's low memory killer acts long before a tenth is left (Odin 2, 16 GB: Ocarina of
+    // Time killed with 2 GB available), and also when zram runs out: paging 2 GB out early used
+    // up the Odin's 4 GB of swap before the 3D scene needed it. Start at a quarter of RAM and
+    // leave the last quarter of swap alone.
+    const u64 swap_total = field("SwapTotal:");
+    if (swap_total != 0 && field("SwapFree:") < swap_total / 4) {
+        return false;
+    }
+    return available < std::max<u64>(u64{1} << 30, total / 4);
+#else
     return available < std::max<u64>(u64{1} << 30, total / 10);
+#endif
 #else
     return false;
 #endif
