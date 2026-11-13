@@ -976,7 +976,16 @@ struct Memory::Impl {
         PAddr last_address;
     };
 
-    bool TryInvalidateGPUMemory(const u8* p, size_t size) {
+    bool TryInvalidateGPUMemory(const u8* p, size_t size, bool whole_page) {
+        // Switch 2 titles: the one faulting instruction is run through the interpreter instead,
+        // whose write reaches the GPU caches with its exact range. Their compute dispatches mark
+        // whole storage windows GPU-written (Ocarina of Time: ~110 windows of ~650 KiB a frame),
+        // so the page-wide path below downloaded and waited for the GPU thread at nearly every
+        // first write to a page: 700-1000 waits a second, 4-5 s of every 5 s on an Odin 2. An
+        // exact range is patched into the buffer with no wait (BufferCache::WriteMemory).
+        if (!whole_page && Settings::CurrentProgramIsSwitch2()) {
+            return false;
+        }
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
@@ -1216,7 +1225,8 @@ void Memory::MarkRegionDebug(Common::ProcessAddress vaddr, u64 size, bool debug)
     impl->MarkRegionDebug(GetInteger(vaddr), size, debug);
 }
 
-NCEAccessFaultAction Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size) {
+NCEAccessFaultAction Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t size,
+                                           bool whole_page) {
     [[maybe_unused]] bool mapped = true;
     [[maybe_unused]] bool rasterizer = false;
 
@@ -1235,7 +1245,7 @@ NCEAccessFaultAction Memory::InvalidateNCE(Common::ProcessAddress vaddr, size_t 
 #endif
 
     if (rasterizer) {
-        if (!impl->TryInvalidateGPUMemory(ptr, size)) {
+        if (!impl->TryInvalidateGPUMemory(ptr, size, whole_page)) {
             return NCEAccessFaultAction::Instruction;
         }
     }

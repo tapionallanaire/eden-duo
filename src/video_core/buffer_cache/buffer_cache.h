@@ -2678,7 +2678,39 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
 
 template <class P>
 void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size,
-                                       bool needs_sync) {
+                                       bool needs_sync, std::source_location where) {
+    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+        // Diagnostic: which paths mark guest memory GPU-written, every 5 s (a guest CPU write to
+        // such a page waits for the GPU thread).
+        struct Site {
+            u32 line;
+            u64 calls;
+            u64 bytes;
+        };
+        static std::array<Site, 12> sites{};
+        static auto reported = std::chrono::steady_clock::now();
+        for (Site& site : sites) {
+            if (site.line == where.line() || site.line == 0) {
+                site.line = where.line();
+                ++site.calls;
+                site.bytes += size;
+                break;
+            }
+        }
+        if (const auto now = std::chrono::steady_clock::now();
+            now - reported >= std::chrono::seconds{5}) {
+            reported = now;
+            std::string text;
+            for (Site& site : sites) {
+                if (site.line != 0) {
+                    text += std::format(" line {}: {} marks, {} KiB;", site.line, site.calls,
+                                        site.bytes >> 10);
+                }
+                site = {};
+            }
+            LOG_INFO(HW_GPU, "GPU-written marks in the last 5 s:{}", text);
+        }
+    }
     if constexpr (!IS_OPENGL) {
         if (needs_sync) {
             Buffer& buffer = slot_buffers[buffer_id];

@@ -5,6 +5,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <filesystem>
+#include <cstring>
+#include <cstdio>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <limits>
@@ -207,8 +211,26 @@ MemoryAllocator::MemoryAllocator(const Device &device_)
 
 MemoryAllocator::~MemoryAllocator() = default;
 
+
+// Diagnostic: what is being created, logged at every further 256 MiB (sizes asked for, never
+// subtracted on free; image sizes estimated at 4 bytes a texel).
+static void NoteCreated(const char* kind, u64 size, u64 detail_a, u64 detail_b) {
+    static std::atomic<u64> total{};
+    static std::atomic<u64> images{};
+    static std::atomic<u64> buffers{};
+    (kind[0] == 'i' ? images : buffers).fetch_add(size, std::memory_order_relaxed);
+    const u64 before = total.fetch_add(size, std::memory_order_relaxed);
+    if ((before >> 28) != ((before + size) >> 28) || size >= (u64{64} << 20)) {
+        LOG_INFO(Render_Vulkan, "Created so far: images ~{} MiB, buffers {} MiB; this {}: {} KiB ({:#x}, {})",
+                 images.load() >> 20, buffers.load() >> 20, kind, size >> 10, detail_a, detail_b);
+    }
+}
+
 vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo &ci, bool dedicated) const
 {
+    NoteCreated("image", u64{ci.extent.width} * ci.extent.height * ci.extent.depth * ci.arrayLayers *
+                             static_cast<u64>(ci.samples) * 4,
+                static_cast<u64>(ci.format), u64{ci.extent.width} << 32 | ci.extent.height);
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block. Switch 2 titles only.
@@ -423,6 +445,7 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
 }
 
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
+    NoteCreated("buffer", ci.size, ci.usage, static_cast<u64>(usage));
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
     auto const anv_flags = (usage == MemoryUsage::Stream
         && device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
@@ -615,6 +638,20 @@ void LogMemoryStatistics(const Device& device) {
                  heap, budgets[heap].usage >> 20, budgets[heap].budget >> 20,
                  budgets[heap].statistics.blockBytes >> 20);
     }
+}
+
+void DumpMemoryMap(const Device& device, const std::filesystem::path& path) {
+    // Every live allocation with its size and usage (VMA's own JSON), for memory work.
+    char* text{};
+    vmaBuildStatsString(device.GetAllocator(), &text, VK_TRUE);
+    if (text == nullptr) {
+        return;
+    }
+    if (FILE* const file = std::fopen(path.string().c_str(), "wb")) {
+        std::fwrite(text, 1, std::strlen(text), file);
+        std::fclose(file);
+    }
+    vmaFreeStatsString(device.GetAllocator(), text);
 }
 
 } // namespace Vulkan

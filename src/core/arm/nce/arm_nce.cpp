@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cinttypes>
+#include <chrono>
+#include <atomic>
 #include <memory>
 
 #include "common/settings.h"
@@ -196,7 +198,32 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         return true;
     }
     if (result == Memory::NCEAccessFaultAction::Instruction) {
-        return HandleGuestAlignmentFault(guest_ctx, raw_info, raw_context);
+        auto& instruction_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+        // How many instructions run this way, every 5 s (each costs a signal and a decode).
+        static std::atomic<u64> emulated{}, refused{};
+        static std::atomic<s64> reported{};
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        if (s64 last = reported.load(); now - last >= 5 && reported.compare_exchange_strong(last, now)) {
+            LOG_INFO(Core_ARM, "NCE: {} writes to GPU-tracked pages emulated in the last 5 s, {} "
+                               "left to the page-wide path",
+                     emulated.exchange(0), refused.exchange(0));
+        }
+        if (const auto next_pc = MatchAndExecuteOneInstruction(
+                memory, &instruction_ctx, GetFloatingPointState(instruction_ctx))) {
+            instruction_ctx.pc = *next_pc;
+            ++emulated;
+            return true;
+        }
+        ++refused;
+        // An instruction the interpreter does not run (an exclusive store, say): the page-wide
+        // path, which lets the instruction run again natively.
+        if (memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE, true) ==
+            Memory::NCEAccessFaultAction::Retry) {
+            return true;
+        }
+        return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
     }
 
     // An access to unmapped guest memory. Dynarmic reads such memory as zeros and drops the

@@ -1858,7 +1858,17 @@ private:
                 const char* value = std::getenv("EDEN_NX2_BACK_WAIT");
                 return value != nullptr && value[0] == '1';
             }();
-            if (VideoCommon::Nx2Knob::Live(back_wait_start, VideoCommon::Nx2Knob::BackWait)) {
+            // Duet Plus: Ocarina of Time waits for the back thread only (EDEN_NX2_BACK_WAIT=0
+            // restores the wait for the whole frame). Measured on a desktop in Kokiri Forest, 40 s
+            // recordings: a frame ahead 21-27 ms a frame with 3-6 one-frame dark blinks (the haze
+            // layer missing); this 31 ms with none; the whole frame 34-39 ms with none.
+            static const bool back_wait_off = [] {
+                const char* value = std::getenv("EDEN_NX2_BACK_WAIT");
+                return value != nullptr && value[0] == '0';
+            }();
+            const bool ocarina_back_wait = app_program_id == OcarinaOfTimeProgramId && !back_wait_off;
+            if (ocarina_back_wait ||
+                VideoCommon::Nx2Knob::Live(back_wait_start, VideoCommon::Nx2Knob::BackWait)) {
                 // The GPU back thread has read the guest memory this frame's commands use and
                 // recorded them (what the guest must not overwrite yet), but the GPU may still be
                 // running them: wait for the frame before that, so it runs at most one behind.
@@ -2159,6 +2169,22 @@ private:
                     .count();
         if (forced_interval != 0 && !video_playing) {
             swap_interval = forced_interval;
+        }
+        // Duet Plus: Ocarina of Time is paced at 30 fps on phones (two refreshes a frame). It asks
+        // for 60 and cannot hold it there, and a frame time that swings between the two is worse
+        // than a steady 30. Its videos keep their own rate. EDEN_OOT_30FPS=0/1 overrides.
+        constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+        static const int oot_30fps = [] {
+            const char* value = std::getenv("EDEN_OOT_30FPS");
+#ifdef __ANDROID__
+            return value == nullptr ? 1 : (value[0] != '0' ? 1 : 0);
+#else
+            return value != nullptr && value[0] != '0' ? 1 : 0;
+#endif
+        }();
+        if (oot_30fps != 0 && forced_interval == 0 && !video_playing && process != nullptr &&
+            process->GetProgramId() == OcarinaOfTimeProgramId) {
+            swap_interval = (std::max)(swap_interval, 2U);
         }
         return swap_interval;
     }

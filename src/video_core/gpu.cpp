@@ -39,6 +39,7 @@
 #include "video_core/composite_completion.h"
 #include "video_core/dsmod/texture_readback.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
 #include "video_core/host1x/host1x.h"

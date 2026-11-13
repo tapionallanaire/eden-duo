@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -520,6 +521,19 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.title_id != title_id || patch.module != name) {
             continue;
         }
+        // Duet Plus: phones keep the game's own dynamic resolution (the 3D scene below the
+        // window's size is what their GPU and memory can carry). EDEN_OOT_NO_MAX_RES=1 does the
+        // same on a desktop build.
+#ifdef __ANDROID__
+        constexpr bool keep_dynamic_resolution = true;
+#else
+        static const bool keep_dynamic_resolution = std::getenv("EDEN_OOT_NO_MAX_RES") != nullptr;
+#endif
+        if (patch.name == "Max Resolution (built-in)" && keep_dynamic_resolution) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": the game's dynamic resolution is kept",
+                     patch.name);
+            continue;
+        }
         if (patch.name == "Max Resolution (built-in)" && Settings::values.nvidia_dlss.GetValue()) {
             if (Settings::values.nvidia_dlss_quality.GetValue() != Settings::DlssQuality::DLAA) {
                 LOG_INFO(Loader,
@@ -704,9 +718,11 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     if (layers.empty() && layers_ext.empty()) {
         return;
     }
+    LOG_INFO(Loader, "    RomFS: {} mod layer(s) found", layers.size() + layers_ext.size());
 
     auto extracted = ExtractRomFS(romfs);
     if (extracted == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: could not be read as a directory tree; mods not applied");
         return;
     }
 
@@ -715,11 +731,13 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
     auto layered_ext = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers_ext));
     if (layered == nullptr && layered_ext == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: mod layers could not be combined; mods not applied");
         return;
     }
 
     auto packed = CreateRomFS(std::move(layered), std::move(layered_ext));
     if (packed == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: could not be rebuilt with the mod layers; mods not applied");
         return;
     }
 

@@ -457,7 +457,12 @@ private:
     };
     std::vector<MeshArena> mesh_arenas;
     size_t mesh_arena_current{~size_t{}};
+#ifdef __ANDROID__
+    // Grows on demand; every submission in flight holds one.
+    u64 mesh_arena_size{16ULL << 20};
+#else
     u64 mesh_arena_size{64ULL << 20};
+#endif
     /// The current submission's arena, after its counter is reset.
     const MeshArena& AcquireMeshArena();
 

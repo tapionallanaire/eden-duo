@@ -28,7 +28,7 @@
 #include <fcntl.h>
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32 // MinGW too: its off_t is 32 bits
 #define fileno _fileno
 #define fseeko _fseeki64
 #define ftello _ftelli64
@@ -330,7 +330,7 @@ static int PlatformMapReadOnly(IOFile& io, const wchar_t* path) {
             if (io.mmap_base) {
                 _LARGE_INTEGER pvalue;
                 GetFileSizeEx(io.file_handle, &pvalue);
-                io.mmap_size = uint32_t(pvalue.QuadPart);
+                io.mmap_size = static_cast<u64>(pvalue.QuadPart); // files over 4 GiB
             } else {
                 CloseHandle(io.mapping_handle);
                 CloseHandle(io.file_handle);

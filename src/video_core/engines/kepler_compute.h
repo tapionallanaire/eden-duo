@@ -361,8 +361,10 @@ private:
     /// Native dispatches left to skip while a retained network is being replaced (bounded, so a
     /// non-network pass cannot silence the engine forever).
     u32 network_skip_remaining{};
-    /// The tonemapped frame Ocarina of Time's anti-aliasing reads (ProcessOcarinaUpscale).
+    /// The tonemapped frame Ocarina of Time's anti-aliasing reads (ProcessOcarinaUpscale).
     std::optional<Texture::TICEntry> ocarina_input;
+    /// The dispatch after the input pass is taken for the output pass.
+    bool ocarina_expect_output{};
 
     /// Mario Kart World's docked photo mode upscales 2560x1440 to 3840x2160 with a tensor-core
     /// network whose passes can't run. After its first rejected pass the next dispatches are

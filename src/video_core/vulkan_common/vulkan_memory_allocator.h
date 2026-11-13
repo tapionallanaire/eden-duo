@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <filesystem>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -176,5 +177,7 @@ namespace Vulkan {
 
     /// Logs VMA's blocks and allocations per memory type, and each heap's budget.
     void LogMemoryStatistics(const Device& device);
+/// Writes every live allocation (size, usage) as JSON.
+void DumpMemoryMap(const Device& device, const std::filesystem::path& path);
 
 } // namespace Vulkan

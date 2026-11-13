@@ -190,6 +190,12 @@ void Scheduler::RecordUpload(VkBuffer src, VkBuffer dst, std::span<const VkBuffe
         upload_batch->Add(src, dst, region);
         uploads_pending = true;
     }
+    // Diagnostic (EDEN_NX2_NO_UPLOAD_BATCH=1): every upload is recorded at once, as before
+    // uploads were batched.
+    static const bool no_batch = std::getenv("EDEN_NX2_NO_UPLOAD_BATCH") != nullptr;
+    if (no_batch && uploads_pending) {
+        FlushUploads();
+    }
 }
 
 void Scheduler::FlushUploads() {

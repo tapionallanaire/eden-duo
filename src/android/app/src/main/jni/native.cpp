@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <locale>
 #include <map>
 #include <set>
@@ -53,6 +54,7 @@ extern "C" {
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "video_core/nx2_profile.h"
 #include "frontend_common/play_time_manager.h"
 #include "core/constants.h"
 #include "core/core.h"
@@ -841,7 +843,25 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_surfaceDestroyed(JNIEnv* env, jobject
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_setAppDirectory(JNIEnv* env, jobject instance,
                                                            [[maybe_unused]] jstring j_directory) {
-    Common::FS::SetAppDirectory(Common::Android::GetJString(env, j_directory));
+    const std::string app_directory = Common::Android::GetJString(env, j_directory);
+    Common::FS::SetAppDirectory(app_directory);
+    // Diagnostics: <app directory>/env.txt holds NAME=VALUE lines that become environment
+    // variables (the EDEN_* switches), since an Android app has no command line to set them on.
+    if (std::ifstream file{app_directory + "/env.txt"}) {
+        for (std::string line; std::getline(file, line);) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            const size_t equals = line.find('=');
+            if (equals == std::string::npos || equals == 0 || line[0] == '#') {
+                continue;
+            }
+            setenv(line.substr(0, equals).c_str(), line.substr(equals + 1).c_str(), 1);
+        }
+        if (std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr) {
+            VideoCommon::Nx2Profile::g_enabled.store(true); // read at load, before this
+        }
+    }
     DSModSession::OnAppDirectorySet();
 }
 

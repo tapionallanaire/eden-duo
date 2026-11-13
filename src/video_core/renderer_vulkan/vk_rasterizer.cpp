@@ -34,6 +34,7 @@
 
 #include "common/assert.h"
 #include "shader_recompiler/exception.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -414,7 +415,13 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
     }
     // A finished submission's counter holds the words its draws asked for, including those
     // that did not fit: grow later arenas to hold them.
-    const u64 max_size{(std::min)(u64{1} << 30, u64{device.GetMaxStorageBufferRange()})};
+#ifdef __ANDROID__
+    // One arena per submission in flight: at 1 GiB each they can take the phone's GPU memory.
+    constexpr u64 arena_limit{u64{256} << 20};
+#else
+    constexpr u64 arena_limit{u64{1} << 30};
+#endif
+    const u64 max_size{(std::min)(arena_limit, u64{device.GetMaxStorageBufferRange()})};
     for (MeshArena& arena : mesh_arenas) {
         if (arena.counted || !scheduler.IsFree(arena.tick)) {
             continue;
@@ -459,6 +466,8 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
                                        MemoryUsage::Download),
                 .size = mesh_arena_size,
             });
+        LOG_INFO(Render_Vulkan, "Mesh emulation: arena {} created, {} MiB each", mesh_arenas.size(),
+                 mesh_arena_size >> 20);
     }
     // The GPU is done with this arena, and this submission's commands have not been sent yet.
     const u32 zero{};
@@ -2744,6 +2753,16 @@ void RasterizerVulkan::RecoverMemory() {
 
 void RasterizerVulkan::TickFrame() {
     draw_counter = 0;
+#ifdef __ANDROID__
+    // Diagnostic (EDEN_GPU_MEMORY_MAP=1 in env.txt): the map of GPU memory, rewritten every 300
+    // frames of a Switch 2 title.
+    static const bool memory_map = std::getenv("EDEN_GPU_MEMORY_MAP") != nullptr;
+    if (static u32 frames{}; memory_map && Settings::CurrentProgramIsSwitch2() &&
+                             ++frames % 300 == 0) {
+        DumpMemoryMap(device, Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                                  "gpu-memory.json");
+    }
+#endif
     DSModCompleteTextureReadbacks(); // Eden Duo (vk_dsmod_texture_readback.cpp)
     // Debug server requests (docs/nx2/debug-mcp.md), taken between frames on the owning thread.
     if (VideoCore::Nx2Debug::HasRequests()) {

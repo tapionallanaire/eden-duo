@@ -257,11 +257,10 @@ private:
 
         // JIT Compile
         const auto compile_start = std::chrono::steady_clock::now();
-        const auto get_code = [this](u64 vaddr) { return conf.callbacks->MemoryReadCode(vaddr); };
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A64::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A64::Translate(ir_block, arch_descriptor, get_code, {conf.define_unpredictable_behaviour, conf.wall_clock_cntpct});
+        A64::Translate(ir_block, arch_descriptor, conf);
         Optimization::Optimize(ir_block, conf, polyfill_options);
         const CodePtr entrypoint = emitter.Emit(ir_block).entrypoint;
         g_jit_stats.blocks_compiled.fetch_add(1, std::memory_order_relaxed);

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <source_location>
 #include <bit>
 #include <chrono>
 #include <condition_variable>
@@ -765,7 +766,8 @@ private:
     void UpdateComputeTextureBuffers();
 
     void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size,
-                           bool needs_sync = false);
+                           bool needs_sync = false,
+                           std::source_location where = std::source_location::current());
 
     /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
     /// while collecting, asks for new copies.

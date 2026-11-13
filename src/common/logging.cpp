@@ -209,8 +209,7 @@ struct ColorConsoleBackend final : public Backend {
             // unbuffered here, so every character became a WriteFile on the thread that logs.
             std::string line = std::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename ? entry.filename : "", entry.line_num, entry.function ? entry.function : "");
             line.append(entry.message, entry.message_len);
-            line.push_back('
-');
+            line.push_back('\n');
             std::fwrite(line.data(), 1, line.size(), stdout);
         }
     }

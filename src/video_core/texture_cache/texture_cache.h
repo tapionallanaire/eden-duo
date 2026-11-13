@@ -472,6 +472,23 @@ void TextureCache<P>::TickFrame() {
             }
         }
     }
+    if (Settings::CurrentProgramIsSwitch2()) {
+        // Where the GPU memory goes: logged when the cache's images or the device's use moved
+        // by 256 MiB.
+        static u64 logged_images{};
+        static u64 logged_device{};
+        static u32 frames{};
+        if (frames++ % 20 == 0) {
+            const u64 device_use = runtime.CanReportMemoryUsage() ? runtime.GetDeviceMemoryUsage() : 0;
+            const auto moved = [](u64 a, u64 b) { return (a > b ? a - b : b - a) >= 256_MiB; };
+            if (moved(total_used_memory, logged_images) || moved(device_use, logged_device)) {
+                logged_images = total_used_memory;
+                logged_device = device_use;
+                LOG_INFO(HW_GPU, "GPU memory: texture cache images {} MiB, device use {} MiB",
+                         total_used_memory >> 20, device_use >> 20);
+            }
+        }
+    }
     if constexpr (requires { runtime.CurrentTick(); }) {
         while (!gpu_sentenced_images.empty() && runtime.IsFree(gpu_sentenced_images.front().tick)) {
             gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
@@ -2169,8 +2186,11 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     image.flags &= ~ImageFlagBits::CpuModified;
     image.flags &= ~ImageFlagBits::GpuModified;
     // Aliases the GPU wrote after this data was written stay newer, so they are copied over it.
-    image.modification_tick =
-        image.cpu_modification_tick != 0 ? image.cpu_modification_tick : ++modification_tick;
+    // Diagnostic (EDEN_NX2_OLD_UPLOAD_TICK=1): a reload always takes a fresh tick, as before.
+    static const bool old_upload_tick = std::getenv("EDEN_NX2_OLD_UPLOAD_TICK") != nullptr;
+    image.modification_tick = !old_upload_tick && image.cpu_modification_tick != 0
+                                  ? image.cpu_modification_tick
+                                  : ++modification_tick;
 
     // Images uploaded by layer stay tracked while some of their layers are dirty.
     if (False(image.flags & ImageFlagBits::Tracked)) {

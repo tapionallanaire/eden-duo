@@ -1108,7 +1108,14 @@ bool KeplerCompute::FinishDlssEvaluation() {
 bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 shader_hash) {
     using namespace VideoCommon::OcarinaUpscale;
     const bool input_pass = IsInputPass(native_key, shader_hash);
-    const bool output_pass = IsOutputPass(native_key, shader_hash);
+    // The output pass has one program per window and scene size, and only three are listed: the
+    // dispatch that follows the input pass counts as one too (the images are checked below).
+    const bool follows_input =
+        !input_pass && program_id == ProgramId && std::exchange(ocarina_expect_output, false);
+    const bool output_pass = IsOutputPass(native_key, shader_hash) || follows_input;
+    if (input_pass) {
+        ocarina_expect_output = true;
+    }
     if (input_pass || output_pass) {
         static u32 seen{};
         if (seen < 4) {
@@ -1120,8 +1127,22 @@ bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 sh
                      rasterizer->UsesNvidiaDlss());
         }
     }
+    // Duet Plus, phones: the output pass (the game's anti-aliasing network, run on tensor cores
+    // on the console) is replaced by a plain copy of its input, the tonemapped frame. Emulated,
+    // the network takes most of an Adreno 740's frame (1.9 fps in Kokiri Forest, GPU 95 % busy);
+    // the generic stand-in copies an earlier, untonemapped image instead and the picture comes
+    // out flat and far too bright. EDEN_OOT_SIMPLE_AA=0/1 overrides.
+    static const bool simple_copy = [] {
+        const char* value = std::getenv("EDEN_OOT_SIMPLE_AA");
+#ifdef __ANDROID__
+        return value == nullptr || value[0] != '0';
+#else
+        return value != nullptr && value[0] != '0';
+#endif
+    }();
+    const bool uses_dlss = rasterizer->UsesNvidiaDlss();
     if (program_id != ProgramId || (!input_pass && !output_pass) ||
-        !rasterizer->UsesNvidiaDlss()) {
+        (!uses_dlss && !simple_copy)) {
         return false;
     }
     const auto& cbuf = launch_description.const_buffer_config[0];
@@ -1204,7 +1225,31 @@ bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 sh
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    return rasterizer->AccelerateCameraMotionUpscale(surface(*input), surface(*output));
+    if (uses_dlss) {
+        return rasterizer->AccelerateCameraMotionUpscale(surface(*input), surface(*output));
+    }
+    const Fermi2D::Config config{
+        .operation = Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Bilinear,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = static_cast<s32>(output->Width()),
+        .dst_y1 = static_cast<s32>(output->Height()),
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = static_cast<s32>(input->Width()),
+        .src_y1 = static_cast<s32>(input->Height()),
+    };
+    const bool copied = rasterizer->AccelerateSurfaceCopy(surface(*input), surface(*output), config);
+    static bool logged{};
+    if (!std::exchange(logged, true)) {
+        LOG_INFO(HW_GPU,
+                 "Ocarina of Time anti-aliasing: the tonemapped frame {}x{} is copied to {}x{} "
+                 "instead of running the network: {}",
+                 input->Width(), input->Height(), output->Width(), output->Height(), copied);
+    }
+    return copied;
 }
 
 // Fortune's Weave's last DLSS network pass: it reads the input colour (the first pass's) through

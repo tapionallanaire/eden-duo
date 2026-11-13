@@ -372,7 +372,7 @@ NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
     if (Parse()) {
         status = Loader::ResultStatus::Success;
     } else if (status == Loader::ResultStatus::ErrorNullFile) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
     }
 }
 
@@ -380,16 +380,16 @@ NupContainer::~NupContainer() = default;
 
 bool NupContainer::Parse() {
     if (file->GetSize() < SuperblockSize) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     Superblock super{};
     if (file->ReadObject(&super, 0) != sizeof(Superblock)) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     if (super.magic != HeaderMagic || super.header_size < SuperblockSize || super.flags != 0) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     toc_offset = super.toc_offset;
@@ -399,39 +399,39 @@ bool NupContainer::Parse() {
     if (file_size != file->GetSize() || toc_offset < SuperblockSize || blob_offset > file_size ||
         toc_offset > blob_offset || toc_size > blob_offset - toc_offset ||
         blob_offset % 0x10 != 0) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
 
     const auto toc = file->ReadBytes(static_cast<std::size_t>(toc_size),
                                      static_cast<std::size_t>(toc_offset));
     if (toc.size() != toc_size) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     std::array<u8, 0x20> toc_hash{};
     if (!Sha256(toc.data(), toc.size(), toc_hash) || toc_hash != super.toc_sha256) {
         LOG_ERROR(Loader, "NUP TOC SHA-256 mismatch, the file is corrupt or was modified");
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
 
     TocHeader header{};
     if (toc.size() < sizeof(header)) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     std::memcpy(&header, toc.data(), sizeof(header));
     if (header.magic != TocMagic || header.package_count == 0 ||
         static_cast<u32>(header.package_count) != super.package_count) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
 
     // The counts come from the file, so bound them by the TOC size before multiplying.
     if (header.dir_count > toc.size() / DirRecordSize ||
         header.file_count > toc.size() / FileRecordSize) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     const u64 needed = TocHeaderSize + static_cast<u64>(header.package_count) * PackageRecordSize +
@@ -439,7 +439,7 @@ bool NupContainer::Parse() {
     if (needed > toc.size() || header.pool_offset < needed || header.pool_offset > toc.size() ||
         header.pool_size > toc.size() - header.pool_offset ||
         (header.pool_offset - needed) % sizeof(u32) != 0) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
     const u64 children_offset = needed;
@@ -457,7 +457,7 @@ bool NupContainer::Parse() {
             record.root_dir >= header.dir_count ||
             (record.exefs_dir != NoDir && record.exefs_dir >= header.dir_count) ||
             (record.romfs_dir != NoDir && record.romfs_dir >= header.dir_count)) {
-            status = Loader::ResultStatus::ErrorNUPBadFormat;
+            { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
             return false;
         }
         PackageInfo package;
@@ -484,7 +484,7 @@ bool NupContainer::Parse() {
         if (static_cast<u64>(record.first_child) + record.child_count >
                 children_bytes / sizeof(u32) ||
             static_cast<u64>(record.name_offset) + record.name_length > header.pool_size) {
-            status = Loader::ResultStatus::ErrorNUPBadFormat;
+            { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
             return false;
         }
         dirs[i].name = std::string(reinterpret_cast<const char*>(base) + header.pool_offset +
@@ -506,7 +506,7 @@ bool NupContainer::Parse() {
               record.extent_offset % 0x10 != 0 || record.extent_offset > file_size ||
               record.extent_size > file_size - record.extent_offset)) ||
             static_cast<u64>(record.name_offset) + record.name_length > header.pool_size) {
-            status = Loader::ResultStatus::ErrorNUPBadFormat;
+            { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
             return false;
         }
         files[i].name = std::string(reinterpret_cast<const char*>(base) + header.pool_offset +
@@ -523,19 +523,19 @@ bool NupContainer::Parse() {
     std::memcpy(children.data(), base + children_offset, children_bytes);
     for (const u32 child : children) {
         if (child >= header.dir_count + header.file_count) {
-            status = Loader::ResultStatus::ErrorNUPBadFormat;
+            { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
             return false;
         }
     }
 
     if (!ValidateDirTree()) {
-        status = Loader::ResultStatus::ErrorNUPBadFormat;
+        { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
         return false;
     }
 
     for (auto& package : packages) {
         if (!ParseMeta(package)) {
-            status = Loader::ResultStatus::ErrorNUPBadFormat;
+            { LOG_ERROR(Loader, "NUP rejected at nup_container.cpp:{}", __LINE__); status = Loader::ResultStatus::ErrorNUPBadFormat; }
             return false;
         }
     }

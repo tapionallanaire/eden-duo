@@ -30,7 +30,8 @@
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_main.h>
 
-#include <fmt/ostream.h>
+#include <format>
+#include <print>
 
 #include "common/driver_shader_cache.h"
 #include "common/fs/fs_util.h"
@@ -238,15 +239,15 @@ static void OnStatusMessageReceived(const Network::StatusMessageEntry& msg) {
     std::string message = [&]() {
         switch (msg.type) {
         case Network::IdMemberJoin:
-            return fmt::format("{} has joined", msg.nickname);
+            return std::format("{} has joined", msg.nickname);
         case Network::IdMemberLeave:
-            return fmt::format("{} has left", msg.nickname);
+            return std::format("{} has left", msg.nickname);
         case Network::IdMemberKicked:
-            return fmt::format("{} has been kicked", msg.nickname);
+            return std::format("{} has been kicked", msg.nickname);
         case Network::IdMemberBanned:
-            return fmt::format("{} has been banned", msg.nickname);
+            return std::format("{} has been banned", msg.nickname);
         case Network::IdAddressUnbanned:
-            return fmt::format("{} has been unbanned", msg.nickname);
+            return std::format("{} has been unbanned", msg.nickname);
         default:
             return std::string{};
         }
@@ -375,22 +376,22 @@ static bool PackNup(const std::string& source, const std::string& output) {
                 return;
             }
             last_report = now;
-            fmt::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
                        p.bytes_total >> 20, p.files_done, p.files_total);
         },
         &pack_nup_cancel, &error);
     const auto seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    fmt::print(stderr, "\n");
+    std::print(stderr, "\n");
     switch (result) {
     case FileSys::Nup::PackResult::Success:
-        fmt::print(stderr, "Wrote {} in {:.1f} s\n", archive.string(), seconds);
+        std::print(stderr, "Wrote {} in {:.1f} s\n", archive.string(), seconds);
         return true;
     case FileSys::Nup::PackResult::Cancelled:
-        fmt::print(stderr, "Cancelled\n");
+        std::print(stderr, "Cancelled\n");
         return false;
     default:
-        fmt::print(stderr, "Packing failed: {}\n", error);
+        std::print(stderr, "Packing failed: {}\n", error);
         return false;
     }
 }
@@ -416,22 +417,22 @@ static bool UnpackNup(const std::string& source, const std::string& output) {
                 return;
             }
             last_report = now;
-            fmt::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
                        p.bytes_total >> 20, p.files_done, p.files_total);
         },
         &unpack_nup_cancel, &error);
     const auto seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    fmt::print(stderr, "\n");
+    std::print(stderr, "\n");
     switch (result) {
     case FileSys::Nup::ExtractResult::Success:
-        fmt::print(stderr, "Extracted to {} in {:.1f} s\n", out_dir.string(), seconds);
+        std::print(stderr, "Extracted to {} in {:.1f} s\n", out_dir.string(), seconds);
         return true;
     case FileSys::Nup::ExtractResult::Cancelled:
-        fmt::print(stderr, "Cancelled\n");
+        std::print(stderr, "Cancelled\n");
         return false;
     default:
-        fmt::print(stderr, "Extraction failed: {}\n", error);
+        std::print(stderr, "Extraction failed: {}\n", error);
         return false;
     }
 }
@@ -458,18 +459,18 @@ static bool EditNup(const Core::LaunchParams& lp) {
             const auto icon_path = to_path(*lp.edit_nup_icon);
             std::ifstream in(icon_path, std::ios::binary);
             if (!in) {
-                fmt::print(stderr, "Cannot read icon {}\n", icon_path.string());
+                std::print(stderr, "Cannot read icon {}\n", icon_path.string());
                 return false;
             }
             edit.icon = std::vector<u8>((std::istreambuf_iterator<char>(in)), {});
             if (edit.icon->empty()) {
-                fmt::print(stderr, "Icon file is empty\n");
+                std::print(stderr, "Icon file is empty\n");
                 return false;
             }
         }
     }
     if (!edit.title_name && !edit.icon && !edit.display_version && !edit.publisher) {
-        fmt::print(stderr, "Nothing to edit: pass --nup-name, --nup-icon, --nup-version or "
+        std::print(stderr, "Nothing to edit: pass --nup-name, --nup-icon, --nup-version or "
                            "--nup-publisher (or a --clear-* flag)\n");
         return false;
     }
@@ -477,16 +478,16 @@ static bool EditNup(const Core::LaunchParams& lp) {
     std::string error;
     switch (FileSys::Nup::EditNupMetadata(archive, edit, &error, &edit_nup_cancel)) {
     case FileSys::Nup::EditResult::Success:
-        fmt::print(stderr, "Updated {}\n", archive.string());
+        std::print(stderr, "Updated {}\n", archive.string());
         return true;
     case FileSys::Nup::EditResult::NoChange:
-        fmt::print(stderr, "No changes to apply\n");
+        std::print(stderr, "No changes to apply\n");
         return true;
     case FileSys::Nup::EditResult::Cancelled:
-        fmt::print(stderr, "Cancelled\n");
+        std::print(stderr, "Cancelled\n");
         return false;
     default:
-        fmt::print(stderr, "Edit failed: {}\n", error);
+        std::print(stderr, "Edit failed: {}\n", error);
         return false;
     }
 }
@@ -496,7 +497,7 @@ static bool EditNup(const Core::LaunchParams& lp) {
 static bool BuildWarm(Core::System& system, int argc, char** argv) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     if (argc < 5) {
-        fmt::print(stderr, "usage: --build-warm <game> <title id> <output dir>\n");
+        std::print(stderr, "usage: --build-warm <game> <title id> <output dir>\n");
         return false;
     }
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
@@ -514,7 +515,7 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
         }
         last_stage = progress.stage;
         last_print = now;
-        fmt::print("{:7.1f} s  {}: {} / {}\n",
+        std::print("{:7.1f} s  {}: {} / {}\n",
                    std::chrono::duration<double>(now - begin).count(), progress.stage,
                    progress.done, progress.total);
         std::fflush(stdout);
@@ -542,14 +543,14 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
             break;
         default:
             if (static_cast<unsigned char>(c) < 0x20) {
-                error += fmt::format("\\u{:04x}", static_cast<unsigned>(c));
+                error += std::format("\\u{:04x}", static_cast<unsigned>(c));
             } else {
                 error += c;
             }
             break;
         }
     }
-    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"archives\": {}, \"compute\": {}, "
+    std::print("{{\"ok\": {}, \"error\": \"{}\", \"archives\": {}, \"compute\": {}, "
                "\"skipped\": {}, \"seconds\": {:.1f}}}\n",
                result.ok, error, result.archives, result.compute_programs, result.skipped,
                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
@@ -884,7 +885,7 @@ static void RunLiveKeys(InputCommon::InputSubsystem& input_subsystem, Core::Syst
             continue;
         }
         LOG_INFO(Frontend, "Live keys: {} {}{}", code < 0 ? "release" : "press", code < 0 ? -code : code,
-                 milliseconds >= 0 ? fmt::format(" for {} ms", milliseconds) : "");
+                 milliseconds >= 0 ? std::format(" for {} ms", milliseconds) : "");
         if (code < 0) {
             input_subsystem.GetKeyboard()->ReleaseKey(static_cast<std::size_t>(-code));
             continue;
