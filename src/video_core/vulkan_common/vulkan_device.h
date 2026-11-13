@@ -535,9 +535,11 @@ FN_MAX_LIMIT_LIST
         return is_warp_potentially_bigger;
     }
 
-    /// Returns true if the device can be forced to use the guest warp size.
+    /// Returns true if the device can be forced to use the guest warp size: the stage takes a
+    /// required size and the guest's is in the device's range (Adreno 750: 64 to 128, so no).
     bool IsGuestWarpSizeSupported(VkShaderStageFlagBits stage) const {
-        return properties.subgroup_size_control.requiredSubgroupSizeStages & stage;
+        return extensions.subgroup_size_control &&
+               (properties.subgroup_size_control.requiredSubgroupSizeStages & stage) != 0;
     }
 
     /// Returns true if the device supports the provided subgroup feature.
