@@ -100,6 +100,7 @@ add_library(video_core STATIC
     fence_manager.h
     gpu.cpp
     gpu.h
+    gpu_timestamp.h
     gpu_split.cpp
     gpu_split.h
     gpu_thread.cpp
@@ -108,6 +109,7 @@ add_library(video_core STATIC
     invalidation_accumulator.h
     memory_manager.cpp
     memory_manager.h
+    page_filter.h
     native_qmd.h
     native_query_trace.h
     nx2.h
@@ -115,6 +117,13 @@ add_library(video_core STATIC
     nx2_debug_control.h
     nx2_diag.h
     nx2_profile.h
+    nx2_spikes.cpp
+    nx2_spikes.h
+    nx2_timeline.cpp
+    nx2_timeline.h
+    nx2_perf.cpp
+    nx2_perf.h
+    ocarina_upscale.h
     present.h
     pte_kind.h
     query_cache/bank_base.h
@@ -175,8 +184,14 @@ add_library(video_core STATIC
     renderer_vulkan/vk_command_pool.h
     renderer_vulkan/vk_compute_pass.cpp
     renderer_vulkan/vk_compute_pass.h
+    renderer_vulkan/vk_camera_motion_pass.cpp
+    renderer_vulkan/vk_camera_motion_pass.h
     renderer_vulkan/vk_compute_pipeline.cpp
+    renderer_vulkan/vk_driver_build_report.cpp
+    renderer_vulkan/vk_driver_build_report.h
     renderer_vulkan/vk_compute_pipeline.h
+    renderer_vulkan/vk_cooperative_hmma_test.cpp
+    renderer_vulkan/vk_cooperative_hmma_test.h
     renderer_vulkan/vk_descriptor_buffer.cpp
     renderer_vulkan/vk_descriptor_buffer.h
     renderer_vulkan/vk_descriptor_pool.cpp
@@ -198,6 +213,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_query_cache.cpp
     renderer_vulkan/vk_query_cache.h
     renderer_vulkan/vk_rasterizer.cpp
+    renderer_vulkan/upload_batch.h
     renderer_vulkan/vk_rasterizer.h
     renderer_vulkan/vk_render_pass_cache.cpp
     renderer_vulkan/vk_render_pass_cache.h
@@ -205,6 +221,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_resource_pool.h
     renderer_vulkan/vk_scheduler.cpp
     renderer_vulkan/vk_scheduler.h
+    renderer_vulkan/fragment_barrier_state.h
     renderer_vulkan/vk_shader_util.cpp
     renderer_vulkan/vk_shader_util.h
     renderer_vulkan/vk_staging_buffer_pool.cpp
@@ -243,9 +260,17 @@ add_library(video_core STATIC
     shader_cache.h
     shader_environment.cpp
     shader_environment.h
+    stage_cache.cpp
+    stage_cache.h
     shader_handle_program.h
     shader_notify.cpp
     shader_notify.h
+    shader_warm/shader_archives.cpp
+    shader_warm/shader_archives.h
+    shader_warm/shader_warm_builder.cpp
+    shader_warm/shader_warm_builder.h
+    shader_warm/warm_records.cpp
+    shader_warm/warm_records.h
     smaa_area_tex.h
     smaa_search_tex.h
     surface.cpp
@@ -446,6 +471,8 @@ if (ENABLE_OPENGL)
 endif()
 
 target_link_libraries(video_core PUBLIC common core)
+# Shader precache builder: game archives use zstd (also with dictionaries) and zlib.
+target_link_libraries(video_core PRIVATE zstd::zstd ZLIB::ZLIB)
 target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
 if (ENABLE_OPENGL)
     target_link_libraries(video_core PUBLIC glad)

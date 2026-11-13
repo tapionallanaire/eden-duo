@@ -60,14 +60,16 @@ endif()
 add_compile_definitions(EDEN_BUILD_ID="${BUILD_ID}")
 
 # Set compilation flags
+if(MSVC)
+    # Avoid windows.h min/max macros with both cl.exe and clang-cl.
+    add_compile_definitions(NOMINMAX)
+endif()
+
 if(MSVC AND NOT CXX_CLANG)
     set(CMAKE_CONFIGURATION_TYPES Debug Release CACHE STRING "" FORCE)
 
     # Silence "deprecation" warnings
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE _SCL_SECURE_NO_WARNINGS)
-
-    # Avoid windows.h junk
-    add_compile_definitions(NOMINMAX)
 
     # Avoid windows.h from including some usually unused libs like winsocks.h, since this might cause some redefinition errors.
     add_compile_definitions(WIN32_LEAN_AND_MEAN)
@@ -226,6 +228,12 @@ else()
             $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-maybe-uninitialized>
         )
     endif()
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "13" AND CXX_GCC)
+        # GCC 13.3 at -O3 unswitches the switch in Maxwell3D::FrontCallMultiMethod's word loop
+        # and loses its load_mme.instruction case: macro code is never stored and every
+        # Switch 2 title renders black. GCC 13 is where switch unswitching was added.
+        add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-fno-unswitch-loops>)
+    endif()
 
     # Set file offset size to 64 bits.
     #
@@ -330,7 +338,12 @@ add_subdirectory(input_common)
 add_subdirectory(frontend_common)
 add_subdirectory(shader_recompiler)
 
-if(YUZU_TESTS)
+# Duet Plus: desktop frontends only (needs httplib, which the Android build does not have).
+if (ENABLE_MCP_SERVER AND NOT ANDROID)
+    add_subdirectory(mcp)
+endif()
+
+if (YUZU_TESTS)
     add_subdirectory(tests)
 endif()
 

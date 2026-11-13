@@ -9,19 +9,23 @@
 
 #include <QApplication>
 
-#include "common/fs/fs_paths.h"
+#include "common/driver_shader_cache.h"
 #include "common/fs/path_util.h"
+#include "common/settings.h"
+#include "frontend_common/config.h"
 #include "startup_checks.h"
+#include "yuzu/nx2_switches.h"
 
 #if YUZU_ROOM
 #include <cstring>
 #include "dedicated_room/yuzu_room.h"
 #endif
+#ifdef __unix__
+#include "qt_common/gui_settings.h"
+#endif
 
 #ifndef _WIN32
 #include <sys/resource.h>
-#else
-#include <QScreen>
 #endif
 
 #if defined(__APPLE__)
@@ -32,7 +36,24 @@
 
 #include "main_window.h"
 
-// TODO(crueter): This is very annoying, see if there are any other solutions.
+#ifdef YUZU_CRASH_DUMPS
+#include "yuzu/breakpad.h"
+#endif
+
+#ifdef _WIN32
+#include <QScreen>
+
+static void OverrideWindowsFont() {
+    // Qt5 chooses these fonts on Windows and they have fairly ugly alphanumeric/cyrillic characters
+    // Asking to use "MS Shell Dlg 2" gives better other chars while leaving the Chinese Characters.
+    const QString startup_font = QApplication::font().family();
+    const QStringList ugly_fonts = {QStringLiteral("SimSun"), QStringLiteral("PMingLiU")};
+    if (ugly_fonts.contains(startup_font)) {
+        QApplication::setFont(QFont(QStringLiteral("MS Shell Dlg 2"), 9, QFont::Normal));
+    }
+}
+#endif
+
 static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #ifdef _WIN32
     // For Windows, we want to avoid scaling artifacts on fractional scaling ratios.
@@ -76,7 +97,8 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 // set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
 // in the real environment always wins, so a launcher script can still override one run; between
 // files the later one wins, so the copy next to the executable (shipped with the build) can be
-// overridden by %APPDATA%\eden\nx2_switches.txt without editing the one that gets replaced.
+// overridden by the user's copy (Nx2Switches::UserFilePath: %APPDATA%\eglantine, or the portable user
+// folder) without editing the one that gets replaced.
 static void ParseSwitchFile(const std::filesystem::path& path,
                             std::map<std::string, std::string>& entries) {
     std::ifstream file{path};
@@ -129,12 +151,7 @@ static void LoadNx2Switches(const char* argv0) {
     if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
         ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
     }
-#ifdef _WIN32
-    const auto config_dir = Common::FS::GetAppDataRoamingDirectory() / EDEN_DIR;
-#else
-    const auto config_dir = Common::FS::GetDataDirectory("XDG_CONFIG_HOME") / EDEN_DIR;
-#endif
-    ParseSwitchFile(config_dir / "nx2_switches.txt", entries);
+    ParseSwitchFile(Nx2Switches::UserFilePath(), entries);
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {
             continue;
@@ -149,6 +166,12 @@ static void LoadNx2Switches(const char* argv0) {
 
 int main(int argc, char* argv[]) {
     LoadNx2Switches(argv[0]);
+    // Before StartupChecks: its Vulkan check is the first thing to load a GPU driver. The config
+    // isn't loaded yet, so the setting is read from the file.
+    Config::ReadGlobalSettingEarly("qt-config", Settings::values.private_driver_shader_cache);
+    Config::ReadGlobalSettingEarly("qt-config", Settings::values.driver_shader_cache_size);
+    Common::ConfigureDriverShaderCache(Settings::values.private_driver_shader_cache.GetValue(),
+                                       Settings::values.driver_shader_cache_size.GetValue());
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
@@ -177,6 +200,10 @@ int main(int argc, char* argv[]) {
 #ifdef YUZU_CRASH_DUMPS
     Breakpad::InstallCrashHandler();
 #endif
+
+    // Init settings params
+    QCoreApplication::setOrganizationName(QStringLiteral("eden"));
+    QCoreApplication::setApplicationName(QStringLiteral("Eglantine"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.
@@ -216,10 +243,31 @@ int main(int argc, char* argv[]) {
     chdir(Common::FS::PathToUTF8String(bin_path).c_str());
 #endif
 
-    QtCommon::SetupApplication();
+#ifdef __unix__
+    // Set the DISPLAY variable in order to open web browsers
+    // TODO (lat9nq): Find a better solution for AppImages to start external applications
+    if (QString::fromLocal8Bit(qgetenv("DISPLAY")).isEmpty()) {
+        qputenv("DISPLAY", ":0");
+    }
+
+    if (GraphicsBackend::GetForceX11() && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "xcb");
+
+    // Fix the Wayland appId. This needs to match the name of the .desktop file without the .desktop
+    // suffix.
+    QGuiApplication::setDesktopFileName(QStringLiteral("dev.eglantine.eglantine"));
+#endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();
-    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(rounding_policy);
+    QApplication::setHighDpiScaleFactorRoundingPolicy(rounding_policy);
+
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    // Disables the "?" button on all dialogs. Disabled by default on Qt6.
+    QCoreApplication::setAttribute(Qt::AA_DisableWindowContextHelpButton);
+#endif
+
+    // Enables the core to make the qt created contexts current on std::threads
+    QCoreApplication::setAttribute(Qt::AA_DontCheckOpenGLContextThreadAffinity);
 
 #ifdef _WIN32
     QApplication::setStyle(QStringLiteral("windowsvista"));
@@ -227,21 +275,29 @@ int main(int argc, char* argv[]) {
 
     QApplication app(argc, argv);
 
+#ifdef _WIN32
+    OverrideWindowsFont();
+#endif
+
+    // Workaround for QTBUG-85409, for Suzhou numerals the number 1 is actually \u3021
+    // so we can see if we get \u3008 instead
+    // TL;DR all other number formats are consecutive in unicode code points
+    // This bug is fixed in Qt6, specifically 6.0.0-alpha1
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    const QLocale locale = QLocale::system();
+    if (QStringLiteral("\u3008") == locale.toString(1)) {
+        QLocale::setDefault(QLocale::system().name());
+    }
+#endif
+
     // Qt changes the locale and causes issues in float conversion using std::to_string() when
     // generating shaders
     setlocale(LC_ALL, "C");
 
-    int result = 0;
-    {
-        MainWindow main_window{has_broken_vulkan};
-        // After settings have been loaded by MainWindow, apply the filter
-        main_window.show();
+    MainWindow main_window{has_broken_vulkan};
+    // After settings have been loaded by GMainWindow, apply the filter
+    main_window.show();
 
-        app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
-        result = app.exec();
-    }
-
-    // forcefully tear down core before static destructors run
-    QtCommon::Shutdown();
-    return result;
+    app.connect(&app, &QGuiApplication::applicationStateChanged, &main_window, &MainWindow::OnAppFocusStateChanged);
+    return app.exec();
 }

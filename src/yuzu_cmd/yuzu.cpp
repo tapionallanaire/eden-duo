@@ -16,11 +16,12 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
+#include "common/fs/fs_util.h"
 #include "common/settings_enums.h"
 #include "core/launch_params.h"
 #ifdef __EMSCRIPTEN__
@@ -29,9 +30,11 @@
 #define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL_main.h>
 
-#include <format>
-#include <print>
+#include <fmt/ostream.h>
 
+#include "common/driver_shader_cache.h"
+#include "common/fs/fs_util.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
@@ -41,6 +44,7 @@
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/nup_writer.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -55,13 +59,17 @@
 #include "video_core/gpu.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
-#include "yuzu_cmd/dsmod_harness.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
 #ifdef HAS_OPENGL
 #include "yuzu_cmd/emu_window/emu_window_sdl3_gl.h"
 #endif
 #include "yuzu_cmd/emu_window/emu_window_sdl3_null.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3_vk.h"
+#ifdef YUZU_ENABLE_MCP
+#include "mcp/server.h"
+#include "yuzu_cmd/mcp_host_cli.h"
+#endif
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
@@ -230,15 +238,15 @@ static void OnStatusMessageReceived(const Network::StatusMessageEntry& msg) {
     std::string message = [&]() {
         switch (msg.type) {
         case Network::IdMemberJoin:
-            return std::format("{} has joined", msg.nickname);
+            return fmt::format("{} has joined", msg.nickname);
         case Network::IdMemberLeave:
-            return std::format("{} has left", msg.nickname);
+            return fmt::format("{} has left", msg.nickname);
         case Network::IdMemberKicked:
-            return std::format("{} has been kicked", msg.nickname);
+            return fmt::format("{} has been kicked", msg.nickname);
         case Network::IdMemberBanned:
-            return std::format("{} has been banned", msg.nickname);
+            return fmt::format("{} has been banned", msg.nickname);
         case Network::IdAddressUnbanned:
-            return std::format("{} has been unbanned", msg.nickname);
+            return fmt::format("{} has been unbanned", msg.nickname);
         default:
             return std::string{};
         }
@@ -252,89 +260,94 @@ struct SdlState {
     // Must outlive emu_window, which keeps a pointer to it.
     InputCommon::InputSubsystem input_subsystem{};
     std::unique_ptr<EmuWindow_SDL3> emu_window;
-    DSModHarness::Session dsmod; // Duo: eden-cli harness state
-    FileSys::ManualContentProvider manual_provider; // the loaded file's programs and control data
-    // ExecuteProgram (multi-program titles: Kingdom Hearts 1.5+2.5's launcher starting a game):
-    // the guest asks from a service thread; the main loop restarts the file at that index.
-    std::string filepath;
-    int program_index{0};
-    std::atomic<int> next_program_index{-1};
     bool network_initialized{};
+#ifdef YUZU_ENABLE_MCP
+    // Built-in MCP server (only with --mcp): destroyed before the system shuts down.
+    std::unique_ptr<CliMcpHost> mcp_host;
+    std::unique_ptr<Mcp::Server> mcp_server;
+#endif
 };
 
-// What follows a successful Load: GPU start, shader cache, the core's frontend callbacks, Run.
-static void StartLoadedSystem(SdlState* state) {
-    DSModHarness::OnGameLoaded(state->dsmod, state->system);
+constexpr int kRestartExitCode = 75;
+static std::atomic_bool restart_requested{false};
 
-    // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
-    state->system.GPU().Start();
-    state->system.GetCpuManager().OnGpuReady();
+// ExecuteProgram state for the restarted process: what the Qt frontend keeps in-process when it
+// reboots a game. Only read when the launcher sets EDEN_CLI_RESTART_HANDOFF, so a leftover file
+// never changes a normal launch.
+struct RestartHandoff {
+    u64 program_id{};
+    s32 program_index{};
+    s32 previous_program_index{-1};
+    std::vector<std::vector<u8>> user_channel;
+};
 
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
-        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
-            state->system.GetApplicationProcessProgramID(), std::stop_token{},
-            [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});
-    }
-
-    // don't do anything, SDL3 already exists for us :D
-    state->system.RegisterExitCallback([] {});
-
-    state->system.RegisterExecuteProgramCallback([state](std::size_t program_index) {
-        LOG_INFO(Frontend, "ExecuteProgram: program index {} requested", program_index);
-        state->next_program_index = static_cast<int>(program_index);
-    });
-
-    // QLaunch launched applications (should) now reload shader cache.
-    static std::mutex shader_cache_reload_mutex;
-    state->system.RegisterApplicationChangedCallback([state](u64 changed_program_id) {
-        if (!Settings::values.use_disk_shader_cache.GetValue()) {
-            return;
-        }
-
-        std::scoped_lock lk{shader_cache_reload_mutex};
-
-        LOG_INFO(Frontend, "Reloading disk shader cache for {:016X}", changed_program_id);
-
-        state->system.Pause();
-        state->system.GPU().WaitForIdle();
-        state->system.GPU().ObtainContext();
-
-        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
-            changed_program_id, std::stop_token{},
-            [](VideoCore::LoadCallbackStage, size_t, size_t) {});
-
-        state->system.GPU().ReleaseContext();
-        state->system.Run();
-    });
-
-    void(state->system.Run());
+static std::filesystem::path RestartHandoffPath() {
+    return Common::FS::GetEdenPath(Common::FS::EdenPath::EdenDir) / "restart-handoff.bin";
 }
 
-// Restarts the loaded file at the program index the guest asked for (ExecuteProgram).
-static bool SwitchProgram(SdlState* state, int program_index) {
-    LOG_INFO(Frontend, "ExecuteProgram: switching from program index {} to {}", state->program_index,
-             program_index);
-    state->system.DetachDebugger();
-    void(state->system.Pause());
-    state->system.ShutdownMainProcess();
-    Service::AM::FrontendAppletParameters params{
-        .applet_id = Service::AM::AppletId::Application,
-        .program_index = program_index,
-        .previous_program_index = state->program_index,
-    };
-    const Core::SystemResultStatus result =
-        state->system.Load(*state->emu_window, state->filepath, params);
-    if (result != Core::SystemResultStatus::Success) {
-        LOG_CRITICAL(Frontend, "ExecuteProgram: loading program index {} failed ({})", program_index,
-                     static_cast<int>(result));
+template <typename T>
+static void PutRaw(std::ostream& out, const T& value) {
+    out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+template <typename T>
+static void GetRaw(std::istream& in, T& value) {
+    in.read(reinterpret_cast<char*>(&value), sizeof(value));
+}
+
+// Bounds keep a damaged handoff from requesting huge allocations; the writer refuses anything the
+// reader would reject.
+constexpr u32 kHandoffMaxEntries = 256;
+constexpr u64 kHandoffMaxTotalSize = 64u << 20;
+
+static bool WriteRestartHandoff(const RestartHandoff& handoff) {
+    u64 total = 0;
+    for (const auto& entry : handoff.user_channel) {
+        total += entry.size();
+    }
+    if (handoff.user_channel.size() > kHandoffMaxEntries || total > kHandoffMaxTotalSize) {
         return false;
     }
-    state->program_index = program_index;
-    StartLoadedSystem(state);
-    if (state->system.DebuggerEnabled()) {
-        state->system.InitializeDebugger(); // ShutdownMainProcess dropped the previous one
+    std::ofstream out{RestartHandoffPath(), std::ios::binary | std::ios::trunc};
+    PutRaw(out, handoff.program_id);
+    PutRaw(out, handoff.program_index);
+    PutRaw(out, handoff.previous_program_index);
+    PutRaw(out, static_cast<u32>(handoff.user_channel.size()));
+    for (const auto& entry : handoff.user_channel) {
+        PutRaw(out, static_cast<u32>(entry.size()));
+        out.write(reinterpret_cast<const char*>(entry.data()), std::streamsize(entry.size()));
     }
-    return true;
+    out.close();
+    return !out.fail();
+}
+
+// Leaves the file in place; the caller removes it once the game has loaded.
+static std::optional<RestartHandoff> ReadRestartHandoff() {
+    std::ifstream in{RestartHandoffPath(), std::ios::binary};
+    RestartHandoff handoff;
+    u32 count{};
+    GetRaw(in, handoff.program_id);
+    GetRaw(in, handoff.program_index);
+    GetRaw(in, handoff.previous_program_index);
+    GetRaw(in, count);
+    if (in.fail() || count > kHandoffMaxEntries) {
+        return std::nullopt;
+    }
+    u64 total = 0;
+    for (u32 i = 0; i < count; ++i) {
+        u32 size{};
+        GetRaw(in, size);
+        total += size;
+        if (in.fail() || total > kHandoffMaxTotalSize) {
+            return std::nullopt;
+        }
+        auto& entry = handoff.user_channel.emplace_back(size);
+        in.read(reinterpret_cast<char*>(entry.data()), std::streamsize(size));
+        if (in.fail()) {
+            return std::nullopt;
+        }
+    }
+    return handoff;
 }
 
 static std::atomic_bool pack_nup_cancel{false};
@@ -362,22 +375,22 @@ static bool PackNup(const std::string& source, const std::string& output) {
                 return;
             }
             last_report = now;
-            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+            fmt::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
                        p.bytes_total >> 20, p.files_done, p.files_total);
         },
         &pack_nup_cancel, &error);
     const auto seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    std::print(stderr, "\n");
+    fmt::print(stderr, "\n");
     switch (result) {
     case FileSys::Nup::PackResult::Success:
-        std::print(stderr, "Wrote {} in {:.1f} s\n", archive.string(), seconds);
+        fmt::print(stderr, "Wrote {} in {:.1f} s\n", archive.string(), seconds);
         return true;
     case FileSys::Nup::PackResult::Cancelled:
-        std::print(stderr, "Cancelled\n");
+        fmt::print(stderr, "Cancelled\n");
         return false;
     default:
-        std::print(stderr, "Packing failed: {}\n", error);
+        fmt::print(stderr, "Packing failed: {}\n", error);
         return false;
     }
 }
@@ -403,22 +416,22 @@ static bool UnpackNup(const std::string& source, const std::string& output) {
                 return;
             }
             last_report = now;
-            std::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
+            fmt::print(stderr, "\r{} / {} MiB, {} / {} files", p.bytes_done >> 20,
                        p.bytes_total >> 20, p.files_done, p.files_total);
         },
         &unpack_nup_cancel, &error);
     const auto seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    std::print(stderr, "\n");
+    fmt::print(stderr, "\n");
     switch (result) {
     case FileSys::Nup::ExtractResult::Success:
-        std::print(stderr, "Extracted to {} in {:.1f} s\n", out_dir.string(), seconds);
+        fmt::print(stderr, "Extracted to {} in {:.1f} s\n", out_dir.string(), seconds);
         return true;
     case FileSys::Nup::ExtractResult::Cancelled:
-        std::print(stderr, "Cancelled\n");
+        fmt::print(stderr, "Cancelled\n");
         return false;
     default:
-        std::print(stderr, "Extraction failed: {}\n", error);
+        fmt::print(stderr, "Extraction failed: {}\n", error);
         return false;
     }
 }
@@ -445,18 +458,18 @@ static bool EditNup(const Core::LaunchParams& lp) {
             const auto icon_path = to_path(*lp.edit_nup_icon);
             std::ifstream in(icon_path, std::ios::binary);
             if (!in) {
-                std::print(stderr, "Cannot read icon {}\n", icon_path.string());
+                fmt::print(stderr, "Cannot read icon {}\n", icon_path.string());
                 return false;
             }
             edit.icon = std::vector<u8>((std::istreambuf_iterator<char>(in)), {});
             if (edit.icon->empty()) {
-                std::print(stderr, "Icon file is empty\n");
+                fmt::print(stderr, "Icon file is empty\n");
                 return false;
             }
         }
     }
     if (!edit.title_name && !edit.icon && !edit.display_version && !edit.publisher) {
-        std::print(stderr, "Nothing to edit: pass --nup-name, --nup-icon, --nup-version or "
+        fmt::print(stderr, "Nothing to edit: pass --nup-name, --nup-icon, --nup-version or "
                            "--nup-publisher (or a --clear-* flag)\n");
         return false;
     }
@@ -464,18 +477,84 @@ static bool EditNup(const Core::LaunchParams& lp) {
     std::string error;
     switch (FileSys::Nup::EditNupMetadata(archive, edit, &error, &edit_nup_cancel)) {
     case FileSys::Nup::EditResult::Success:
-        std::print(stderr, "Updated {}\n", archive.string());
+        fmt::print(stderr, "Updated {}\n", archive.string());
         return true;
     case FileSys::Nup::EditResult::NoChange:
-        std::print(stderr, "No changes to apply\n");
+        fmt::print(stderr, "No changes to apply\n");
         return true;
     case FileSys::Nup::EditResult::Cancelled:
-        std::print(stderr, "Cancelled\n");
+        fmt::print(stderr, "Cancelled\n");
         return false;
     default:
-        std::print(stderr, "Edit failed: {}\n", error);
+        fmt::print(stderr, "Edit failed: {}\n", error);
         return false;
     }
+}
+
+/// Hidden test hook (not in --help): builds a game's shader precache file without booting it.
+///   yuzu-cmd --build-warm <game file> <title id hex> <output dir>
+static bool BuildWarm(Core::System& system, int argc, char** argv) {
+    namespace ShaderWarm = VideoCommon::ShaderWarm;
+    if (argc < 5) {
+        fmt::print(stderr, "usage: --build-warm <game> <title id> <output dir>\n");
+        return false;
+    }
+    system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+    system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    const u64 title_id = std::strtoull(argv[3], nullptr, 16);
+    ShaderWarm::BuildOptions options;
+    options.output_dir = Common::FS::ToU8String(argv[4]);
+    std::string last_stage;
+    auto last_print = std::chrono::steady_clock::now();
+    const auto begin = last_print;
+    const auto on_progress = [&](const ShaderWarm::Progress& progress) {
+        const auto now = std::chrono::steady_clock::now();
+        if (progress.stage == last_stage && now - last_print < std::chrono::seconds{5}) {
+            return;
+        }
+        last_stage = progress.stage;
+        last_print = now;
+        fmt::print("{:7.1f} s  {}: {} / {}\n",
+                   std::chrono::duration<double>(now - begin).count(), progress.stage,
+                   progress.done, progress.total);
+        std::fflush(stdout);
+    };
+    const auto result = ShaderWarm::BuildWarmFilesWith(
+        system, Common::FS::ToU8String(argv[2]), title_id, options, on_progress, {});
+    // The error can hold a Windows path: escape it so the summary stays valid JSON.
+    std::string error;
+    for (const char c : result.error) {
+        switch (c) {
+        case '"':
+            error += "\\\"";
+            break;
+        case '\\':
+            error += "\\\\";
+            break;
+        case '\n':
+            error += "\\n";
+            break;
+        case '\r':
+            error += "\\r";
+            break;
+        case '\t':
+            error += "\\t";
+            break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                error += fmt::format("\\u{:04x}", static_cast<unsigned>(c));
+            } else {
+                error += c;
+            }
+            break;
+        }
+    }
+    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"archives\": {}, \"compute\": {}, "
+               "\"skipped\": {}, \"seconds\": {:.1f}}}\n",
+               result.ok, error, result.archives, result.compute_programs, result.skipped,
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+    std::fflush(stdout);
+    return result.ok;
 }
 
 extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
@@ -509,6 +588,10 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Common::Log::SetColorConsoleBackendEnabled(true);
     Common::Log::Start();
 
+    if (argc > 1 && std::string_view{argv[1]} == "--build-warm") {
+        return BuildWarm(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+
     int option_index = 0;
 #ifdef _WIN32
     int argc_w;
@@ -520,18 +603,15 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 #else
     wchar_t **argv_w = nullptr;
 #endif
-    // Duo: eden-cli keeps its own option table (see .upstream/DIVERGENCES.md)
-    Core::LaunchParams lp{};
-    if (const auto early = DSModHarness::ParseCommandLine(state->dsmod, argc, argv, argv_w, lp)) {
-        return *early;
-    }
+    Core::LaunchParams lp = Core::ParseLaunchParams(state->system, argc, argv, argv_w);
 #ifdef _WIN32
     LocalFree(argv_w);
 #endif
     SdlConfig config{lp.config_path};
-    if (!DSModHarness::ResolveSelectedUser(state->dsmod, state->system, lp)) {
-        return SDL_APP_FAILURE;
-    }
+    // Before anything loads a GPU driver.
+    Common::ConfigureDriverShaderCache(Settings::values.private_driver_shader_cache.GetValue(),
+                                       Settings::values.driver_shader_cache_size.GetValue());
+    Common::CreateDriverShaderCacheFolder();
 
     Core::ApplyLaunchParams(lp);
 
@@ -566,6 +646,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
 
     state->system.Initialize();
 
+
     // Apply the command line arguments
     state->system.ApplySettings();
 
@@ -593,36 +674,39 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     state->system.CoreTiming().SetTimerResolutionNs(Common::Windows::GetCurrentTimerResolution());
 #endif
 
-    state->system.SetInputSubsystem(&state->input_subsystem);
     state->system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
-    state->system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
-                                          &state->manual_provider);
     state->system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-    // Register every program of the file (as the Android frontend does): a multi-program title
-    // such as Kingdom Hearts 1.5+2.5 opens the launcher's data storage (program index 0) from
-    // inside a game, which fails and panics the game when only the booted program is known.
-    if (const auto file = state->system.GetFilesystem()->OpenFile(lp.filepath, FileSys::OpenMode::Read)) {
-        void(state->manual_provider.AddEntriesFromContainer(file));
-    }
-    // eden-cli reads no external content folders from its config; EDEN_EXTERNAL_CONTENT names one
-    // (a folder of update and DLC packages, as the Android frontend registers beside its games).
-    if (const char* const ext = std::getenv("EDEN_EXTERNAL_CONTENT"); ext != nullptr) {
-        Settings::values.external_content_dirs.push_back(ext);
-    }
     state->system.GetFileSystemController().CreateFactories(*state->system.GetFilesystem());
     state->system.GetUserChannel().clear();
 
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
     };
-    // EDEN_PROGRAM_INDEX=<n> boots program n of a multi-program file directly (testing).
-    if (const char* const idx = std::getenv("EDEN_PROGRAM_INDEX"); idx != nullptr) {
-        load_parameters.program_index = std::atoi(idx);
-        state->program_index = load_parameters.program_index;
+    const char* const handoff_env = std::getenv("EDEN_CLI_RESTART_HANDOFF");
+    const bool restarted = handoff_env != nullptr && handoff_env[0] != '\0';
+    if (restarted) {
+        auto handoff = ReadRestartHandoff();
+        if (!handoff) {
+            // Booting as a frontend launch would clear the game's temp storage.
+            LOG_CRITICAL(Frontend, "Restart handoff {} is missing or damaged, not booting",
+                         Common::FS::PathToUTF8String(RestartHandoffPath()));
+            return SDL_APP_FAILURE;
+        }
+        state->system.GetUserChannel() = std::move(handoff->user_channel);
+        load_parameters.program_id = handoff->program_id;
+        load_parameters.launch_type = Service::AM::LaunchType::ApplicationInitiated;
+        load_parameters.program_index = handoff->program_index;
+        load_parameters.previous_program_index = handoff->previous_program_index;
+        LOG_INFO(Frontend, "Restarted by the game: program index {}, {} user channel entries",
+                 handoff->program_index, state->system.GetUserChannel().size());
     }
     const Core::SystemResultStatus load_result = state->system.Load(*state->emu_window, lp.filepath, load_parameters);
     switch (load_result) {
     case Core::SystemResultStatus::Success:
+        if (restarted) {
+            std::error_code ec;
+            std::filesystem::remove(RestartHandoffPath(), ec);
+        }
         break; // Expected case
     case Core::SystemResultStatus::ErrorGetLoader:
         LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", lp.filepath);
@@ -661,10 +745,90 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         }
     }
 
-    state->filepath = lp.filepath;
-    StartLoadedSystem(state);
+    // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
+    state->system.GPU().Start();
+    state->system.GetCpuManager().OnGpuReady();
+
+    if (Settings::values.use_disk_shader_cache.GetValue()) {
+        VideoCommon::ShaderWarm::RefreshWarmFiles(
+            state->system, state->system.GetApplicationProcessProgramID(), {});
+        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
+            state->system.GetApplicationProcessProgramID(), std::stop_token{},
+            [](VideoCore::LoadCallbackStage, size_t value, size_t total) {});
+    }
+
+    // don't do anything, SDL3 already exists for us :D
+    state->system.RegisterExitCallback([] {});
+
+    // A game executing a program (e.g. restarting after a settings change) writes its launch state
+    // to the restart handoff and quits with kRestartExitCode; the launcher boots the same file again
+    // with EDEN_CLI_RESTART_HANDOFF set. Mirrors MainWindow::OnExecuteProgram.
+    state->system.RegisterExecuteProgramCallback([system = &state->system](std::size_t program_index) {
+        RestartHandoff handoff{
+            .program_index = static_cast<s32>(program_index),
+            .user_channel = system->GetUserChannel(),
+        };
+        const u64 previous_program_id = system->GetApplicationProcessProgramID();
+        if (previous_program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
+            handoff.previous_program_index =
+                static_cast<s32>(previous_program_id - FileSys::GetBaseTitleID(previous_program_id));
+            handoff.program_id = previous_program_id;
+        }
+        // Without the handoff, a relaunch would boot as a frontend launch and clear temp storage.
+        if (!WriteRestartHandoff(handoff)) {
+            LOG_CRITICAL(Frontend, "ExecuteProgram: could not write {}, not restarting",
+                         Common::FS::PathToUTF8String(RestartHandoffPath()));
+            return;
+        }
+        LOG_INFO(Frontend, "ExecuteProgram: program index {}, exiting with code {} to restart",
+                 program_index, kRestartExitCode);
+        restart_requested = true;
+    });
+
+    // QLaunch launched applications (should) now reload shader cache.
+    static std::mutex shader_cache_reload_mutex;
+    state->system.RegisterApplicationChangedCallback([&state](u64 changed_program_id) {
+        if (!Settings::values.use_disk_shader_cache.GetValue()) {
+            return;
+        }
+
+        std::scoped_lock lk{shader_cache_reload_mutex};
+
+        LOG_INFO(Frontend, "Reloading disk shader cache for {:016X}", changed_program_id);
+
+        state->system.Pause();
+        state->system.GPU().WaitForIdle();
+        state->system.GPU().ObtainContext();
+
+        state->system.Renderer().ReadRasterizer()->LoadDiskResources(
+            changed_program_id, std::stop_token{},
+            [](VideoCore::LoadCallbackStage, size_t, size_t) {});
+
+        state->system.GPU().ReleaseContext();
+        state->system.Run();
+    });
+
+    void(state->system.Run());
     if (state->system.DebuggerEnabled())
         state->system.InitializeDebugger();
+
+#ifdef YUZU_ENABLE_MCP
+    // eden-cli starts the MCP server only when asked (--mcp), so unattended runs never collide
+    // with a desktop emulator holding the port.
+    if (lp.mcp_enable) {
+        Mcp::ServerConfig mcp_config;
+        mcp_config.port = lp.mcp_port.value_or(Settings::values.mcp_port.GetValue());
+        mcp_config.allow_writes = lp.mcp_allow_writes || Settings::values.mcp_allow_writes.GetValue();
+        mcp_config.bearer_token = Settings::values.mcp_token.GetValue();
+        state->mcp_host = std::make_unique<CliMcpHost>(state->system, state->input_subsystem);
+        state->mcp_server =
+            std::make_unique<Mcp::Server>(state->system, *state->mcp_host, std::move(mcp_config));
+        if (const std::string error = state->mcp_server->Start(); !error.empty()) {
+            LOG_ERROR(Frontend, "MCP server: {}", error);
+            state->mcp_server.reset();
+        }
+    }
+#endif
     return SDL_APP_CONTINUE;
 }
 // EDEN_NX2_KEY_SCRIPT="seconds:code,seconds:-code,..." (or "@<file>"): press (code) or release (-code) keyboard
@@ -720,7 +884,7 @@ static void RunLiveKeys(InputCommon::InputSubsystem& input_subsystem, Core::Syst
             continue;
         }
         LOG_INFO(Frontend, "Live keys: {} {}{}", code < 0 ? "release" : "press", code < 0 ? -code : code,
-                 milliseconds >= 0 ? std::format(" for {} ms", milliseconds) : std::string{});
+                 milliseconds >= 0 ? fmt::format(" for {} ms", milliseconds) : "");
         if (code < 0) {
             input_subsystem.GetKeyboard()->ReleaseKey(static_cast<std::size_t>(-code));
             continue;
@@ -789,31 +953,42 @@ static void RunKeyScript(InputCommon::InputSubsystem& input_subsystem, Core::Sys
 extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     SdlState *state = (SdlState *)appstate;
     RunKeyScript(state->input_subsystem, state->system);
-    if (!state->emu_window) {
-        return SDL_APP_SUCCESS;
-    }
-    if (const int next = state->next_program_index.exchange(-1); next >= 0) {
-        if (!SwitchProgram(state, next)) {
-            return SDL_APP_FAILURE;
+#ifdef YUZU_ENABLE_MCP
+    if (state->mcp_host) {
+        state->mcp_host->DrainMainThread();
+        if (state->mcp_host->QuitRequested()) {
+            return SDL_APP_SUCCESS;
         }
     }
-    DSModHarness::Iterate(state->system, state->input_subsystem);
-    return state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
+#endif
+    if (state->emu_window) {
+        state->emu_window->ApplyPendingTitle();
+    }
+    if (restart_requested) {
+        return SDL_APP_SUCCESS;
+    }
+    return state->emu_window && state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     SdlState *state = (SdlState *)appstate;
-    if (!DSModHarness::HandleEvent(state->dsmod, *event) && state->emu_window) {
+    if (state->emu_window)
         state->emu_window->OnEvent(*event);
-    }
     return SDL_APP_CONTINUE;
 }
 extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     SdlState *state = (SdlState *)appstate;
-    if (!state) return;
-    // SDL calls quit for successful early exits such as --help/--version and for load failures.
-    // Those paths have no live kernel to pause, or Load already shut it down.
+    if (!state) {
+        return;
+    }
+#ifdef YUZU_ENABLE_MCP
+    state->mcp_server.reset(); // stops serving before the system goes away
+    state->mcp_host.reset();
+#endif
+    state->system.DetachDebugger();
+    // SDL calls this even when SDL_AppInit never powered the system on (no ROM given, --help or
+    // --version): the kernel is uninitialised then, and Pause()/ShutdownMainProcess() would
+    // dereference it.
     if (state->system.IsPoweredOn()) {
-        state->system.DetachDebugger();
         void(state->system.Pause());
         state->system.ShutdownMainProcess();
     }
@@ -821,6 +996,11 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     delete state;
     if (network_initialized) {
         Network::Shutdown();
+    }
+    if (restart_requested) {
+        // SDL3 maps SDL_APP_SUCCESS to exit code 0; quit SDL ourselves to return the restart code.
+        SDL_Quit();
+        std::exit(kRestartExitCode);
     }
 }
 

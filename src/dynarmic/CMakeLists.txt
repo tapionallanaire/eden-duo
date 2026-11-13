@@ -87,7 +87,7 @@ else()
         # Reg64, but GCC doesn't know that.
         list(APPEND DYNARMIC_CXX_FLAGS
             -Wno-array-bounds
-            -Wstack-usage=4096)
+            -Wstack-usage=16384)
     endif()
     if (CXX_CLANG)
         list(APPEND DYNARMIC_CXX_FLAGS

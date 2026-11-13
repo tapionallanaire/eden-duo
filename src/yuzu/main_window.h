@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <optional>
+#include <set>
 
 #include <array>
 #include <bitset>
@@ -22,6 +23,7 @@
 #include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QMainWindow>
+#include <QPointer>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QTimer>
@@ -67,6 +69,7 @@ class MultiplayerState;
 class QPushButton;
 class QProgressDialog;
 class NupProgressDialog;
+class ShaderWarmDialog;
 class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
@@ -174,8 +177,16 @@ private:
     constexpr static int MaxMultiplier = 8;
 };
 
+class QAction;
+class QMenu;
+class QtMcpHost;
+namespace Mcp {
+class Server;
+}
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
+    friend class QtMcpHost; // drives boot/pause/stop/game list for the MCP server
 
     /// Max number of recently loaded items to keep track of
     static const int max_recent_files_item = 10;
@@ -289,7 +300,8 @@ private:
 
     bool LoadROM(const QString& filename, Service::AM::FrontendAppletParameters params);
     void BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
-                  StartGameType with_config = StartGameType::Normal);
+                  StartGameType with_config = StartGameType::Normal,
+                  bool allow_recommended_settings_prompt = true);
     void BootGameFromList(const QString& filename, StartGameType with_config);
     void ShutdownGame();
     void TerminateEmulationThread();
@@ -371,6 +383,8 @@ private slots:
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path, DumpRomFSTarget target);
     void OnGameListVerifyIntegrity(const std::string& game_path);
     void OnGameListConvertToNup(const std::string& game_path);
+    void OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path);
+    void OnGameListDeleteShaderWarm(u64 program_id);
     void OnGameListExtractNup(const std::string& game_path);
     void OnGameListEditNupMetadata(const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
@@ -515,10 +529,7 @@ private:
 #endif
 
     MultiplayerState* multiplayer_state = nullptr;
-    bool use_recommended_mkw_settings = false;
-    bool asked_recommended_mkw_settings = false;
-    bool use_recommended_oot_settings = false;
-    bool asked_recommended_oot_settings = false;
+    std::set<u64> asked_recommended_settings;
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;
@@ -566,6 +577,49 @@ private:
     bool emulation_running = false;
     bool boot_in_progress = false;
     bool close_pending = false;
+
+    /// Starts the built-in MCP server if enabled by setting or command line (no-op without it).
+    void MaybeStartMcpServer(bool cli_enable, std::optional<u16> cli_port, bool cli_allow_writes);
+#ifdef YUZU_ENABLE_MCP
+    /// Creates the host (once) and starts a server from the settings and command line. On failure
+    /// keeps the error for the menu and status bar. No-op if running or still stopping.
+    void StartMcpServer();
+    /// Destroys the server on a helper thread while pumping GUI events, since in-flight requests
+    /// may be waiting on this thread. Blocks until it is gone.
+    void StopMcpServer();
+    /// After the settings dialog: starts or stops the server, restarts it when the port or token
+    /// changed, and applies Allow Writes. Settings changed there win over the command line.
+    void ApplyMcpSettings(bool old_enabled, u16 old_port, const std::string& old_token,
+                          bool old_writes);
+    /// Adds Tools > MCP Server (enable, writes, routes, dashboard and copy actions). Runs once.
+    void SetupMcpMenu();
+    /// Syncs the menu checkboxes and status text with the server state, without firing toggles.
+    void UpdateMcpMenu();
+    /// Status-bar indicator: server state, agent in control, last tool, recording, route progress.
+    void UpdateMcpStatusLabel();
+    /// Tools > MCP Server > Routes: record, run, delete the running game's routes.
+    void PopulateMcpRoutesMenu();
+
+    QMenu* mcp_routes_menu = nullptr;
+
+    QLabel* mcp_status_label = nullptr;
+    /// Refreshes mcp_status_label every second.
+    QTimer mcp_status_timer;
+    /// Kept across server restarts; must outlive mcp_server.
+    std::unique_ptr<QtMcpHost> mcp_host;
+    std::unique_ptr<Mcp::Server> mcp_server;
+    bool mcp_stopping = false; ///< StopMcpServer is waiting for the old server to finish
+    /// --mcp-port, which overrides the mcp_port setting.
+    std::optional<u16> mcp_cli_port;
+    /// --mcp-allow-writes; cleared once the user toggles Allow Writes in the menu.
+    bool mcp_cli_allow_writes = false;
+    /// Why the last start failed; empty after a successful start.
+    std::string mcp_last_error;
+    QMenu* mcp_menu = nullptr;
+    QAction* mcp_status_action = nullptr;
+    QAction* mcp_enable_action = nullptr;
+    QAction* mcp_writes_action = nullptr;
+#endif
     // The path to the game currently running
     QString current_game_path;
     // Whether a user was set on the command line (skips UserSelector if it's forced to show up)
@@ -852,6 +906,7 @@ private:
     QFutureWatcher<FileSys::Nup::PackResult> nup_watcher;
     std::shared_ptr<std::atomic_bool> nup_cancel;
     bool nup_running{};
+    QPointer<ShaderWarmDialog> shader_warm_dialog;
     std::string nup_source_path;
 
     // Last game booted, used for multi-process apps

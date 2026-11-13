@@ -381,6 +381,7 @@ std::optional<std::pair<VkBuffer, VkDeviceSize>> VertexRepackPass::Assemble(VkBu
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                               VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, write_barrier);
     });
+    scheduler.InvalidateDescriptorBuffer();
     return std::pair<VkBuffer, VkDeviceSize>{dest.buffer, dest.offset};
 }
 
@@ -422,6 +423,7 @@ std::pair<VkBuffer, VkDeviceSize> Uint8Pass::Assemble(u32 num_vertices, VkBuffer
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, WRITE_BARRIER);
     });
+    scheduler.InvalidateDescriptorBuffer();
     return {staging.buffer, staging.offset};
 }
 
@@ -484,6 +486,7 @@ std::pair<VkBuffer, VkDeviceSize> QuadIndexedPass::Assemble(
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, WRITE_BARRIER);
     });
+    scheduler.InvalidateDescriptorBuffer();
     return {staging.buffer, staging.offset};
 }
 
@@ -538,6 +541,7 @@ void ConditionalRenderingResolvePass::Resolve(VkBuffer dst_buffer, VkBuffer src_
                                VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT, 0,
                                write_barrier);
     });
+    scheduler.InvalidateDescriptorBuffer();
 }
 
 QueriesPrefixScanPass::QueriesPrefixScanPass(
@@ -613,6 +617,7 @@ void QueriesPrefixScanPass::Run(VkBuffer accumulation_buffer, VkBuffer dst_buffe
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                    vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, write_barrier);
         });
+        scheduler.InvalidateDescriptorBuffer();
     }
 }
 
@@ -803,6 +808,7 @@ void ASTCDecoderPass::AssembleInto(const VideoCommon::ImageInfo& info, u32 skip,
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, image_barrier);
     });
+    scheduler.InvalidateDescriptorBuffer();
     // No wait here: a Finish() per decode stalled the GPU thread on every new texture (Hogwarts
     // Legacy). Eglantine's flush / EDEN_NX2_ASTC_FLUSH measurement is left out with it.
 }
@@ -843,6 +849,7 @@ void BcEncoderPass::Encode(VkImageView source, u32 width, u32 height, u32 layers
         cmdbuf.Dispatch(Common::DivCeil(uniforms.blocks_x, 8U), Common::DivCeil(uniforms.blocks_y, 8U),
                         layers);
     });
+    scheduler.InvalidateDescriptorBuffer();
 }
 
 constexpr u32 BL3D_BINDING_INPUT_BUFFER  = 0;
@@ -1236,6 +1243,7 @@ void BlockLinearUnswizzle3DPass::UnswizzleChunk(
             nullptr, nullptr, post_barrier
         );
     });
+    scheduler.InvalidateDescriptorBuffer();
 }
 
 } // namespace Vulkan

@@ -288,6 +288,9 @@ PixelFormat PixelFormatFromTextureInfo(TextureFormat format, ComponentType red, 
                                                                 is_srgb)) {
         return *pixel_format;
     }
+    if (static_cast<int>(format) == 0) {
+        return PixelFormat::A8B8G8R8_UNORM;
+    }
     UNIMPLEMENTED_MSG("texture format={} srgb={} components={{{} {} {} {}}}",
                       static_cast<int>(format), is_srgb, static_cast<int>(red),
                       static_cast<int>(green), static_cast<int>(blue), static_cast<int>(alpha));

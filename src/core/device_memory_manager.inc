@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <type_traits>
@@ -18,11 +19,13 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
+#include "video_core/nx2_perf.h"
 
 namespace Core {
 
@@ -190,6 +193,9 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         VAddr virtual_address; ///< 0: no CPU mapping known
         u64 size;
     };
+    if (Common::ColdHintModeInEffect() == Settings::ColdHintMode::Off) {
+        return;
+    }
     std::vector<Run> runs;
     const size_t page_end = Common::DivCeil(address + size, Memory::YUZU_PAGESIZE);
     for (size_t page = address >> Memory::YUZU_PAGEBITS; page < page_end; ++page) {
@@ -217,11 +223,31 @@ void DeviceMemoryManager<Traits>::HintCold(DAddr address, size_t size) {
         cold_hint_worker = std::make_unique<Common::ThreadWorker>(1, "DeviceMemory:ColdHint");
     }
     cold_hint_worker->QueueWork([this, runs = std::move(runs)] {
+        // The worker's totals, logged at most every 10 s (each uploaded range is a call).
+        static u64 marked{};
+        static u64 paged{};
+        static std::chrono::steady_clock::duration busy{};
+        static auto logged = std::chrono::steady_clock::now();
+        const auto begin = std::chrono::steady_clock::now();
         for (const Run& run : runs) {
-            device_memory_ptr->buffer.HintCold(
+            const auto action = device_memory_ptr->buffer.HintCold(
                 run.physical_offset, run.size,
                 run.virtual_address != 0 ? std::optional<size_t>{run.virtual_address}
                                          : std::nullopt);
+            (action == Common::ColdHintAction::PagedOut ? paged : marked) +=
+                action == Common::ColdHintAction::None ? 0 : run.size;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        busy += now - begin;
+        if (now - logged >= std::chrono::seconds{10} && (marked != 0 || paged != 0)) {
+            LOG_INFO(HW_Memory,
+                     "Cold hints for uploaded memory: {} MiB marked cold, {} MiB paged out, "
+                     "{:.1f} ms",
+                     marked >> 20, paged >> 20,
+                     std::chrono::duration<double, std::milli>(busy).count());
+            marked = paged = 0;
+            busy = {};
+            logged = now;
         }
     });
 }
@@ -709,6 +735,23 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     if (ranges.empty()) {
         return;
     }
+    // Runs already sorted with gaps between them (the buffer tracker's) are what the sort and
+    // merge below would produce: use them as they are instead of two heap copies.
+    const bool separated =
+        VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::SortedPageBatches) &&
+        std::ranges::adjacent_find(ranges, [](const auto& a, const auto& b) {
+            return a.first > b.first || a.first + a.second >= b.first;
+        }) == ranges.end();
+    if (separated && !VideoCommon::Nx2Perf::Verify()) {
+        const DAddr lock_begin = ranges.front().first;
+        const DAddr lock_end = ranges.back().first + ranges.back().second;
+        Common::ScopedRangeLock lk(counter_guard, lock_begin,
+                                   static_cast<size_t>(lock_end - lock_begin));
+        for (const auto& [addr, size] : ranges) {
+            UpdatePagesCachedCountNoLock(addr, size, delta);
+        }
+        return;
+    }
     // Make a local copy and sort by address
     std::vector<std::pair<DAddr, size_t>> tmp(ranges.begin(), ranges.end());
     std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -731,6 +774,14 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
         }
     }
     coalesced.emplace_back(cur_addr, cur_size);
+    if (separated) {
+        static std::atomic<u32> logged{};
+        if (!std::ranges::equal(ranges, coalesced) &&
+            logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+            LOG_ERROR(HW_GPU, "Nx2Perf texture-writes: cached page runs from {:#x} merged differently",
+                      coalesced.front().first);
+        }
+    }
 
     const DAddr lock_begin = coalesced.front().first;
     const DAddr lock_end = coalesced.back().first + coalesced.back().second;

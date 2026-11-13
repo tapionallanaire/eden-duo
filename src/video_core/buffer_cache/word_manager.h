@@ -7,7 +7,9 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <limits>
 #include <span>
 #include <utility>
@@ -17,7 +19,10 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_perf.h"
 
 namespace VideoCommon {
 
@@ -31,12 +36,32 @@ enum class Type {
     CachedCPU,
     Untracked,
     Preflushable,
+    Hot,   ///< Pages the CPU rewrites again and again: kept modified, never write-protected
+    Flip,  ///< Pages the CPU modified once, while tracked, since the last reset
+    NoHot, ///< Pages the GPU modified: never hot
+    HotClean, ///< Hot pages already uploaded this frame
     Max
 };
 
+/// Frames since start, moved by BufferCache::TickFrame. Hot page state is dropped every 128.
+inline std::atomic<u32> g_hot_page_epoch{0};
+
+/// EDEN_NX2_HOT_PAGES=0 turns the hot page handling off.
+[[nodiscard]] inline bool HotPagesEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_HOT_PAGES");
+        return value == nullptr || value[0] != '0';
+    }();
+    // Duet Plus: Switch 2 titles only; Switch 1 titles keep every page tracked as before.
+    return enabled && Settings::CurrentProgramIsSwitch2();
+}
+
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
+    using CollectedRanges = std::vector<std::pair<VAddr, size_t>>;
+
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
+    static_assert(num_words <= 64, "clean_words holds a bit per word");
 
     explicit WordManager(VAddr cpu_addr_, DeviceTracker& tracker_) : tracker{&tracker_}, cpu_addr{cpu_addr_} {
         std::fill_n(heap.data() + size_t(Type::CPU) * num_words, num_words, ~u64{0});
@@ -48,6 +73,9 @@ struct WordManager {
         u64 const last_word = (~u64{0} << shift) >> shift;
         heap[num_words * size_t(Type::CPU) + num_words - 1] = last_word;
         heap[num_words * size_t(Type::Untracked) + num_words - 1] = last_word;
+        for (size_t index = 0; index < num_words; ++index) {
+            NoteCleanWord(index);
+        }
     }
     explicit WordManager() = default;
 
@@ -115,13 +143,55 @@ struct WordManager {
     /// @param enable        If enabling or disabling
     /// @param dirty_addr    Base address to mark or unmark as modified
     /// @param size          Size in bytes to mark or unmark as modified
+    /// Forgets which pages are hot every 128 frames, so a page that stopped being rewritten gets
+    /// tracked again at its next upload.
+    void RefreshHotEpoch() noexcept {
+        const u32 frame = g_hot_page_epoch.load(std::memory_order_relaxed);
+        if (frame != hot_frame) {
+            hot_frame = frame;
+            std::fill_n(heap.data() + size_t(Type::HotClean) * num_words, num_words, u64{0});
+        }
+        const u32 now = frame >> 7;
+        if (now != hot_epoch) {
+            hot_epoch = now;
+            std::fill_n(heap.data() + size_t(Type::Hot) * num_words, num_words, u64{0});
+            std::fill_n(heap.data() + size_t(Type::Flip) * num_words, num_words, u64{0});
+        }
+    }
+
     /// @param keep_tracking Keep CPU-modified pages protected for subsequent native writes.
     void ChangeRegionState(Type type, bool enable, u64 dirty_addr, u64 size, bool keep_tracking = false) noexcept {
+        const bool hot_pages = HotPagesEnabled();
+        if (hot_pages) {
+            RefreshHotEpoch();
+        }
+        std::span<u64> hot_words = Span(Type::Hot);
+        std::span<u64> flip_words = Span(Type::Flip);
+        std::span<u64> no_hot_words = Span(Type::NoHot);
+        std::span<u64> hot_clean_words = Span(Type::HotClean);
         std::span<u64> state_words = Span(type);
         [[maybe_unused]] std::span<u64> untracked_words = Span(Type::Untracked);
         [[maybe_unused]] std::span<u64> cached_words = Span(Type::CachedCPU);
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         IterateWords(dirty_addr - cpu_addr, size, [&](size_t index, u64 mask) {
+            if (hot_pages && enable) {
+                if (type == Type::CPU) {
+                    // Whoever marks a hot page modified (a write made by the GPU in the middle of
+                    // the frame, a bank re-upload) wants it uploaded again, whatever was sent.
+                    hot_clean_words[index] &= ~mask;
+                    // Tracked pages the CPU just modified: the second time within the reset
+                    // period makes a page hot, unless the GPU ever wrote it.
+                    const u64 flipped = ~untracked_words[index] & mask;
+                    if (flipped != 0) {
+                        hot_words[index] |= flip_words[index] & flipped & ~no_hot_words[index];
+                        flip_words[index] |= flipped;
+                    }
+                } else if (type == Type::GPU) {
+                    no_hot_words[index] |= mask;
+                    hot_words[index] &= ~mask;
+                    hot_clean_words[index] &= ~mask;
+                }
+            }
             if (type == Type::CPU || type == Type::CachedCPU) {
                 CollectChangedRanges(!enable || keep_tracking, index, untracked_words[index], mask, ranges);
             }
@@ -137,6 +207,9 @@ struct WordManager {
                 state_words[index] &= ~mask;
                 if (type == Type::CPU || type == Type::CachedCPU)
                     untracked_words[index] &= ~mask;
+            }
+            if (type == Type::CPU || type == Type::CachedCPU) {
+                NoteCleanWord(index);
             }
         });
         if (!ranges.empty()) {
@@ -154,6 +227,12 @@ struct WordManager {
     template <typename Func>
     void ForEachModifiedRange(Type type, bool clear, VAddr query_cpu_range, s64 size, Func&& func) {
         //static_assert(type != Type::Untracked);
+        const bool hot_pages = HotPagesEnabled() && clear && type == Type::CPU;
+        if (hot_pages) {
+            RefreshHotEpoch();
+        }
+        std::span<u64> hot_words = Span(Type::Hot);
+        std::span<u64> hot_clean_words = Span(Type::HotClean);
         std::span<u64> state_words = Span(type);
         std::span<u64> untracked_words = Span(Type::Untracked);
         std::span<u64> cached_words = Span(Type::CachedCPU);
@@ -165,25 +244,34 @@ struct WordManager {
             func(cpu_addr + pending_offset * BYTES_PER_PAGE,
                  (pending_pointer - pending_offset) * BYTES_PER_PAGE);
         };
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         IterateWords(offset, size, [&](size_t index, u64 mask) {
             if (type == Type::GPU)
                 mask &= ~untracked_words[index];
-            const u64 word = state_words[index] & mask;
+            // Hot pages uploaded since the frame began are not modified again until the next frame.
+            const u64 hot_clean = hot_pages ? hot_words[index] & hot_clean_words[index] & mask : 0;
+            const u64 word = state_words[index] & mask & ~hot_clean;
             if (word == 0 &&
                 (!clear || ((type != Type::CPU && type != Type::CachedCPU) ||
                             (untracked_words[index] & mask) == 0))) {
                 return;
             }
             if (clear) {
+                // Hot pages stay modified and untracked: their next use uploads them again,
+                // with no write protection to set and no write fault to take.
+                const u64 hot = hot_pages ? hot_words[index] & mask : 0;
+                hot_clean_words[index] |= hot & word;
+                const u64 clear_mask = mask & ~hot;
                 if (type == Type::CPU || type == Type::CachedCPU) {
-                    CollectChangedRanges(true, index, untracked_words[index], mask, ranges);
+                    CollectChangedRanges(true, index, untracked_words[index], clear_mask, ranges);
                 }
-                state_words[index] &= ~mask;
+                state_words[index] &= ~clear_mask;
                 if (type == Type::CPU || type == Type::CachedCPU)
-                    untracked_words[index] &= ~mask;
+                    untracked_words[index] &= ~clear_mask;
                 if (type == Type::CPU)
-                    cached_words[index] &= ~word;
+                    cached_words[index] &= ~(word & ~hot);
+                if (type == Type::CPU || type == Type::CachedCPU)
+                    NoteCleanWord(index);
             }
             const size_t base_offset = index * PAGES_PER_WORD;
             IteratePages(word, [&](size_t pages_offset, size_t pages_size) {
@@ -253,13 +341,14 @@ struct WordManager {
         auto const cached_words = Span(Type::CachedCPU);
         auto const untracked_words = Span(Type::Untracked);
         auto const cpu_words = Span(Type::CPU);
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         for (u64 word_index = 0; word_index < num_words; ++word_index) {
             const u64 cached_bits = cached_words[word_index];
             CollectChangedRanges(false, word_index, untracked_words[word_index], cached_bits, ranges);
             untracked_words[word_index] |= cached_bits;
             cpu_words[word_index] |= cached_bits;
             cached_words[word_index] = 0;
+            NoteCleanWord(word_index);
         }
         if (!ranges.empty()) {
             ApplyCollectedRanges(ranges, -1);
@@ -272,7 +361,7 @@ struct WordManager {
     /// @param current_bits   Current state of the word
     /// @param new_bits       New state of the word
     /// @tparam add_to_tracker True when the tracker should start tracking the new pages
-    void CollectChangedRanges(bool add_to_tracker, u64 word_index, u64 current_bits, u64 new_bits, std::vector<std::pair<VAddr, u64>>& out_ranges) const {
+    void CollectChangedRanges(bool add_to_tracker, u64 word_index, u64 current_bits, u64 new_bits, CollectedRanges& out_ranges) const {
         u64 changed_bits = (add_to_tracker ? current_bits : ~current_bits) & new_bits;
         VAddr addr = cpu_addr + word_index * BYTES_PER_WORD;
         IteratePages(changed_bits, [&](size_t offset, size_t size) {
@@ -280,10 +369,17 @@ struct WordManager {
         });
     }
 
-    void ApplyCollectedRanges(std::vector<std::pair<VAddr, u64>>& ranges, int delta) const {
+    void ApplyCollectedRanges(CollectedRanges& ranges, int delta) const {
         if (ranges.empty())
             return;
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (Nx2Perf::On(Nx2Perf::Opt::SortedPageBatches) && !Nx2Perf::Verify()) {
+            CoalesceInPlace(ranges);
+            tracker->UpdatePagesCachedBatch(
+                std::span<const std::pair<VAddr, size_t>>(ranges.data(), ranges.size()), delta);
+            ranges.clear();
+            return;
+        }
         // Coalesce adjacent/contiguous ranges
         std::vector<std::pair<VAddr, size_t>> coalesced;
         coalesced.reserve(ranges.size());
@@ -299,9 +395,31 @@ struct WordManager {
             }
         }
         coalesced.emplace_back(cur_addr, cur_size);
+        if (Nx2Perf::On(Nx2Perf::Opt::SortedPageBatches)) {
+            CoalesceInPlace(ranges);
+            static std::atomic<u32> logged{};
+            if (!std::ranges::equal(ranges, coalesced) &&
+                logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+                LOG_ERROR(HW_GPU, "Nx2Perf texture-writes: tracker runs from {:#x} coalesced differently",
+                          coalesced.front().first);
+            }
+        }
         // Use batch API to reduce lock acquisitions and contention.
         tracker->UpdatePagesCachedBatch(coalesced, delta);
         ranges.clear();
+    }
+
+    /// Merges the contiguous neighbours of sorted, disjoint runs where they lie (no copy).
+    static void CoalesceInPlace(CollectedRanges& ranges) noexcept {
+        size_t last = 0;
+        for (size_t i = 1; i < ranges.size(); ++i) {
+            if (ranges[last].first + ranges[last].second == ranges[i].first) {
+                ranges[last].second += ranges[i].second;
+            } else {
+                ranges[++last] = ranges[i];
+            }
+        }
+        ranges.resize(last + 1);
     }
 
     /// @brief Notify tracker about changes in the CPU tracking state of a word in the buffer
@@ -325,9 +443,39 @@ struct WordManager {
         return std::span<const u64>(heap.data() + num_words * size_t(type), num_words);
     }
 
+    /// Words of [first_word, last_word] that are not clean, one bit each. A clean word has no CPU
+    /// or Untracked page, so an upload over it finds and changes nothing.
+    [[nodiscard]] u64 DirtyWords(size_t first_word, size_t last_word) const noexcept {
+        const u64 mask = (~u64{0} >> (63 - (last_word - first_word))) << first_word;
+        return mask & ~clean_words;
+    }
+
+    /// Recounts the clean words: true when clean_words matches the CPU and Untracked words.
+    [[nodiscard]] bool CleanWordsHold() const noexcept {
+        const std::span<const u64> cpu_words = Span(Type::CPU);
+        const std::span<const u64> untracked_words = Span(Type::Untracked);
+        for (size_t index = 0; index < num_words; ++index) {
+            const bool clean = (cpu_words[index] | untracked_words[index]) == 0;
+            if (((clean_words >> index) & 1) != u64{clean}) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void NoteCleanWord(size_t index) noexcept {
+        const bool clean = (heap[index] | heap[num_words * size_t(Type::Untracked) + index]) == 0;
+        clean_words = (clean_words & ~(u64{1} << index)) | (u64{clean} << index);
+    }
+
     std::array<u64, size_t(Type::Max) * num_words> heap = {};
+    /// Bit per word, set while the word has no CPU and no Untracked page (DirtyWords). Every
+    /// change to those words updates it: a per-word form of PR #161's upload_words count.
+    u64 clean_words = 0;
     DeviceTracker* tracker = nullptr;
     VAddr cpu_addr = 0;
+    u32 hot_epoch = 0;
+    u32 hot_frame = 0;
 };
 
 } // namespace VideoCommon

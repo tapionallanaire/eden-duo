@@ -79,7 +79,7 @@ endif()
 
 # qt stuff
 option(ENABLE_QT "Enable the Qt frontend" ON)
-option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" OFF)
+option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" ON)
 option(ENABLE_UPDATE_CHECKER "Enable update checker (for Qt and Android)" OFF)
 cmake_dependent_option(YUZU_USE_QT_MULTIMEDIA "Use QtMultimedia for Camera"  OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
 cmake_dependent_option(YUZU_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
@@ -273,6 +273,7 @@ cmake_dependent_option(ENABLE_OPENGL "Enable OpenGL" ON "NOT (WIN32 AND ARCHITEC
 mark_as_advanced(FORCE ENABLE_OPENGL)
 
 option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
+option(ENABLE_MCP_SERVER "Build the built-in MCP server for AI agents (off at runtime by default)" ON)
 option(ENABLE_WIFI_SCAN "Enable WiFi scanning" OFF)
 
 cmake_dependent_option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence" OFF "ENABLE_QT" OFF)
@@ -659,10 +660,15 @@ if (ENABLE_QT)
     endif()
 
     if (ENABLE_QT_TRANSLATION)
-        list(APPEND YUZU_QT_COMPONENTS LinguistTools)
+        list(APPEND YUZU_QT_OPTIONAL LinguistTools)
     endif()
 
     find_package(Qt6 REQUIRED COMPONENTS ${YUZU_QT_COMPONENTS} OPTIONAL_COMPONENTS ${YUZU_QT_OPTIONAL})
+
+    if (ENABLE_QT_TRANSLATION AND NOT Qt6LinguistTools_FOUND)
+        message(STATUS "Qt6 LinguistTools not found; disabling Qt translations")
+        set(ENABLE_QT_TRANSLATION OFF)
+    endif()
     set(QT_MAJOR_VERSION 6)
     # Qt6 sets cxx_std_17 and we need to undo that
     set_target_properties(Qt6::Platform PROPERTIES INTERFACE_COMPILE_FEATURES "")
@@ -754,21 +760,22 @@ endif()
 
 # TODO: Icon/install handling n such should be put into dist/CMakeLists.txt
 if(ENABLE_QT AND UNIX AND NOT APPLE)
-    install(FILES "dist/dev.eden_emu.eden.desktop"
+    install(FILES "dist/dev.eglantine.eglantine.desktop"
         DESTINATION "share/applications")
     install(FILES "dist/dev.eden_emu.eden.svg"
-        DESTINATION "share/icons/hicolor/scalable/apps")
+        DESTINATION "share/icons/hicolor/scalable/apps"
+        RENAME "dev.eglantine.eglantine.svg")
 
     # TODO: these files need to be updated.
-    install(FILES "dist/dev.eden_emu.eden.xml"
+    install(FILES "dist/dev.eglantine.eglantine.xml"
         DESTINATION "share/mime/packages")
-    install(FILES "dist/dev.eden_emu.eden.metainfo.xml"
+    install(FILES "dist/dev.eglantine.eglantine.metainfo.xml"
         DESTINATION "share/metainfo")
 endif()
 
 if (YUZU_INSTALL_UDEV_RULES)
     include(GNUInstallDirs)
 
-    install(FILES "dist/72-eden-input.rules"
+    install(FILES "dist/72-eglantine-input.rules"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/udev/rules.d")
 endif()

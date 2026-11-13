@@ -150,6 +150,7 @@ u128 InterpreterVisitor::GetVec(Vec v) {
     return m_fpsimd_regs[static_cast<u32>(v)];
 }
 
+// Register 31 is the zero register here; callers handle SP as a base register separately.
 u64 InterpreterVisitor::GetReg(Reg r) {
     // Register 31 is the zero register here; callers handle SP explicitly. The saved context has
     // only x0-x30, so indexing it would read the stack pointer that follows them.

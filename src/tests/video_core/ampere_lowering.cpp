@@ -307,6 +307,30 @@ TEST_CASE("Ampere gathers take arrays, per-pixel offsets and depth references",
 
     // Offset mode 3 is not an offset form.
     CHECK_FALSE(lower({{0x082c7b63, 0xb0801004, 0x001e3f2a, 0x00014200}}));
+
+    // A gather from a second descriptor buffer loads the handle from c[binding][offset] into R246
+    // and emits Maxwell TLD4.B (0xdec0...) with meta_reg = 246 and any offsets/dref in R247+.
+    const Instruction depth_gather{{0x180c7b63, 0x30800e1c, 0x001e4f0e, 0x000f4200}}; // binding 2
+    const Instruction plain_b14{{0x040a7b63, 0x33800408, 0x041e0f08, 0x100fc200}};    // binding 14
+    auto aoffi_b14 = plain_b14;
+    aoffi_b14.words[2] |= 1U << 12;
+    const auto mixed_plain = LowerToMaxwell(std::array{depth_gather, plain_b14, EXIT});
+    INFO(mixed_plain.error);
+    REQUIRE(static_cast<bool>(mixed_plain));
+    CHECK(mixed_plain.required_texture_buffer == 2);
+    const u64 tld4b_plain = FindMaxwell(mixed_plain, 0xde, 56);
+    REQUIRE(tld4b_plain != 0);
+    CHECK(field(tld4b_plain, 20, 8) == 246);
+    CHECK(field(tld4b_plain, 36, 2) == 0);
+
+    const auto mixed_aoffi = LowerToMaxwell(std::array{depth_gather, aoffi_b14, EXIT});
+    INFO(mixed_aoffi.error);
+    REQUIRE(static_cast<bool>(mixed_aoffi));
+    CHECK(mixed_aoffi.required_texture_buffer == 2);
+    const u64 tld4b_aoffi = FindMaxwell(mixed_aoffi, 0xde, 56);
+    REQUIRE(tld4b_aoffi != 0);
+    CHECK(field(tld4b_aoffi, 20, 8) == 246);
+    CHECK(field(tld4b_aoffi, 36, 2) == 1);
 }
 
 TEST_CASE("Ampere Ocarina sign extends, uniform shifts and carries, LEA.HI and SURED forms",
@@ -347,11 +371,12 @@ TEST_CASE("Ampere Ocarina sign extends, uniform shifts and carries, LEA.HI and S
     REQUIRE(lea.instructions.size() >= 2);
     CHECK(lea.instructions[1] == 0x5c1100000007fa01ULL);
 
-    // SURED.OR: op 6 at Maxwell bits 24-26.
+    // SURED.OR: lowered to SUATOM (result in RZ) with op 6 at Maxwell bits 29-32.
     const auto reduce = lower({{0x0400159f, 0x60008400, 0x0310e000, 0x0001e200}});
     INFO(reduce.error);
     REQUIRE(static_cast<bool>(reduce));
-    CHECK(field(reduce.instructions.front(), 24, 3) == 6);
+    CHECK(field(reduce.instructions.front(), 52, 12) == 0xea0);
+    CHECK(field(reduce.instructions.front(), 29, 4) == 6);
 
     // LDG.E.128 R216, [R216.64] in a program using uniform registers: R216-R219 are reserved,
     // so the load goes through a borrowed low quartet.
@@ -439,5 +464,72 @@ TEST_CASE("Ampere Ocarina byte constant loads, ULEA carries to UP3 and two-sourc
     INFO(convert.error);
     REQUIRE(static_cast<bool>(convert));
     CHECK(field(FindMaxwell(convert, 0x5cb, 52), 41, 2) == 3);
+
+    // UISETP.LT.U32.AND UPc, UPT, UR4, 0x2, UPT + USEL UR4, UR4, 0x2, UPc:
+    // Matching UP0/UP1/UP2 clamps fold USEL to IMNMX.U32 while preserving UISETP R239 write.
+    for (const u32 cond : {0U, 1U, 2U}) {
+        const auto clamped = LowerToMaxwell(std::array<Instruction, 3>{{
+            {{0x0400788c, 0x00000002, 0x0bf01070U | (cond << 17), 0x000fc800}},
+            {{0x04047887, 0x00000002, 0x08000000U | (cond << 23), 0x000fc800}},
+            EXIT,
+        }});
+        REQUIRE(static_cast<bool>(clamped));
+        CHECK(CountMaxwell(clamped, 0x382003800027dcdcULL, 0) == 1);
+        CHECK(CountMaxwell(
+            clamped, 0x38e800000007efefULL | (u64{1U << (6U - cond)} << 20), 0) == 1);
+    }
+    // Mismatched predicate (UP1 vs UP2), negated USEL (!UP1), or guarded UISETP/USEL must not fold.
+    for (const auto& non_clamp : {
+             std::array<Instruction, 3>{{
+                 {{0x0400788c, 0x00000002, 0x0bf21070, 0x000fc800}},
+                 {{0x04047887, 0x00000002, 0x09000000, 0x000fc800}}, EXIT}},
+             std::array<Instruction, 3>{{
+                 {{0x0400788c, 0x00000002, 0x0bf21070, 0x000fc800}},
+                 {{0x04047887, 0x00000002, 0x0c800000, 0x000fc800}}, EXIT}},
+             std::array<Instruction, 3>{{
+                 {{0x0400088c, 0x00000002, 0x0bf21070, 0x000fc800}},
+                 {{0x04047887, 0x00000002, 0x08800000, 0x000fc800}}, EXIT}},
+             std::array<Instruction, 3>{{
+                 {{0x0400788c, 0x00000002, 0x0bf21070, 0x000fc800}},
+                 {{0x04040887, 0x00000002, 0x08800000, 0x000fc800}}, EXIT}},
+         }) {
+        const auto res = LowerToMaxwell(non_clamp);
+        REQUIRE(static_cast<bool>(res));
+        CHECK(CountMaxwell(res, 0x382003800027dcdcULL, 0) == 0);
+    }
+}
+TEST_CASE("Ampere three-input IADD3 preserves negative immediates", "[video_core][ampere]") {
+    // GrassCullGrid's R4 + (-1) + R7 selects the grid level. Bit 63 is the literal's sign bit.
+    for (const u32 literal : {0xffffffffU, 0xfffffffeU, 0x80000000U, 0x7fffffffU, 17U}) {
+        const std::array<Instruction, 2> code{{
+            {{0x04047810, literal, 0x07ffe007, 0x000fc400}},
+            EXIT,
+        }};
+        const auto lowered = LowerToMaxwell(code);
+        REQUIRE(static_cast<bool>(lowered));
+        const u64 add = FindMaxwell(lowered, 0x5c1, 52);
+        REQUIRE(add != 0);
+        CHECK(((add >> 48) & 1) == 0);
+        CHECK(((add >> 49) & 1) == 0);
+        const u64 move = FindMaxwell(lowered, 0x010, 52);
+        CHECK(static_cast<u32>(move >> 20) == literal);
+    }
+}
+
+TEST_CASE("Ampere three-input IADD3 retains register source negation", "[video_core][ampere]") {
+    const std::array<Instruction, 2> code{{
+        {{0x04047210, 0x80000005, 0x07ffe907, 0x000fc400}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    std::vector<u64> adds;
+    for (const u64 word : lowered.instructions) {
+        if ((word >> 52) == 0x5c1) adds.push_back(word);
+    }
+    REQUIRE(adds.size() == 2);
+    CHECK(((adds[0] >> 48) & 1) == 1);
+    CHECK(((adds[0] >> 49) & 1) == 1);
+    CHECK(((adds[1] >> 48) & 1) == 1);
 }
 } // namespace

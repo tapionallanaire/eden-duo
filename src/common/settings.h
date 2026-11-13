@@ -355,6 +355,14 @@ struct Values {
                                            true,
                                            &use_custom_cpu_ticks};
 
+    SwitchableSetting<bool> prefer_3d_vcache{linkage,
+                                             true,
+                                             "prefer_3d_vcache",
+                                             Category::Cpu,
+                                             Specialization::Default,
+                                             true,
+                                             true};
+
     Setting<bool> cpuopt_page_tables{linkage, true, "cpuopt_page_tables", Category::CpuDebug};
     Setting<bool> cpuopt_block_linking{linkage, true, "cpuopt_block_linking", Category::CpuDebug};
     Setting<bool> cpuopt_return_stack_buffer{linkage, true, "cpuopt_return_stack_buffer",
@@ -442,6 +450,13 @@ struct Values {
                                                        true};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    SwitchableSetting<DlssQuality> nvidia_dlss_quality{linkage,
+                                                       DlssQuality::Quality,
+                                                       "nvidia_dlss_quality",
+                                                       Category::Renderer,
+                                                       Specialization::Default,
+                                                       true,
+                                                       true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -663,6 +678,43 @@ struct Values {
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
+    // Off: task/mesh draws take the compute fallback even when the device has VK_EXT_mesh_shader.
+    SwitchableSetting<bool> use_mesh_shaders{linkage, true, "use_mesh_shaders",
+                                             Category::RendererAdvanced};
+
+    // Linux: the GPU driver's shader cache in a folder of our own (ConfigureDriverShaderCache),
+    // with its size limit in GiB. Applied at startup, before anything loads a driver.
+    Setting<bool> private_driver_shader_cache{linkage, true, "private_driver_shader_cache",
+                                              Category::RendererAdvanced, Specialization::Paired};
+    Setting<u32, true> driver_shader_cache_size{linkage,
+                                                10,
+                                                1,
+                                                1024,
+                                                "driver_shader_cache_size",
+                                                Category::RendererAdvanced,
+                                                Specialization::Countable,
+                                                true,
+                                                false,
+                                                &private_driver_shader_cache};
+
+    // Guest memory of uploaded textures and buffers, which the host GPU holds a copy of
+    // (HostMemory::HintCold): Always pages it out at each pass, which lowers RAM use but stalls the
+    // GPU threads (Mario Kart World: 60-700 ms every 600 frames); WhenRamIsLow only marks it to be
+    // reclaimed first, and pages it out while the system is short of memory.
+    // Duet Plus, Android: on by default. Only Switch 2 titles send hints there (buffer and
+    // texture caches), and without them a phone kills the app for memory (Ocarina of Time).
+    Setting<ColdHintMode> cold_hint_mode{linkage,
+#ifdef __ANDROID__
+                                         ColdHintMode::Always,
+#else
+                                         ColdHintMode::Off,
+#endif
+                                         "cold_hint_mode",
+                                         Category::RendererMemory,
+                                         Specialization::Default,
+                                         true,
+                                         true};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 
@@ -673,6 +725,9 @@ struct Values {
     SwitchableSetting<bool> mkw_30fps{linkage, false, "mkw_30fps", Category::RendererAdvanced};
     SwitchableSetting<bool> mkw_dynamic_fps{linkage, false, "mkw_dynamic_fps",
                                             Category::RendererAdvanced};
+    SwitchableSetting<bool> hyrule_dynamic_fps{linkage, false, "hyrule_dynamic_fps",
+                                               Category::RendererAdvanced};
+    SwitchableSetting<bool> hyrule_30fps{linkage, false, "hyrule_30fps", Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_reactive_flushing{linkage,
 #ifdef __ANDROID__
@@ -824,8 +879,8 @@ struct Values {
                                       false,   true, &custom_rtc_enabled};
     SwitchableSetting<s64, true> custom_rtc_offset{linkage,
                                                    0,
-                                                   (std::numeric_limits<s64>::min)(),
-                                                   (std::numeric_limits<s64>::max)(),
+                                                   (std::numeric_limits<int>::min)(),
+                                                   (std::numeric_limits<int>::max)(),
                                                    "custom_rtc_offset",
                                                    Category::System,
                                                    Specialization::Countable,
@@ -946,6 +1001,11 @@ struct Values {
     bool record_frame_times;
     Setting<bool> use_gdbstub{linkage, false, "use_gdbstub", Category::Debugging};
     Setting<u16> gdbstub_port{linkage, 6543, "gdbstub_port", Category::Debugging};
+    // Built-in MCP server (see tools/mcp/README.md). Loopback only, off by default.
+    Setting<bool> enable_mcp_server{linkage, false, "enable_mcp_server", Category::Debugging};
+    Setting<u16> mcp_port{linkage, 6544, "mcp_port", Category::Debugging};
+    Setting<bool> mcp_allow_writes{linkage, false, "mcp_allow_writes", Category::Debugging};
+    Setting<std::string> mcp_token{linkage, std::string{}, "mcp_token", Category::Debugging};
     SwitchableSetting<std::string> program_args{linkage,
                                                 std::string(),
                                                 "program_args",

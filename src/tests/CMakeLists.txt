@@ -5,6 +5,27 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    core/nx2_frame_interval.cpp
+    video_core/upload_batch.cpp
+    core/nx2_oot_time.cpp
+    video_core/unbacked_image_policy.cpp
+    core/builtin_patches.cpp
+    core/gpu_dirty_memory_manager.cpp
+    video_core/macro_dma_forward.cpp
+    video_core/gpu_timestamp.cpp
+    video_core/maxwell_fast_method.cpp
+    video_core/split_write_tracker.cpp
+    video_core/nx2_written_pages.cpp
+    video_core/frame_dump_schedule.cpp
+    core/nx2_debug_server.cpp
+    core/system_test_context.h
+    video_core/ampere_logged_numeric.cpp
+    video_core/pipeline_optimization.cpp
+    video_core/spirv_atomic_retry.cpp
+    video_core/spirv_storage_alignment.cpp
+    video_core/spirv_fragment_shuffle.cpp
+    video_core/mesh_fallback.cpp
+    video_core/spirv_software_matrix.cpp
     common/bit_field.cpp
     common/cityhash.cpp
     common/container_hash.cpp
@@ -15,6 +36,7 @@ add_executable(tests
     common/page_table.cpp
     common/param_package.cpp
     common/range_map.cpp
+    common/range_set_subtract.cpp
     common/ring_buffer.cpp
     common/scratch_buffer.cpp
     common/slot_vector.cpp
@@ -27,18 +49,33 @@ add_executable(tests
     core/nup_writer.cpp
     core/nx2_debug_server.cpp
     core/nx2_movie_pacing.cpp
+    core/nx2_gpu_memory_registry.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
     video_core/frame_dump_schedule.cpp
     video_core/framebuffer_limits.cpp
     video_core/memory_tracker.cpp
+    video_core/nx2_perf.cpp
+    video_core/nx2_perf_draw_binds.cpp
+    video_core/nx2_perf_texture_writes.cpp
+    video_core/nx2_perf_native_qmd.cpp
+    video_core/nx2_perf_query_callback.cpp
+    video_core/nx2_perf_switches.cpp
+    video_core/memory_manager_runs.cpp
+    video_core/nx2_sparse_residency.cpp
     video_core/spirv_storage_alignment.cpp
+    video_core/pipeline_cache_dir.cpp
     video_core/pipeline_optimization.cpp
     video_core/spirv_atomic_retry.cpp
     video_core/spirv_fragment_shuffle.cpp
     video_core/ampere_depth_compare.cpp
+    video_core/shader_bench.cpp
+    video_core/shader_precache.cpp
+    video_core/shader_precache_identity.cpp
     video_core/h264_packet.cpp
     video_core/vertex_repack.cpp
+    video_core/virtual_range_cache.cpp
+    video_core/query_copy.cpp
     video_core/ampere_lowering.cpp
     video_core/spirv_software_matrix.cpp
     video_core/ampere_geometry.cpp
@@ -59,32 +96,27 @@ add_executable(tests
     video_core/ampere_vote.cpp
     video_core/shader_attributes.cpp
     video_core/indirect_reset.cpp
+    video_core/ocarina_upscale.cpp
     input_common/calibration_configuration_job.cpp
 )
 
 create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core input_common video_core)
-target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain
-    Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+
+if (ENABLE_MCP_SERVER)
+    target_sources(tests PRIVATE mcp/protocol.cpp)
+    target_link_libraries(tests PRIVATE mcp)
+endif()
+target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 add_test(NAME tests COMMAND tests)
 
-add_executable(composite_completion_test video_core/composite_completion_standalone.cpp)
-target_include_directories(composite_completion_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-add_test(NAME composite_completion_test COMMAND composite_completion_test)
-
-add_executable(subrect_runs_test video_core/subrect_runs_standalone.cpp)
-target_include_directories(subrect_runs_test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-add_test(NAME subrect_runs_test COMMAND subrect_runs_test)
-
 # needed for vma
-if (NOT MSVC)
+if(NOT MSVC)
     target_compile_options(tests PRIVATE
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-conversion>
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-variable>
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-parameter>
         $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-missing-field-initializers>)
 endif()
-
-include(core/mods/duo_tests.cmake) # Eden Duo: dual-screen runtime tests

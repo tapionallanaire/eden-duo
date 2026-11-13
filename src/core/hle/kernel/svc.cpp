@@ -12,10 +12,12 @@
 
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
+#include "core/debugger/trace_hooks.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
+#include "video_core/nx2_spikes.h"
 
 namespace Kernel::Svc {
 
@@ -2500,12 +2502,20 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     default: UNREACHABLE_MSG("Unhandled SVC {:#x}!", imm);
     }
 }
+/// Dispatches SVC `imm` for the current thread, with optional tracing and trace-hook reporting.
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
     std::array<uint64_t, 8> args;
     kernel.CurrentPhysicalCore().SaveSvcArguments(process, args);
     GetCurrentThread(kernel).SetEnteredKernel();
+    // Inputs for a trace observer (the call overwrites args with its outputs); only copied when
+    // one listens, so an unset hook costs one relaxed load per SVC.
+    const auto svc_hook = Core::Trace::g_svc_hook.load(std::memory_order_relaxed);
+    std::array<u64, 4> svc_in{};
+    if (svc_hook != nullptr) {
+        svc_in = {GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2), GetArg64(args, 3)};
+    }
     //kernel.EnterSVCProfile();
     LOG_TRACE(Kernel_SVC, "{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x} [6]={:#x}",
         imm, GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2),
@@ -2569,15 +2579,58 @@ void Call(Core::System& system, u32 imm) {
         LOG_DEBUG(Kernel_SVC, "Switch 2 svc 0x80 addr={:#x} size={:#x} mask={:#x} attr={:#x} -> {:#x}",
                   address, size, mask, attr, result.raw);
         args[0] = result.raw;
-    } else if (process.Is64Bit()) {
-        Call64(system, imm, args);
     } else {
-        Call32(system, imm, args);
+        namespace Spikes = VideoCommon::Nx2Spikes;
+        const bool spikes = Spikes::Counting();
+        const auto started = spikes ? Spikes::Clock::now() : Spikes::Clock::time_point{};
+        if (process.Is64Bit()) {
+            Call64(system, imm, args);
+        } else {
+            Call32(system, imm, args);
+        }
+        if (spikes) {
+            const auto time = Spikes::Clock::now() - started;
+            Spikes::Note(Spikes::Event::Svc, time);
+            switch (imm) {
+            case 0x0B:
+                Spikes::Note(Spikes::Event::SvcSleep, time);
+                break;
+            case 0x18:
+                Spikes::Note(Spikes::Event::SvcWaitSync, time);
+                break;
+            case 0x1A:
+            case 0x1B:
+            case 0x1C:
+            case 0x1D:
+                Spikes::Note(Spikes::Event::SvcMutexCondvar, time);
+                break;
+            case 0x34:
+            case 0x35:
+                Spikes::Note(Spikes::Event::SvcAddressArbiter, time);
+                break;
+            case 0x21:
+            case 0x22:
+            case 0x43:
+            case 0x44:
+                Spikes::Note(Spikes::Event::SvcIpc, time);
+                break;
+            default:
+                break;
+            }
+        }
     }
     if (svc_trace) {
         LOG_INFO(Kernel_SVC, "svc {:#04x} out t{} [0]={:#x} [1]={:#x} [2]={:#x}", imm,
                  GetCurrentThread(kernel).GetThreadId(), GetArg64(args, 0), GetArg64(args, 1),
                  GetArg64(args, 2));
+    }
+    if (svc_hook != nullptr) {
+        svc_hook(Core::Trace::SvcCall{
+            .imm = imm,
+            .thread_id = GetCurrentThread(kernel).GetThreadId(),
+            .in = svc_in,
+            .out = {GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2)},
+        });
     }
     //kernel.ExitSVCProfile();
     kernel.CurrentPhysicalCore().LoadSvcArguments(process, args);

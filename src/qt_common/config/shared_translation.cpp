@@ -136,6 +136,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, cpu_ticks, tr("Custom CPU Ticks"),
            tr("Set a custom value of CPU ticks. Higher values can increase performance, but may "
               "cause deadlocks. A range of 77-21000 is recommended."));
+    INSERT(Settings, prefer_3d_vcache, tr("Pin Emulation Threads to 3D V-Cache CCD"),
+           tr("On dual-CCD processors with asymmetric L3 cache (such as AMD Ryzen 9 X3D), pins "
+              "emulated CPU and GPU threads to the 3D V-Cache CCD and offloads background "
+              "shader/worker threads to the secondary CCD to prevent cross-CCD latency and "
+              "cache thrashing."));
     INSERT(Settings, cpu_backend, tr("Backend:"), QString());
 
     // Cpu Debug
@@ -185,11 +190,19 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
-    INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS"),
+    INSERT(Settings, nvidia_dlss,
+           tr("Use NVIDIA DLSS in place of a game's DLSS or anti-aliasing"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
-              "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
-              "the NVIDIA app has downloaded it; Eglantine does not ship NVIDIA's files. Use the "
-              "download button below.\nTakes effect when a game starts."));
+              "instead of AMD FSR 3.1, or in place of its own anti-aliasing / upscaling.\n"
+              "Needs NVIDIA's Streamline loader, and NVIDIA DLSS unless the NVIDIA app has "
+              "downloaded it; Eglantine does not ship NVIDIA's files. Use the download button "
+              "below.\nWorks in The Legend of Zelda: Ocarina of Time.\n"
+              "Takes effect when a game starts."));
+    INSERT(Settings, nvidia_dlss_quality, tr("NVIDIA DLSS Quality:"),
+           tr("Selects the NVIDIA DLSS upscaling quality mode:\n"
+              "Performance, Balanced, Quality, or DLAA (native resolution anti-aliasing).\n"
+              "In Ocarina of Time, DLAA renders 3D at full 1440p (Docked), while Quality, "
+              "Balanced, and Performance upscale from 1080p to 1440p."));
     INSERT(Settings, anti_aliasing, tr("Anti-Aliasing Method:"),
            tr("The anti-aliasing method to use.\nSMAA offers the best quality.\nFXAA "
               "can produce a more stable picture in lower resolutions."));
@@ -301,10 +314,31 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "Increasing this can improve throughput on high-end GPUs but may cause TDR or driver "
               "timeouts on weaker hardware."));
 
+    INSERT(Settings, use_mesh_shaders, tr("Use mesh shaders"),
+           tr("Draws the task and mesh shader geometry of Switch 2 games with the GPU's own mesh "
+              "shaders (VK_EXT_mesh_shader).\nTurn it off to use the slower compute fallback, "
+              "for example if a driver draws that geometry wrong or crashes.\n"
+              "Takes effect when a game starts."));
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, private_driver_shader_cache, QString(), QString());
+    INSERT(Settings, cold_hint_mode, tr("Release uploaded guest memory"),
+           tr("Hands the guest memory of textures and buffers already on the GPU back to the "
+              "operating system (Mario Kart World: about 1.2 GB).\n"
+              "When RAM is low: only marks it to be reclaimed first, and "
+              "pages it out only while the system is short of memory.\n"
+              "Always: pages it out every few seconds, which stalls rendering for tens to "
+              "hundreds of milliseconds each time."));
+#if defined(__linux__)
+    INSERT(Settings, driver_shader_cache_size, tr("Separate driver shader cache (Linux only)"),
+           tr("Keeps the NVIDIA driver's shader cache for this emulator in its own folder, up to "
+              "this size, so other applications can't evict it.\nTurn it off to use the "
+              "driver's shared cache instead.\nTakes effect at the next start."));
+#else
+    INSERT(Settings, driver_shader_cache_size, QString(), QString());
+#endif
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -323,6 +357,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Lets the game adjust between 30 and 60 FPS using whole-frame timing to maintain "
               "normal game speed. Takes effect after restarting the game and takes precedence over "
               "the 30 FPS mode."));
+    INSERT(Settings, hyrule_dynamic_fps,
+           tr("Hyrule Warriors: Age of Imprisonment: dynamic FPS (experimental)"),
+           tr("Drops to 30 FPS with the game's split-screen time step while the game runs below "
+              "about 50 FPS, so heavy slowdowns don't slow down the game, and tries 60 FPS again "
+              "every few seconds."));
+    INSERT(Settings, hyrule_30fps, tr("Hyrule Warriors: Age of Imprisonment: 30 FPS mode"),
+           tr("Always runs at 30 FPS with the game's split-screen time step, at normal game speed. "
+              "Takes precedence over dynamic FPS."));
     INSERT(Settings, barrier_feedback_loops, tr("Barrier feedback loops"),
            tr("Improves rendering of transparency effects in specific games."));
     INSERT(Settings, enable_buffer_history, tr("Enable buffer history"),
@@ -462,6 +504,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(FramePacingMode, Target_90, tr("90 FPS")),
                               PAIR(FramePacingMode, Target_120, tr("120 FPS")),
                           }});
+    translations->insert({Settings::EnumMetadata<Settings::ColdHintMode>::Index(),
+                          {
+                              PAIR(ColdHintMode, Off, tr("Off")),
+                              PAIR(ColdHintMode, WhenRamIsLow, tr("When RAM is low")),
+                              PAIR(ColdHintMode, Always, tr("Always")),
+                          }});
     translations->insert({Settings::EnumMetadata<Settings::VramUsageMode>::Index(),
                           {
                               PAIR(VramUsageMode, Conservative, tr("Conservative")),
@@ -565,6 +613,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(AntiAliasing, None, tr("None")),
                               PAIR(AntiAliasing, Fxaa, tr("FXAA")),
                               PAIR(AntiAliasing, Smaa, tr("SMAA")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::DlssQuality>::Index(),
+                          {
+                              PAIR(DlssQuality, Performance, tr("Performance")),
+                              PAIR(DlssQuality, Balanced, tr("Balanced")),
+                              PAIR(DlssQuality, Quality, tr("Quality")),
+                              PAIR(DlssQuality, DLAA, tr("DLAA")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AspectRatio>::Index(),
                           {

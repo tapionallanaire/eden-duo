@@ -50,6 +50,7 @@ add_library(core STATIC
     debugger/nx2_debug_server.h
     debugger/nx2_debug_tools.cpp
     debugger/nx2_debug_tools.h
+    debugger/trace_hooks.h
     device_memory.cpp
     device_memory.h
     device_memory_manager.h
@@ -465,7 +466,8 @@ add_library(core STATIC
     hle/service/am/service/application_functions.cpp
     hle/service/am/service/application_functions.h
     hle/service/am/service/application_proxy.cpp
-    hle/service/am/service/graphics_scale_controller.h
+    hle/service/am/service/graphics_scaling_parameters_functions.h
+    hle/service/am/service/performance_functions.h
     hle/service/am/service/application_proxy.h
     hle/service/am/service/application_proxy_service.cpp
     hle/service/am/service/application_proxy_service.h
@@ -1046,9 +1048,12 @@ add_library(core STATIC
     hle/service/server_manager.h
     hle/service/service.cpp
     hle/service/service.h
+    hle/service/unimplemented_registry.h
     hle/service/nx2_streamplay.h
     hle/service/nx2_stub_interface.h
     hle/service/nx2_gsv.h
+    hle/service/nx2_frame_interval.h
+    hle/service/nx2_oot_time.h
     hle/service/services.cpp
     hle/service/services.h
     hle/service/set/factory_settings_server.cpp

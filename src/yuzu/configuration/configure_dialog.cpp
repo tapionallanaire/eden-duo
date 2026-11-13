@@ -19,6 +19,7 @@
 #include "yuzu/configuration/configure_dialog.h"
 #include "yuzu/configuration/configure_filesystem.h"
 #include "yuzu/configuration/configure_general.h"
+#include "yuzu/configuration/configure_frame_generation.h"
 #include "yuzu/configuration/configure_graphics.h"
 #include "yuzu/configuration/configure_graphics_advanced.h"
 #include "yuzu/configuration/configure_graphics_extensions.h"
@@ -26,6 +27,7 @@
 #include "yuzu/configuration/configure_input.h"
 #include "yuzu/configuration/configure_input_player.h"
 #include "yuzu/configuration/configure_network.h"
+#include "yuzu/configuration/configure_performance.h"
 #include "yuzu/configuration/configure_profile_manager.h"
 #include "yuzu/configuration/configure_system.h"
 #include "yuzu/configuration/configure_ui.h"
@@ -49,6 +51,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
           std::make_unique<ConfigureGraphicsAdvanced>(system_, nullptr, *builder, this)},
       graphics_extensions_tab{
           std::make_unique<ConfigureGraphicsExtensions>(system_, nullptr, *builder, this)},
+      frame_gen_tab{std::make_unique<ConfigureFrameGeneration>(system_, nullptr, *builder, this)},
       ui_tab{std::make_unique<ConfigureUi>(system_, this)},
       graphics_tab{std::make_unique<ConfigureGraphics>(
           system_, vk_device_records, [&]() { graphics_advanced_tab->ExposeComputeOption(); },
@@ -59,6 +62,11 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
       hotkeys_tab{std::make_unique<ConfigureHotkeys>(system_.HIDCore(), this)},
       input_tab{std::make_unique<ConfigureInput>(system_, this)},
       network_tab{std::make_unique<ConfigureNetwork>(system_, this)},
+      performance_state{std::make_unique<Performance::State>()},
+      performance_gpu_tab{
+          std::make_unique<ConfigureGpu>(*performance_state, vk_device_records, this)},
+      performance_shaders_tab{std::make_unique<ConfigureShaders>(system_, *builder, this)},
+      performance_ram_tab{std::make_unique<ConfigureRam>(system_, *builder, this)},
       profile_tab{std::make_unique<ConfigureProfileManager>(system_, this)},
       system_tab{std::make_unique<ConfigureSystem>(system_, nullptr, *builder, this)},
       web_tab{std::make_unique<ConfigureWeb>(this)} {
@@ -75,6 +83,7 @@ ConfigureDialog::ConfigureDialog(QWidget* parent, HotkeyRegistry& registry_,
     ui->tabWidget->addTab(graphics_tab.get(), tr("Graphics"));
     ui->tabWidget->addTab(graphics_advanced_tab.get(), tr("GraphicsAdvanced"));
     ui->tabWidget->addTab(graphics_extensions_tab.get(), tr("GraphicsExtra"));
+    ui->tabWidget->addTab(frame_gen_tab.get(), tr("Frame Generation"));
     ui->tabWidget->addTab(hotkeys_tab.get(), tr("Hotkeys"));
     ui->tabWidget->addTab(input_tab.get(), tr("Controls"));
     ui->tabWidget->addTab(profile_tab.get(), tr("Profiles"));
@@ -150,6 +159,10 @@ void ConfigureDialog::ApplyConfiguration() {
     graphics_tab->ApplyConfiguration();
     graphics_advanced_tab->ApplyConfiguration();
     graphics_extensions_tab->ApplyConfiguration();
+    frame_gen_tab->ApplyConfiguration();
+    performance_state->Apply();
+    performance_shaders_tab->ApplyConfiguration();
+    performance_ram_tab->ApplyConfiguration();
     audio_tab->ApplyConfiguration();
     debug_tab_tab->ApplyConfiguration();
     web_tab->ApplyConfiguration();
@@ -188,7 +201,7 @@ void ConfigureDialog::HandleApplyButtonClicked() {
 Q_DECLARE_METATYPE(QList<QWidget*>);
 
 void ConfigureDialog::PopulateSelectionList() {
-    const std::array<std::pair<QString, QList<QWidget*>>, 6> items{
+    const std::array<std::pair<QString, QList<QWidget*>>, 7> items{
         {{tr("General"),
           {general_tab.get(), hotkeys_tab.get(), ui_tab.get(), web_tab.get(), debug_tab_tab.get()}},
          {tr("System"),
@@ -196,7 +209,10 @@ void ConfigureDialog::PopulateSelectionList() {
            applets_tab.get()}},
          {tr("CPU"), {cpu_tab.get()}},
          {tr("Graphics"),
-          {graphics_tab.get(), graphics_advanced_tab.get(), graphics_extensions_tab.get()}},
+          {graphics_tab.get(), graphics_advanced_tab.get(), graphics_extensions_tab.get(),
+           frame_gen_tab.get()}},
+         {tr("Performance"),
+          {performance_gpu_tab.get(), performance_shaders_tab.get(), performance_ram_tab.get()}},
          {tr("Audio"), {audio_tab.get()}},
          {tr("Controls"), input_tab->GetSubTabs()}},
     };

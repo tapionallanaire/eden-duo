@@ -62,7 +62,12 @@ void SyncpointManager::DeregisterHostAction(u32 syncpoint_id, const ActionHandle
 
 void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
     Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id],
-              guest_action_mutex);
+              guest_action_mutex, syncpoint_id);
+}
+
+void SyncpointManager::SetGuestMirror(GuestMirror mirror) {
+    std::scoped_lock lk(guard);
+    guest_mirror = std::move(mirror);
 }
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
@@ -91,8 +96,19 @@ bool SyncpointManager::WaitHostFor(u32 syncpoint_id, u32 expected_value,
 
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                                  std::list<RegisteredAction>& action_storage,
-                                 std::mutex& action_mutex) {
-    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
+                                 std::mutex& action_mutex, std::optional<u32> mirrored_id) {
+    u32 new_value;
+    if (mirrored_id) {
+        // Before the value is published: the lock-free ready checks in RegisterAction and Wait
+        // must not see it ahead of the mirrored page.
+        std::scoped_lock lk(guard);
+        if (guest_mirror) {
+            guest_mirror(*mirrored_id, syncpoint.load(std::memory_order_relaxed) + 1);
+        }
+        new_value = syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1;
+    } else {
+        new_value = syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
 
     // Due actions run with only action_mutex held. Run under the guard, a frame composite (a guest
     // action) blocked every other increment and wait for its whole length: the GPU thread spent
