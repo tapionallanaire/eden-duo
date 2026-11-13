@@ -26,7 +26,9 @@ using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
 constexpr size_t MaxRelativeBranch = 128_MiB;
 constexpr u32 ModuleCodeIndex = 0x24 / sizeof(u32);
 
-Patcher::Patcher() : c(m_patch_instructions), c_pre(m_patch_instructions_pre) {
+Patcher::Patcher()
+    : c(m_patch_instructions), c_pre(m_patch_instructions_pre),
+      pac_identity{Settings::CurrentProgramIsSwitch2()} {
     // The first word of the patch section is always a branch to the first instruction of the
     // module.
     c.dw(0);
@@ -45,7 +47,9 @@ Patcher::Patcher() : c(m_patch_instructions), c_pre(m_patch_instructions_pre) {
     WriteLoadContext(c_pre);
 }
 
-Patcher::Patcher(std::span<const u8> text) : c(m_patch_instructions), c_pre(m_patch_instructions_pre) {
+Patcher::Patcher(std::span<const u8> text)
+    : c(m_patch_instructions), c_pre(m_patch_instructions_pre),
+      pac_identity{Settings::CurrentProgramIsSwitch2()} {
     modules.emplace_back();
     curr_patch = &modules.back();
     const auto words = std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
@@ -58,7 +62,31 @@ Patcher::Patcher(std::span<const u8> text) : c(m_patch_instructions), c_pre(m_pa
         } else if (auto msr = MSR{words[i]}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
             BranchToPatch(offset);
             WriteMsrHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(msr.GetRt())});
+        } else if (pac_identity) {
+            const PacRewrite pac = ClassifyPac(words[i]);
+            ++curr_patch->m_pac_counts[static_cast<size_t>(pac.form)];
+            switch (pac.form) {
+            case PacForm::Hint:
+            case PacForm::Register:
+            case PacForm::Return:
+            case PacForm::Branch:
+            case PacForm::Load:
+            case PacForm::Generic:
+                curr_patch->m_replacements.push_back({offset, pac.replacement});
+                break;
+            case PacForm::LoadTrampoline:
+            case PacForm::GenericTrampoline:
+                BranchToPatch(offset);
+                WritePacTrampoline(offset + sizeof(u32), words[i], c);
+                break;
+            case PacForm::None:
+            case PacForm::ExceptionReturn:
+                break;
+            }
         }
+    }
+    if (pac_identity) {
+        LogPacIdentity(text.size());
     }
 }
 
@@ -187,6 +215,35 @@ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet
         if (auto exclusive = Exclusive{inst}; exclusive.Verify()) {
             curr_patch->m_exclusives.push_back(i);
         }
+
+        // Pointer authentication as the identity (Switch 2 programs).
+        if (pac_identity) {
+            const PacRewrite pac = ClassifyPac(inst);
+            ++curr_patch->m_pac_counts[static_cast<size_t>(pac.form)];
+            switch (pac.form) {
+            case PacForm::Hint:
+            case PacForm::Register:
+            case PacForm::Return:
+            case PacForm::Branch:
+            case PacForm::Load:
+            case PacForm::Generic:
+                curr_patch->m_replacements.push_back({i * sizeof(u32), pac.replacement});
+                break;
+            case PacForm::LoadTrampoline:
+            case PacForm::GenericTrampoline: {
+                bool pre_buffer = false;
+                const auto ret = AddRelocations(pre_buffer);
+                WritePacTrampoline(ret, inst, pre_buffer ? c_pre : c);
+                break;
+            }
+            case PacForm::None:
+            case PacForm::ExceptionReturn:
+                break;
+            }
+        }
+    }
+    if (pac_identity) {
+        LogPacIdentity(text.size());
     }
 
     // Determine patching mode for the final relocation step
@@ -222,6 +279,34 @@ std::span<const u32> Patcher::RelocateRuntimeTls(
         rc.B(offset);
     }
     return m_patch_instructions;
+}
+
+void Patcher::WritePacTrampoline(ModuleDestLabel module_dest, u32 inst,
+                                 oaknut::VectorCodeGenerator& cg) {
+    const PacSequence sequence = PacTrampoline(inst);
+    for (u32 i = 0; i < sequence.count; ++i) {
+        cg.dw(sequence.words[i]);
+    }
+    // Jump back to the instruction after the emulated one.
+    if (&cg == &c_pre) {
+        this->BranchToModulePre(module_dest);
+    } else {
+        this->BranchToModule(module_dest);
+    }
+}
+
+void Patcher::LogPacIdentity(size_t text_size) const {
+    const auto count = [this](PacForm form) {
+        return curr_patch->m_pac_counts[static_cast<size_t>(form)];
+    };
+    LOG_INFO(Core_ARM,
+             "NCE pointer authentication as identity: module {} (text {:#x} bytes): in place {} "
+             "hint, {} register, {} RETA, {} BRA/BLRA, {} LDRA, {} PACGA; trampolines {} PACGA, "
+             "{} LDRA; left {} ERETA",
+             modules.size() - 1, text_size, count(PacForm::Hint), count(PacForm::Register),
+             count(PacForm::Return), count(PacForm::Branch), count(PacForm::Load),
+             count(PacForm::Generic), count(PacForm::GenericTrampoline),
+             count(PacForm::LoadTrampoline), count(PacForm::ExceptionReturn));
 }
 
 bool Patcher::RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::CodeSet::Segment& code, std::vector<u8>& program_image, EntryTrampolines* out_trampolines) {
@@ -372,6 +457,11 @@ bool Patcher::RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::Co
     for (const ModuleTextAddress i : patch.m_exclusives) {
         auto exclusive = Exclusive{text_words[i]};
         text_words[i] = exclusive.AsOrdered();
+    }
+
+    // Pointer authentication instructions replaced in place (Switch 2 programs).
+    for (const InstructionPatch& replacement : patch.m_replacements) {
+        text_words[replacement.offset / sizeof(u32)] = replacement.replacement;
     }
 
     // Remove the patched module size from the total. This is done so total_program_size

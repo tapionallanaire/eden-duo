@@ -484,6 +484,15 @@ public:
                     __builtin___clear_cache(ptr, ptr + sizeof(u32));
                 }
             }
+            // Pointer authentication as the identity, as in the modules loaded at boot (Switch 2
+            // programs; none for a Switch 1 program). After the block above: a module that needs
+            // a trampoline it could not map is not left half rewritten.
+            for (const auto& instruction : patch.RuntimeReplacements()) {
+                const u64 address = nro_info->base_address + instruction.offset;
+                memory.Write32(address, instruction.replacement);
+                auto* ptr = reinterpret_cast<char*>(address);
+                __builtin___clear_cache(ptr, ptr + sizeof(u32));
+            }
         }
 #endif
 
