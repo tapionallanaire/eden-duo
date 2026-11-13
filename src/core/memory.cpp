@@ -933,6 +933,15 @@ struct Memory::Impl {
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
         VideoCommon::Nx2Spikes::Note(VideoCommon::Nx2Spikes::Event::CpuWriteSlowPath, {}, size);
+        const auto tracked_start = std::chrono::steady_clock::now();
+        SCOPE_EXIT {
+            Core::g_nx2_barrier_stats.tracked_writes.fetch_add(1, std::memory_order_relaxed);
+            Core::g_nx2_barrier_stats.tracked_write_ns.fetch_add(
+                static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - tracked_start)
+                                     .count()),
+                std::memory_order_relaxed);
+        };
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
@@ -964,7 +973,8 @@ struct Memory::Impl {
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {
-                    // Handed to the CPU: its later writes are not seen (barrier mode 2 copies
+                    Core::g_nx2_barrier_stats.handed_over.fetch_add(1, std::memory_order_relaxed);
+                    // Handed to the CPU: its later writes are not seen (barrier mode 3 copies
                     // the page at the present).
                     if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 3) [[unlikely]] {
                         // With the pages after it that the buffer cache marks along

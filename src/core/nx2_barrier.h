@@ -26,6 +26,13 @@ extern std::atomic<u32> g_nx2_barrier;
 extern std::atomic<u32> g_nx2_collect_set;
 struct Nx2BarrierStats {
     std::atomic<u64> waits{}, wait_ns{}, timeouts{};
+    /// Guest threads in Memory's write path for GPU-tracked pages (HandleRasterizerWrite).
+    std::atomic<u64> tracked_writes{}, tracked_write_ns{}, handed_over{};
+    /// GPU thread: mode 3's write tracking changes for rewritten pages.
+    std::atomic<u64> retrack_ns{}, retracks{};
+    /// CPU time of the presenting guest thread between presents, of the GPU thread that runs the
+    /// frame's end marker between markers, and the marker's delay after the present.
+    std::atomic<u64> guest_cpu_ns{}, back_cpu_ns{}, back_lag_ns{}, back_last_cpu{};
 };
 extern Nx2BarrierStats g_nx2_barrier_stats;
 /// GPU thread: every command list submitted before present number `present` has run.

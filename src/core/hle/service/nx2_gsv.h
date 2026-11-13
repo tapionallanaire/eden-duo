@@ -1804,6 +1804,14 @@ private:
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
         Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed);
+        {
+            const u64 cpu = VideoCommon::Nx2Timeline::ThreadCpuNow();
+            if (m_present_cpu != 0 && cpu > m_present_cpu) {
+                Core::g_nx2_barrier_stats.guest_cpu_ns.fetch_add(cpu - m_present_cpu,
+                                                                 std::memory_order_relaxed);
+            }
+            m_present_cpu = cpu;
+        }
         // Diagnostic: <log directory>/capture.rdc makes RenderDoc (when attached, with
         // renderdoc_hotkey on) capture the next two presents. Looked for twice a second.
         if ((m_presents % 30) == 0 && Settings::values.enable_renderdoc_hotkey.GetValue()) {
@@ -1934,6 +1942,14 @@ private:
                                    std::chrono::steady_clock::now() - presented)
                                    .count(),
                                std::memory_order_relaxed);
+                    auto& stats = Core::g_nx2_barrier_stats;
+                    const u64 cpu = VideoCommon::Nx2Timeline::ThreadCpuNow();
+                    const u64 last = stats.back_last_cpu.exchange(cpu, std::memory_order_relaxed);
+                    stats.back_cpu_ns.fetch_add(last != 0 && cpu > last ? cpu - last : 0,
+                                                std::memory_order_relaxed);
+                    stats.back_lag_ns.fetch_add(
+                        static_cast<u64>((std::chrono::steady_clock::now() - presented).count()),
+                        std::memory_order_relaxed);
                 });
                 if (barrier >= 2) {
                     Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
@@ -2067,6 +2083,21 @@ private:
                          Core::g_nx2_barrier_stats.waits.exchange(0),
                          Core::g_nx2_barrier_stats.wait_ns.exchange(0) / 600 / 1000,
                          Core::g_nx2_barrier_stats.timeouts.exchange(0));
+                LOG_INFO(Service,
+                         "nx2:vi2 guest writes to GPU-tracked pages a frame: {}, {} us in all, {} "
+                         "pages handed over",
+                         Core::g_nx2_barrier_stats.tracked_writes.exchange(0) / 600,
+                         Core::g_nx2_barrier_stats.tracked_write_ns.exchange(0) / 600 / 1000,
+                         Core::g_nx2_barrier_stats.handed_over.exchange(0) / 600);
+                LOG_INFO(Service,
+                         "nx2:vi2 barrier frames: presenting thread CPU {} us, GPU back thread CPU "
+                         "{} us, back done {} us after the present",
+                         Core::g_nx2_barrier_stats.guest_cpu_ns.exchange(0) / 600 / 1000,
+                         Core::g_nx2_barrier_stats.back_cpu_ns.exchange(0) / 600 / 1000,
+                         Core::g_nx2_barrier_stats.back_lag_ns.exchange(0) / 600 / 1000);
+                LOG_INFO(Service, "nx2:vi2 mode 3 tracking changes a frame: {}, {} us",
+                         Core::g_nx2_barrier_stats.retracks.exchange(0) / 600,
+                         Core::g_nx2_barrier_stats.retrack_ns.exchange(0) / 600 / 1000);
                 if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 3) {
                     LOG_INFO(Service,
                              "nx2:vi2 page copies a frame: {} us, {} taken, {} served to uploads, "
@@ -2196,6 +2227,7 @@ private:
     VideoCommon::Nx2Timeline::FrameStats m_timeline;
     u32 m_barrier_steady{}; ///< Presents in a row whose frame took the GPU thread 6-80 ms
     s64 m_barrier_copy_us{}; ///< Time spent in Nx2PageStore::Snapshot since the last report
+    u64 m_present_cpu{};     ///< The presenting thread's CPU time at the last present
     std::shared_ptr<std::atomic<s64>> m_barrier_lag_us{std::make_shared<std::atomic<s64>>(0)};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};

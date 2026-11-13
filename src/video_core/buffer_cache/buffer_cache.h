@@ -3402,6 +3402,14 @@ template <class P>
 void BufferCache<P>::Nx2FrameDone() {
     // The pages uploaded from a present's copy that the guest had rewritten meanwhile: their
     // next frame's content is still to upload.
+    const auto retrack_start = std::chrono::steady_clock::now();
+    SCOPE_EXIT {
+        Core::g_nx2_barrier_stats.retrack_ns.fetch_add(
+            static_cast<u64>((std::chrono::steady_clock::now() - retrack_start).count()),
+            std::memory_order_relaxed);
+    };
+    Core::g_nx2_barrier_stats.retracks.fetch_add(nx2_rewritten_pages.size() * 2,
+                                                 std::memory_order_relaxed);
     for (size_t i = 0; i < nx2_rewritten_pages.size(); ++i) {
         const DAddr page = nx2_rewritten_pages[i];
         if (i < nx2_untracked_pages) {
@@ -3504,11 +3512,16 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         // The guest keeps writing these pages for the next frame: no write tracking until the
         // frame ends (each tracked write would take the cache locks this thread holds), when
         // Nx2FrameDone marks them CPU-modified.
+        const auto retrack_start = std::chrono::steady_clock::now();
         for (size_t i = nx2_untracked_pages; i < nx2_rewritten_pages.size(); ++i) {
             device_memory.UpdatePagesCachedCount(nx2_rewritten_pages[i],
                                                  Core::Nx2PageStore::PageSize, -1);
+            Core::g_nx2_barrier_stats.retracks.fetch_add(1, std::memory_order_relaxed);
         }
         nx2_untracked_pages = nx2_rewritten_pages.size();
+        Core::g_nx2_barrier_stats.retrack_ns.fetch_add(
+            static_cast<u64>((std::chrono::steady_clock::now() - retrack_start).count()),
+            std::memory_order_relaxed);
 
     }
 }
