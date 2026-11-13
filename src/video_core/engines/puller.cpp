@@ -218,14 +218,17 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
         // about to write the surface; Kingdom Hearts 1.5+2.5 freed and reused that memory and the
         // late write corrupted its heap at the end of its opening video. Bounded, so a syncpoint
         // this channel itself increments later cannot deadlock the GPU thread.
-        // With the GPU split, this channel's own increments may still be queued for the back.
-        DrainBack();
-        auto& syncpoint_manager = dma_pusher.system.Host1x().GetSyncpointManager();
-        const u32 syncpoint_id = regs.fence_action.syncpoint_id;
-        const u32 value = regs.fence_value;
-        if (!syncpoint_manager.WaitHostFor(syncpoint_id, value, std::chrono::milliseconds{200})) {
-            LOG_WARNING(HW_GPU, "Fence acquire on syncpoint {} value {} timed out (host at {})",
-                        syncpoint_id, value, syncpoint_manager.GetHostSyncpointValue(syncpoint_id));
+        // Switch 2 titles keep Eglantine's behaviour (no wait): their decoders hand frames over
+        // through nx2:vdecsvc syncpoints, and waiting here made the split's front stop for its
+        // back at every acquire.
+        if (!g_nx2_ampere.load(std::memory_order_relaxed)) {
+            auto& syncpoint_manager = dma_pusher.system.Host1x().GetSyncpointManager();
+            const u32 syncpoint_id = regs.fence_action.syncpoint_id;
+            const u32 value = regs.fence_value;
+            if (!syncpoint_manager.WaitHostFor(syncpoint_id, value, std::chrono::milliseconds{200})) {
+                LOG_WARNING(HW_GPU, "Fence acquire on syncpoint {} value {} timed out (host at {})",
+                            syncpoint_id, value, syncpoint_manager.GetHostSyncpointValue(syncpoint_id));
+            }
         }
         OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
         break;

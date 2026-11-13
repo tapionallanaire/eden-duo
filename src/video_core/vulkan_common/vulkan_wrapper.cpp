@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -19,6 +20,31 @@
 namespace Vulkan::vk {
 
 namespace {
+
+/// The driver's shader compiler must not run with a game's floating-point mode: under NCE a
+/// host thread can carry the guest's FPCR (flush-to-zero), and pipelines compiled that way
+/// give different results (an over-bright picture).
+struct HostFpEnv {
+#if defined(__aarch64__)
+    HostFpEnv() {
+        __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
+        if (saved != 0) {
+            static std::atomic_flag logged;
+            if (!logged.test_and_set()) {
+                LOG_WARNING(Render_Vulkan, "Pipeline compile entered with FPCR {:#x}; host value used", saved);
+            }
+            const u64 zero = 0;
+            __asm__ volatile("msr fpcr, %0" : : "r"(zero));
+        }
+    }
+    ~HostFpEnv() {
+        if (saved != 0) {
+            __asm__ volatile("msr fpcr, %0" : : "r"(saved));
+        }
+    }
+    u64 saved{};
+#endif
+};
 
 template <typename Func>
 void SortPhysicalDevices(std::vector<VkPhysicalDevice>& devices, const InstanceDispatch& dld,
@@ -791,6 +817,7 @@ PipelineLayout Device::CreatePipelineLayout(const VkPipelineLayoutCreateInfo& ci
 
 Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
+    const HostFpEnv fp_env;
     auto const result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
     // Adreno 5xx drivers do not properly return when a graphics pipeline fails to be created
     // Some (unkown) Mali drivers also do not properly return
@@ -804,6 +831,7 @@ Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, 
 Pipeline Device::CreateComputePipeline(const VkComputePipelineCreateInfo& ci,
                                        VkPipelineCache cache) const {
     VkPipeline object;
+    const HostFpEnv fp_env;
     Check(dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object));
     return Pipeline(object, handle, *dld);
 }
@@ -841,6 +869,7 @@ QueryPool Device::CreateQueryPool(const VkQueryPoolCreateInfo& ci) const {
 
 ShaderModule Device::CreateShaderModule(const VkShaderModuleCreateInfo& ci) const {
     VkShaderModule object;
+    const HostFpEnv fp_env;
     Check(dld->vkCreateShaderModule(handle, &ci, nullptr, &object));
     return ShaderModule(object, handle, *dld);
 }

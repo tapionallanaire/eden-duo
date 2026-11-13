@@ -298,6 +298,30 @@ struct GPU::Impl {
     }
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
+    /// How long guest threads wait for the GPU thread in fault handling, reported every 5 s.
+    static void NoteFaultSync(std::chrono::steady_clock::duration waited, bool flushed) {
+        static std::atomic<u64> count{}, flushes{}, total_us{}, max_us{};
+        static std::atomic<s64> last_report{};
+        const u64 us = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(waited).count());
+        ++count;
+        flushes += flushed ? 1 : 0;
+        total_us += us;
+        u64 seen = max_us.load();
+        while (us > seen && !max_us.compare_exchange_weak(seen, us)) {
+        }
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        s64 last = last_report.load();
+        if (now - last >= 5 && last_report.compare_exchange_strong(last, now)) {
+            LOG_INFO(HW_GPU,
+                     "Fault-time GPU syncs in the last 5 s: {} ({} flushed), {} ms waited, longest {} ms",
+                     count.exchange(0), flushes.exchange(0), total_us.exchange(0) / 1000,
+                     max_us.exchange(0) / 1000);
+        }
+    }
+
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
         // NCE faults invalidate whole pages, including GPU-written bytes the CPU will not replace.
         if (preserve_gpu_writes) {
@@ -338,8 +362,10 @@ struct GPU::Impl {
                     rasterizer->OnCacheInvalidation(addr, size);
                     flushed = true;
                 });
+                const auto wait_start = std::chrono::steady_clock::now();
                 gpu_thread.TickGPU(is_async);
                 WaitForSyncOperation(fence);
+                NoteFaultSync(std::chrono::steady_clock::now() - wait_start, flushed);
                 if (flushed) {
                     return;
                 }
