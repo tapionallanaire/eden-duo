@@ -1881,12 +1881,19 @@ private:
                 return value != nullptr && value[0] == '0';
             }();
             const bool ocarina_back_wait = app_program_id == OcarinaOfTimeProgramId && !back_wait_off;
-            // EDEN_NX2_BARRIER=1 (experiment): no wait for this frame here. The GPU thread notes
-            // when it has run it, and only the guest's writes into GPU-written buffers wait for
-            // that (Core::Nx2WaitGpuThreadDone), so the rest of the next frame's work overlaps.
+            // Write barrier: no wait for this frame here. The GPU thread notes when it has run
+            // it, and only the guest's writes into GPU-written buffers wait for that
+            // (Core::Nx2WaitGpuThreadDone), so the rest of the next frame's work overlaps.
+            // Desktop, Kokiri Forest, five 40 s recordings: no one-frame blink, 28-30 ms a frame
+            // against 31-32 ms with the back-thread wait below. On where it was measured (x86-64);
+            // EDEN_NX2_BARRIER=1/0 turns it on elsewhere or off.
             static const bool barrier = [] {
                 const char* value = std::getenv("EDEN_NX2_BARRIER");
+#ifdef ARCHITECTURE_x86_64
+                return value == nullptr || value[0] != '0';
+#else
                 return value != nullptr && value[0] == '1';
+#endif
             }();
             if (ocarina_back_wait && barrier) {
                 Core::g_nx2_barrier.store(true, std::memory_order_relaxed);
