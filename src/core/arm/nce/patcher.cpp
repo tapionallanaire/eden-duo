@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <format>
 #include <numeric>
+#include <string>
 #include <bit>
 #include "common/cpu_features.h"
 #include "common/alignment.h"
@@ -10,6 +12,9 @@
 #include "core/arm/nce/guest_context.h"
 #include "core/arm/nce/instructions.h"
 #include "core/arm/nce/patcher.h"
+#if defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#endif
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/svc.h"
@@ -18,6 +23,18 @@
 
 namespace Core::NCE {
 
+namespace {
+/// Whether the host CPU has pointer authentication (address keys): XPACI/XPACD are defined.
+bool HostHasPointerAuthentication() {
+#if defined(__linux__) && defined(__aarch64__)
+    constexpr unsigned long HwcapPaca = 1UL << 30; // HWCAP_PACA
+    return (getauxval(AT_HWCAP) & HwcapPaca) != 0;
+#else
+    return false;
+#endif
+}
+} // Anonymous namespace
+
 using namespace Common::Literals;
 using namespace oaknut::util;
 
@@ -25,10 +42,13 @@ using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
 
 constexpr size_t MaxRelativeBranch = 128_MiB;
 constexpr u32 ModuleCodeIndex = 0x24 / sizeof(u32);
+/// A module loaded at run time (NRO) starts with its start words and header; code follows.
+constexpr uintptr_t RuntimeModuleHeaderSize = 0x80;
 
 Patcher::Patcher()
     : c(m_patch_instructions), c_pre(m_patch_instructions_pre),
-      pac_identity{Settings::CurrentProgramIsSwitch2()} {
+      pac_identity{Settings::CurrentProgramIsSwitch2()},
+      host_has_pac{HostHasPointerAuthentication()} {
     // The first word of the patch section is always a branch to the first instruction of the
     // module.
     c.dw(0);
@@ -49,7 +69,8 @@ Patcher::Patcher()
 
 Patcher::Patcher(std::span<const u8> text)
     : c(m_patch_instructions), c_pre(m_patch_instructions_pre),
-      pac_identity{Settings::CurrentProgramIsSwitch2()} {
+      pac_identity{Settings::CurrentProgramIsSwitch2()},
+      host_has_pac{HostHasPointerAuthentication()} {
     modules.emplace_back();
     curr_patch = &modules.back();
     const auto words = std::span<const u32>{reinterpret_cast<const u32*>(text.data()), text.size() / sizeof(u32)};
@@ -62,27 +83,11 @@ Patcher::Patcher(std::span<const u8> text)
         } else if (auto msr = MSR{words[i]}; msr.Verify() && msr.GetSystemReg() == TpidrEl0) {
             BranchToPatch(offset);
             WriteMsrHandler(offset + sizeof(u32), oaknut::XReg{static_cast<int>(msr.GetRt())});
-        } else if (pac_identity) {
-            const PacRewrite pac = ClassifyPac(words[i]);
-            ++curr_patch->m_pac_counts[static_cast<size_t>(pac.form)];
-            switch (pac.form) {
-            case PacForm::Hint:
-            case PacForm::Register:
-            case PacForm::Return:
-            case PacForm::Branch:
-            case PacForm::Load:
-            case PacForm::Generic:
-                curr_patch->m_replacements.push_back({offset, pac.replacement});
-                break;
-            case PacForm::LoadTrampoline:
-            case PacForm::GenericTrampoline:
-                BranchToPatch(offset);
-                WritePacTrampoline(offset + sizeof(u32), words[i], c);
-                break;
-            case PacForm::None:
-            case PacForm::ExceptionReturn:
-                break;
-            }
+        } else if (pac_identity && offset >= RuntimeModuleHeaderSize &&
+                   NotePacInstruction(offset, words[i])) {
+            // Not in the NRO header: its module id is 32 arbitrary bytes.
+            BranchToPatch(offset);
+            WritePacTrampoline(offset + sizeof(u32), words[i], c);
         }
     }
     if (pac_identity) {
@@ -217,32 +222,28 @@ bool Patcher::PatchText(std::span<const u8> program_image, const Kernel::CodeSet
         }
 
         // Pointer authentication as the identity (Switch 2 programs).
-        if (pac_identity) {
-            const PacRewrite pac = ClassifyPac(inst);
-            ++curr_patch->m_pac_counts[static_cast<size_t>(pac.form)];
-            switch (pac.form) {
-            case PacForm::Hint:
-            case PacForm::Register:
-            case PacForm::Return:
-            case PacForm::Branch:
-            case PacForm::Load:
-            case PacForm::Generic:
-                curr_patch->m_replacements.push_back({i * sizeof(u32), pac.replacement});
-                break;
-            case PacForm::LoadTrampoline:
-            case PacForm::GenericTrampoline: {
-                bool pre_buffer = false;
-                const auto ret = AddRelocations(pre_buffer);
-                WritePacTrampoline(ret, inst, pre_buffer ? c_pre : c);
-                break;
-            }
-            case PacForm::None:
-            case PacForm::ExceptionReturn:
-                break;
-            }
+        if (pac_identity && NotePacInstruction(i * sizeof(u32), inst)) {
+            bool pre_buffer = false;
+            const auto ret = AddRelocations(pre_buffer);
+            WritePacTrampoline(ret, inst, pre_buffer ? c_pre : c);
         }
     }
     if (pac_identity) {
+        // The words before ModuleCodeIndex are a header in most modules, but code in some
+        // (Ocarina of Time's main starts a function at 0x20, the PACIBSP of which was missed).
+        for (u32 i = 0; i < ModuleCodeIndex && i < static_cast<u32>(text_words.size()); ++i) {
+            const uintptr_t this_offset = i * sizeof(u32);
+            if (NotePacInstruction(this_offset, text_words[i])) {
+                const bool pre_buffer = use_split && (this_offset < MaxRelativeBranch);
+                if (pre_buffer) {
+                    this->BranchToPatchPre(this_offset);
+                } else {
+                    this->BranchToPatch(this_offset);
+                }
+                WritePacTrampoline(this_offset + sizeof(u32), text_words[i],
+                                   pre_buffer ? c_pre : c);
+            }
+        }
         LogPacIdentity(text.size());
     }
 
@@ -295,6 +296,35 @@ void Patcher::WritePacTrampoline(ModuleDestLabel module_dest, u32 inst,
     }
 }
 
+bool Patcher::NotePacInstruction(uintptr_t offset, u32 inst) {
+    const PacRewrite pac = ClassifyPac(inst);
+    ++curr_patch->m_pac_counts[static_cast<size_t>(pac.form)];
+    switch (pac.form) {
+    case PacForm::Hint:
+    case PacForm::Register:
+    case PacForm::Return:
+    case PacForm::Branch:
+    case PacForm::Load:
+    case PacForm::Generic:
+        curr_patch->m_replacements.push_back({offset, pac.replacement});
+        return false;
+    case PacForm::StripRegister:
+        // Runs natively where the CPU defines it; a NOP where it does not.
+        if (!host_has_pac) {
+            curr_patch->m_replacements.push_back({offset, pac.replacement});
+        }
+        return false;
+    case PacForm::LoadTrampoline:
+    case PacForm::GenericTrampoline:
+        return true;
+    case PacForm::None:
+    case PacForm::StripHint:
+    case PacForm::ExceptionReturn:
+        return false;
+    }
+    return false;
+}
+
 void Patcher::LogPacIdentity(size_t text_size) const {
     const auto count = [this](PacForm form) {
         return curr_patch->m_pac_counts[static_cast<size_t>(form)];
@@ -302,11 +332,36 @@ void Patcher::LogPacIdentity(size_t text_size) const {
     LOG_INFO(Core_ARM,
              "NCE pointer authentication as identity: module {} (text {:#x} bytes): in place {} "
              "hint, {} register, {} RETA, {} BRA/BLRA, {} LDRA, {} PACGA; trampolines {} PACGA, "
-             "{} LDRA; left {} ERETA",
+             "{} LDRA; native {} XPACLRI, {} XPACI/XPACD ({}); left {} ERETA",
              modules.size() - 1, text_size, count(PacForm::Hint), count(PacForm::Register),
              count(PacForm::Return), count(PacForm::Branch), count(PacForm::Load),
              count(PacForm::Generic), count(PacForm::GenericTrampoline),
-             count(PacForm::LoadTrampoline), count(PacForm::ExceptionReturn));
+             count(PacForm::LoadTrampoline), count(PacForm::StripHint),
+             count(PacForm::StripRegister), host_has_pac ? "host has PAC" : "no host PAC: NOP",
+             count(PacForm::ExceptionReturn));
+}
+
+size_t Patcher::VerifyPacIdentity(std::span<const u32> text_words, std::string_view what) {
+    size_t left{};
+    std::string offsets;
+    for (size_t i = 0; i < text_words.size(); ++i) {
+        const PacForm form = ClassifyPac(text_words[i]).form;
+        if (PacFormMayStay(form)) {
+            continue;
+        }
+        if (left < 8) {
+            offsets += std::format("{}{:#x} ({:08x})", left == 0 ? "" : ", ", i * sizeof(u32),
+                                   text_words[i]);
+        }
+        ++left;
+    }
+    if (left != 0) {
+        LOG_ERROR(Core_ARM,
+                  "NCE pointer authentication: {} instruction(s) NOT rewritten in {}, first at "
+                  "offsets {}",
+                  left, what, offsets);
+    }
+    return left;
 }
 
 bool Patcher::RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::CodeSet::Segment& code, std::vector<u8>& program_image, EntryTrampolines* out_trampolines) {
@@ -462,6 +517,11 @@ bool Patcher::RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::Co
     // Pointer authentication instructions replaced in place (Switch 2 programs).
     for (const InstructionPatch& replacement : patch.m_replacements) {
         text_words[replacement.offset / sizeof(u32)] = replacement.replacement;
+    }
+    if (pac_identity) {
+        // Every word of the patched text, whatever the scan above visited.
+        VerifyPacIdentity(text_words, std::format("module {} (text {:#x} bytes)",
+                                                  m_relocate_module_index - 1, text.size()));
     }
 
     // Remove the patched module size from the total. This is done so total_program_size

@@ -30,8 +30,8 @@ namespace Core::NCE {
 
 enum class PacForm : u8 {
     None,           ///< Not a pointer authentication instruction
-    Hint,           ///< PACIASP, AUTIB1716, XPACLRI, ...: NOP
-    Register,       ///< PACIA Xd, Xn ... AUTDZB Xd, XPACI/XPACD Xd: NOP
+    Hint,           ///< PACIASP, AUTIB1716, ...: NOP
+    Register,       ///< PACIA Xd, Xn ... AUTDZB Xd: NOP
     Return,         ///< RETAA, RETAB: RET
     Branch,         ///< BRAA/BRAB/BLRAA/BLRAB and their Z forms: BR/BLR Xn
     Load,           ///< LDRAA/LDRAB that one plain load replaces
@@ -39,9 +39,22 @@ enum class PacForm : u8 {
     Generic,        ///< PACGA with a result that one NOP replaces (Xd is XZR)
     GenericTrampoline, ///< PACGA
     ExceptionReturn,   ///< ERETAA/ERETAB: not for user code, left alone
+    /// XPACLRI: removes a signature without a key and cannot fault; a NOP on a CPU without
+    /// pointer authentication (hint space). Always left to run natively, so a signed pointer
+    /// that still turned up would be cleaned, not kept.
+    StripHint,
+    /// XPACI/XPACD Xd: as XPACLRI, but undefined on a CPU without pointer authentication, where
+    /// it becomes a NOP (`replacement`); left to run natively elsewhere.
+    StripRegister,
 };
 
-inline constexpr size_t NumPacForms = static_cast<size_t>(PacForm::ExceptionReturn) + 1;
+inline constexpr size_t NumPacForms = static_cast<size_t>(PacForm::StripRegister) + 1;
+
+/// Whether an instruction of this form may be left in guest code as it is.
+constexpr bool PacFormMayStay(PacForm form) {
+    return form == PacForm::None || form == PacForm::StripHint || form == PacForm::StripRegister ||
+           form == PacForm::ExceptionReturn;
+}
 
 struct PacRewrite {
     PacForm form{PacForm::None};
@@ -105,12 +118,15 @@ constexpr PacRewrite ClassifyPac(u32 inst) {
     using namespace PacEncoding;
     // HINT: CRm 0b0001 with op2 0, 2, 4, 6 = PACIA1716, PACIB1716, AUTIA1716, AUTIB1716;
     // CRm 0b0011 with op2 0..7 = PACIAZ, PACIASP, PACIBZ, PACIBSP, AUTIAZ, AUTIASP, AUTIBZ,
-    // AUTIBSP; CRm 0b0000 with op2 7 = XPACLRI (a NOP only because nothing is ever signed).
+    // AUTIBSP; CRm 0b0000 with op2 7 = XPACLRI.
     if ((inst & 0xFFFFF01F) == 0xD503201F) {
         const u32 crm = (inst >> 8) & 0xF;
         const u32 op2 = (inst >> 5) & 0x7;
-        if ((crm == 0b0001 && (op2 & 1) == 0) || crm == 0b0011 || (crm == 0b0000 && op2 == 7)) {
+        if ((crm == 0b0001 && (op2 & 1) == 0) || crm == 0b0011) {
             return {PacForm::Hint, Nop};
+        }
+        if (crm == 0b0000 && op2 == 7) {
+            return {PacForm::StripHint, Nop};
         }
         return {};
     }
@@ -125,7 +141,7 @@ constexpr PacRewrite ClassifyPac(u32 inst) {
     }
     // XPACI/XPACD Xd
     if ((inst & 0xFFFFFBE0) == 0xDAC143E0) {
-        return {PacForm::Register, Nop};
+        return {PacForm::StripRegister, Nop};
     }
     // PACGA Xd, Xn, Xm|SP
     if ((inst & 0xFFE0FC00) == 0x9AC03000) {
@@ -242,7 +258,7 @@ static_assert(Is(0xD50323DF, PacForm::Hint, Nop)); // autibz
 static_assert(Is(0xD503211F, PacForm::Hint, Nop)); // pacia1716
 static_assert(Is(0xD503219F, PacForm::Hint, Nop)); // autia1716
 static_assert(Is(0xD50321DF, PacForm::Hint, Nop)); // autib1716
-static_assert(Is(0xD50320FF, PacForm::Hint, Nop)); // xpaclri
+static_assert(Is(0xD50320FF, PacForm::StripHint, Nop)); // xpaclri
 static_assert(Untouched(0xD503201F));              // nop
 static_assert(Untouched(0xD503203F));              // yield
 static_assert(Untouched(0xD503245F));              // bti c
@@ -251,8 +267,10 @@ static_assert(Untouched(0xD503213F));              // hint #9 (unallocated in th
 static_assert(Is(0xDAC10130, PacForm::Register, Nop)); // pacia x16, x9
 static_assert(Is(0xDAC117FE, PacForm::Register, Nop)); // autib x30, sp
 static_assert(Is(0xDAC123E5, PacForm::Register, Nop)); // paciza x5
-static_assert(Is(0xDAC143E0, PacForm::Register, Nop)); // xpaci x0
-static_assert(Is(0xDAC147E0, PacForm::Register, Nop)); // xpacd x0
+static_assert(Is(0xDAC143E0, PacForm::StripRegister, Nop)); // xpaci x0
+static_assert(Is(0xDAC147E0, PacForm::StripRegister, Nop)); // xpacd x0
+static_assert(PacFormMayStay(ClassifyPac(0xD50320FF).form) && !PacFormMayStay(PacForm::Hint) &&
+              !PacFormMayStay(PacForm::Return) && !PacFormMayStay(PacForm::GenericTrampoline));
 static_assert(Untouched(0xDAC12025));                  // Z form with Rn != 31: unallocated
 static_assert(Untouched(0xDAC01000));                  // clz x0, x0
 static_assert(Is(0xD65F0BFF, PacForm::Return, Ret));   // retaa

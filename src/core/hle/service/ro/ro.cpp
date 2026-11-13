@@ -493,6 +493,14 @@ public:
                 auto* ptr = reinterpret_cast<char*>(address);
                 __builtin___clear_cache(ptr, ptr + sizeof(u32));
             }
+            if (Settings::CurrentProgramIsSwitch2()) {
+                memory.ReadBlock(nro_info->base_address, text.data(), text.size());
+                Core::NCE::Patcher::VerifyPacIdentity(
+                    std::span<const u32>{reinterpret_cast<const u32*>(text.data()),
+                                         text.size() / sizeof(u32)},
+                    std::format("run-time module at {:#x} (text {:#x} bytes)",
+                                nro_info->base_address, text.size()));
+            }
         }
 #endif
 

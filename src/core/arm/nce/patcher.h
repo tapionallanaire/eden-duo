@@ -5,6 +5,7 @@
 
 #include <array>
 #include <span>
+#include <string_view>
 #include "common/container/unordered_map.h"
 #include <vector>
 #include <oaknut/code_block.hpp>
@@ -100,6 +101,16 @@ private:
     void WritePacTrampoline(ModuleDestLabel module_dest, u32 inst, oaknut::VectorCodeGenerator& code);
     /// Logs what was rewritten in the module just scanned.
     void LogPacIdentity(size_t text_size) const;
+    /// Records one instruction of a module for the pointer authentication rewrite: an in-place
+    /// replacement, or true when the caller has to write a trampoline for it.
+    bool NotePacInstruction(uintptr_t offset, u32 inst);
+
+public:
+    /// Checks patched text: logs, as an error, every pointer authentication instruction that
+    /// would still run with the host's keys. Returns how many there are.
+    static size_t VerifyPacIdentity(std::span<const u32> text_words, std::string_view what);
+
+private:
 
     // Convenience wrappers using default code generator
     void WriteLoadContext() { WriteLoadContext(c); }
@@ -178,6 +189,8 @@ private:
     PatchMode mode{PatchMode::None};
     /// Pointer authentication is rewritten to the identity: Switch 2 programs only.
     bool pac_identity{};
+    /// The host CPU has pointer authentication: XPACI/XPACD run natively.
+    bool host_has_pac{};
     size_t total_program_size{};
     size_t m_relocate_module_index{};
     std::vector<ModulePatch> modules;
