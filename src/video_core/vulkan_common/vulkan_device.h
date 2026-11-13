@@ -559,6 +559,16 @@ FN_MAX_LIMIT_LIST
                (properties.subgroup_size_control.requiredSubgroupSizeStages & stage) != 0;
     }
 
+    /// Returns true if compute subgroups are whole multiples of the guest's 32 lanes and can be
+    /// shuffled, so each host subgroup holds complete guest warps (the emitters partition a wider
+    /// subgroup by lane & ~31). Adreno: 64 to 128 lanes.
+    bool CanPartitionGuestWarps() const {
+        const auto& subgroup = properties.subgroup_properties;
+        return subgroup.subgroupSize >= GuestWarpSize && subgroup.subgroupSize % GuestWarpSize == 0 &&
+               (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+               (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
+    }
+
     /// Returns true if the device supports the provided subgroup feature.
     bool IsSubgroupFeatureSupported(VkSubgroupFeatureFlagBits feature) const {
         return properties.subgroup_properties.supportedOperations & feature;

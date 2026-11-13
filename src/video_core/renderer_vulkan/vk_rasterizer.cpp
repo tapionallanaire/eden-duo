@@ -2859,7 +2859,9 @@ bool RasterizerVulkan::UsesNvidiaDlss() const {
 
 bool RasterizerVulkan::SupportsGameDlssNetwork() const {
     // Compute pipelines are created 32 threads wide where the device can be told to.
-    return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+    // Elsewhere a wider subgroup is partitioned into guest warps.
+    return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT) ||
+           device.CanPartitionGuestWarps();
 }
 
 std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
