@@ -269,6 +269,213 @@ private:
 
 } // namespace VideoCommon::Nx2Sampler
 
+#elif defined(_WIN32) && defined(_M_X64)
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <windows.h>
+#include <tlhelp32.h>
+
+#include "common/common_types.h"
+#include "common/logging.h"
+
+namespace VideoCommon::Nx2Sampler {
+
+// Windows: a thread of this process suspends the GPU front ("GPU") and back ("GPUBack") threads
+// every 2 ms, reads their context and walks up to 12 frames with the unwind tables. Same report
+// as on Linux: leaf functions and call chains as "module+offset" (resolve with the symbols of an
+// unstripped link). Frames in generated code (the CPU and macro JITs) end a chain.
+class Sampler {
+public:
+    static void MaybeStart() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_SAMPLER");
+            return value != nullptr && value[0] == '1';
+        }();
+        static std::once_flag once;
+        if (enabled) {
+            std::call_once(once, [] {
+                std::thread([] { Run(); }).detach();
+                LOG_INFO(HW_GPU, "nx2 sampler: sampling the GPU front and back threads at 500 Hz");
+            });
+        }
+    }
+
+private:
+    static constexpr int Depth = 12;
+
+    struct Target {
+        HANDLE handle;
+        int side; // 0 front, 1 back
+    };
+
+    static std::vector<Target> Targets() {
+        using Describe = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+        static const Describe describe = reinterpret_cast<Describe>(
+            GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "GetThreadDescription"));
+        std::vector<Target> found;
+        if (describe == nullptr) {
+            return found;
+        }
+        const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            return found;
+        }
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        const DWORD process = GetCurrentProcessId();
+        for (BOOL more = Thread32First(snapshot, &entry); more;
+             more = Thread32Next(snapshot, &entry)) {
+            if (entry.th32OwnerProcessID != process ||
+                entry.th32ThreadID == GetCurrentThreadId()) {
+                continue;
+            }
+            const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                                 THREAD_QUERY_LIMITED_INFORMATION,
+                                             FALSE, entry.th32ThreadID);
+            if (thread == nullptr) {
+                continue;
+            }
+            PWSTR name = nullptr;
+            int side = -1;
+            if (SUCCEEDED(describe(thread, &name)) && name != nullptr) {
+                side = std::wcscmp(name, L"GPU") == 0 ? 0 : std::wcscmp(name, L"GPUBack") == 0 ? 1 : -1;
+                LocalFree(name);
+            }
+            if (side >= 0) {
+                found.push_back({thread, side});
+            } else {
+                CloseHandle(thread);
+            }
+        }
+        CloseHandle(snapshot);
+        return found;
+    }
+
+    static std::string Where(u64 pc) {
+        HMODULE module{};
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(pc), &module) ||
+            module == nullptr) {
+            return "??";
+        }
+        static std::map<HMODULE, std::string> names;
+        auto it = names.find(module);
+        if (it == names.end()) {
+            char path[MAX_PATH]{};
+            GetModuleFileNameA(module, path, sizeof(path));
+            const char* slash = std::strrchr(path, '\\');
+            it = names.emplace(module, slash != nullptr ? slash + 1 : path).first;
+        }
+        char text[160];
+        std::snprintf(text, sizeof(text), "%s+%#llx", it->second.c_str(),
+                      static_cast<unsigned long long>(pc - reinterpret_cast<u64>(module)));
+        return text;
+    }
+
+    static void Run() {
+        using clock = std::chrono::steady_clock;
+        std::vector<Target> targets;
+        auto next_scan = clock::now();
+        auto next_report = clock::now() + std::chrono::seconds(20);
+        std::map<std::vector<u64>, u64> chains[2];
+        u64 total[2]{};
+        while (true) {
+            Sleep(2);
+            if (clock::now() >= next_scan) {
+                for (const Target& target : targets) {
+                    CloseHandle(target.handle);
+                }
+                targets = Targets();
+                next_scan = clock::now() + std::chrono::seconds(2);
+            }
+            for (const Target& target : targets) {
+                if (SuspendThread(target.handle) == static_cast<DWORD>(-1)) {
+                    continue;
+                }
+                CONTEXT context{};
+                context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                std::array<u64, Depth> pcs{};
+                int depth = 0;
+                if (GetThreadContext(target.handle, &context)) {
+                    while (depth < Depth && context.Rip != 0) {
+                        pcs[depth++] = context.Rip;
+                        DWORD64 image_base{};
+                        const PRUNTIME_FUNCTION function =
+                            RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+                        if (function == nullptr) {
+                            break; // generated code or a leaf without unwind data
+                        }
+                        void* handler_data{};
+                        DWORD64 establisher{};
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function,
+                                         &context, &handler_data, &establisher, nullptr);
+                    }
+                }
+                ResumeThread(target.handle);
+                if (depth > 0) {
+                    ++chains[target.side][std::vector<u64>(pcs.begin(), pcs.begin() + depth)];
+                    ++total[target.side];
+                }
+            }
+            if (clock::now() < next_report) {
+                continue;
+            }
+            next_report = clock::now() + std::chrono::seconds(20);
+            for (int side = 0; side < 2; ++side) {
+                LOG_INFO(HW_GPU, "nx2 sampler {} thread: {} samples in the last 20 s",
+                         side ? "back" : "front", total[side]);
+                std::map<std::string, u64> leaf;
+                std::vector<std::pair<u64, std::string>> rows;
+                for (const auto& [pcs, count] : chains[side]) {
+                    std::string text;
+                    for (size_t i = 0; i < pcs.size(); ++i) {
+                        const std::string where = Where(pcs[i]);
+                        if (i == 0) {
+                            leaf[where] += count;
+                        } else {
+                            text += " < ";
+                        }
+                        text += where;
+                    }
+                    rows.emplace_back(count, std::move(text));
+                }
+                std::vector<std::pair<u64, std::string>> top;
+                for (const auto& [where, count] : leaf) {
+                    top.emplace_back(count, where);
+                }
+                std::sort(top.rbegin(), top.rend());
+                for (size_t i = 0; i < std::min<size_t>(top.size(), 25); ++i) {
+                    LOG_INFO(HW_GPU, "nx2 sampler {} leaf {:5.1f}% {}", side ? "back" : "front",
+                             100.0 * static_cast<double>(top[i].first) /
+                                 static_cast<double>(std::max<u64>(total[side], 1)),
+                             top[i].second);
+                }
+                std::sort(rows.rbegin(), rows.rend());
+                for (size_t i = 0; i < std::min<size_t>(rows.size(), 3000); ++i) {
+                    LOG_INFO(HW_GPU, "nx2 sampler {} chain {} of {}: {}", side ? "back" : "front",
+                             rows[i].first, total[side], rows[i].second);
+                }
+                chains[side].clear();
+                total[side] = 0;
+            }
+        }
+    }
+};
+
+} // namespace VideoCommon::Nx2Sampler
+
 #else
 namespace VideoCommon::Nx2Sampler {
 struct Sampler {

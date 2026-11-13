@@ -975,7 +975,7 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 }
 
 void SetCurrentThreadName(const char* name) {
-#ifdef _MSC_VER
+#ifdef _WIN32
     // Sets the debugger-visible name of the current thread.
     if (auto pf = (decltype(&SetThreadDescription))(void*)GetProcAddress(GetModuleHandle(TEXT("KernelBase.dll")), "SetThreadDescription"); pf)
         pf(GetCurrentThread(), UTF8ToUTF16W(name).data()); // Windows 10+
