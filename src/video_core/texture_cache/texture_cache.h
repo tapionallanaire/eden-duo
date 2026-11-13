@@ -524,11 +524,17 @@ void TextureCache<P>::TickFrame() {
     TickAsyncDecode();
     TickAsyncUnswizzle();
     if (frame_tick % 600 == 0 && !uploaded_ranges.empty()) {
-#ifndef __ANDROID__ // Android: guest RAM is not paged out behind the game (unmeasured there)
-        for (const auto& [address, size] : uploaded_ranges) {
-            device_memory.HintCold(address, size);
-        }
+        // Android: Switch 2 titles only (see BufferCache::TickFrame).
+#ifdef __ANDROID__
+        const bool cold_hints = Settings::CurrentProgramIsSwitch2();
+#else
+        const bool cold_hints = true;
 #endif
+        if (cold_hints) {
+            for (const auto& [address, size] : uploaded_ranges) {
+                device_memory.HintCold(address, size);
+            }
+        }
         uploaded_ranges.clear();
     }
 

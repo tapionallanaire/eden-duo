@@ -118,11 +118,20 @@ void BufferCache<P>::TickFrame() {
     runtime.TickFrame(slot_buffers);
     native_indirect_uniforms_this_frame.clear();
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
-#ifndef __ANDROID__ // Android: guest RAM is not paged out behind the game (unmeasured there)
-        for (const auto& [address, size] : uploaded_buffer_ranges) {
-            device_memory.HintCold(address, size);
-        }
+        // Android: only for Switch 2 titles. Their 12 GiB layout does not fit a phone unless
+        // the guest's copies of uploaded data can go to swap (Ocarina of Time held 5 GiB of
+        // guest memory at its title and was killed for memory on a 12 GB Galaxy S24 Ultra);
+        // unmeasured for Switch 1 titles there.
+#ifdef __ANDROID__
+        const bool cold_hints = Settings::CurrentProgramIsSwitch2();
+#else
+        const bool cold_hints = true;
 #endif
+        if (cold_hints) {
+            for (const auto& [address, size] : uploaded_buffer_ranges) {
+                device_memory.HintCold(address, size);
+            }
+        }
         uploaded_buffer_ranges.clear();
     }
     if (static u64 frames{}; ++frames % 600 == 0) {
