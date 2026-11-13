@@ -136,7 +136,9 @@ extern std::atomic<u64> g_nx2_present_count;
 /// before the previous frame's dispatches ran. Those writes are collected in two sets
 /// (GPUDirtyMemoryManager, one per frame parity): the guest collects into g_nx2_collect_set,
 /// which the present flips, and the GPU thread gathers only the set of the frame it is running.
-extern std::atomic<bool> g_nx2_barrier;
+/// 0: off. 1: such a write waits for the GPU thread to finish the frame before. 2: held back as
+/// described (faster, but a rare 0.3 s brightness step was recorded with it).
+extern std::atomic<u32> g_nx2_barrier;
 extern std::atomic<u32> g_nx2_collect_set;
 struct Nx2BarrierStats {
     std::atomic<u64> waits{}, wait_ns{}, timeouts{};

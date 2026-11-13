@@ -967,6 +967,10 @@ struct Memory::Impl {
                     return;
                 }
             }
+            if (Core::g_nx2_barrier.load(std::memory_order_relaxed) == 1) [[unlikely]] {
+                Core::Nx2WaitGpuThreadDone(
+                    Core::g_nx2_present_count.load(std::memory_order_acquire));
+            }
             VideoCommon::Nx2Hazard::NoteGuestWrite(address, size);
             const size_t set = Core::g_nx2_collect_set.load(std::memory_order_relaxed) != 0
                                    ? Core::Hardware::NUM_CPU_CORES

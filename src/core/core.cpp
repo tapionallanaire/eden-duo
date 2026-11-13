@@ -91,7 +91,7 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
-std::atomic<bool> g_nx2_barrier{};
+std::atomic<u32> g_nx2_barrier{};
 std::atomic<u32> g_nx2_collect_set{};
 Nx2BarrierStats g_nx2_barrier_stats;
 
@@ -114,7 +114,7 @@ u64 Nx2GpuThreadDone() {
 }
 
 void Nx2BarrierReset() {
-    g_nx2_barrier.store(false, std::memory_order_relaxed);
+    g_nx2_barrier.store(0, std::memory_order_relaxed);
     g_nx2_collect_set.store(0, std::memory_order_relaxed);
     nx2_gpu_thread_done.store(0, std::memory_order_release);
 }
@@ -978,7 +978,7 @@ std::span<GPUDirtyMemoryManager> System::GetGPUDirtyMemoryManager() {
 }
 
 void System::GatherGPUDirtyMemory(std::function<void(PAddr, size_t)>& callback) {
-    if (!g_nx2_barrier.load(std::memory_order_relaxed)) {
+    if (g_nx2_barrier.load(std::memory_order_relaxed) != 2) {
         for (auto& manager : impl->gpu_dirty_memory_managers) {
             manager.Gather(callback);
         }

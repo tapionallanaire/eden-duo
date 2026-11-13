@@ -1885,34 +1885,39 @@ private:
             // the GPU thread runs this one. What made that blink (the haze layer missing for a
             // frame) is the game's handful of writes a frame into buffers its compute dispatches
             // also write: they reached the caches before the previous frame's dispatches had run.
-            // They are held back instead (Core::g_nx2_collect_set): collected per frame, and the
-            // GPU thread gathers a frame's set only once it has finished the frame before.
-            // Desktop, Kokiri Forest, 40 s recordings: 20-25 ms a frame and no brightness jump in
-            // a still scene (two recordings) or one-frame blink while moving (three), against
-            // 31-32 ms with the back-thread wait below; a frame ahead without this, 98 jumps in
-            // the still scene. On where it was measured (x86-64); EDEN_NX2_BARRIER=1/0 turns it
-            // on elsewhere or off.
-            static const bool barrier = [] {
+            // Mode 1: such a write waits until the GPU thread has run the frame. Mode 2: they are
+            // held back instead (Core::g_nx2_collect_set), collected per frame, and the GPU
+            // thread gathers a frame's set only once it has finished the frame before.
+            // Desktop, Kokiri Forest, 40 s recordings. Back-thread wait (below): 31-32 ms a
+            // frame. Mode 1: 28-30 ms, no blink or brightness jump in six. Mode 2: 20-22 ms, no
+            // one-frame blink in eight, but two of them have one 0.3 s step of +6% brightness.
+            // A frame ahead without either: about 100 jumps in a still scene.
+            // Both stay off unless EDEN_NX2_BARRIER=1 or 2 asks: one of about twenty runs with
+            // them read garbage command words in the game's menus and ended there (the guest
+            // rewrote command memory the GPU thread had not parsed yet, which only the wait for
+            // the frame rules out).
+            static const u32 barrier = [] {
                 const char* value = std::getenv("EDEN_NX2_BARRIER");
-#ifdef ARCHITECTURE_x86_64
-                return value == nullptr || value[0] != '0';
-#else
-                return value != nullptr && value[0] == '1';
-#endif
+                return value != nullptr && (value[0] == '1' || value[0] == '2')
+                           ? static_cast<u32>(value[0] - '0')
+                           : u32{0};
             }();
-            if (ocarina_back_wait && barrier) {
+            if (ocarina_back_wait && barrier != 0) {
                 const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
-                Core::g_nx2_barrier.store(true, std::memory_order_relaxed);
+                Core::g_nx2_barrier.store(barrier, std::memory_order_relaxed);
                 // After this frame's lists: what the guest wrote for it and nothing gathered yet,
                 // then the next frame's writes may follow.
                 system.GPU().RunInOrder([&gpu = system.GPU(), present] {
                     gpu.InvalidateGPUCache();
                     Core::Nx2NoteGpuThreadDone(present);
                 });
-                Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
-                                              std::memory_order_relaxed);
-                // At most one frame ahead: the two sets hold this frame's writes and the next's.
-                Core::Nx2WaitGpuThreadDone(present - 1);
+                if (barrier == 2) {
+                    Core::g_nx2_collect_set.store(static_cast<u32>(present & 1),
+                                                  std::memory_order_relaxed);
+                    // At most one frame ahead: the two sets hold this frame's writes and the
+                    // next's.
+                    Core::Nx2WaitGpuThreadDone(present - 1);
+                }
                 WaitForFrame(m_previous_fence_id, m_previous_fence_value);
             } else if (ocarina_back_wait ||
                 VideoCommon::Nx2Knob::Live(back_wait_start, VideoCommon::Nx2Knob::BackWait)) {
