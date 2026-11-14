@@ -21,6 +21,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include "common/scope_exit.h"
 
 #if defined(__linux__)
@@ -51,14 +53,27 @@
 
 #endif // ^^^ POSIX ^^^
 
+#include <cstdlib>
+#include <utility>
+#include <vector>
+#include <unordered_map>
 #include <mutex>
 #include <random>
+#include <thread>
+#include <string_view>
+#include <string>
+#include <cstring>
+#include <cstdio>
+#include <chrono>
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/cityhash.h"
+#include "common/div_ceil.h"
 #include "common/free_region_manager.h"
 #include "common/host_memory.h"
 #include "common/logging.h"
+#include "common/settings.h"
 
 #if defined(__ANDROID__) && __ANDROID_API__ < 30
 #include <sys/syscall.h>
@@ -517,6 +532,14 @@ public:
         , virtual_size{virtual_size_}
     {}
 
+#ifdef __linux__
+    bool PunchHole(size_t offset, size_t length) {
+        return fd >= 0 &&
+               fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(offset),
+                         static_cast<off_t>(length)) == 0;
+    }
+#endif
+
     bool Init() {
         long page_size = sysconf(_SC_PAGESIZE);
         ASSERT_MSG(page_size == 0x1000, "page size {:#x} is incompatible with 4K paging", page_size);
@@ -608,6 +631,34 @@ public:
             prot_flags |= PROT_EXEC;
 #endif
         int flags = (fd >= 0 ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED;
+#ifdef __ANDROID__
+        {
+            // Pieces that live in the cold file are mapped from it.
+            std::scoped_lock lock{cold_mutex};
+            const auto range = boost::icl::interval<size_t>::right_open(host_offset,
+                                                                        host_offset + length);
+            if (cold_fd >= 0 && boost::icl::intersects(cold_ranges, range)) {
+                const auto map_piece = [&](int source, size_t begin, size_t end) {
+                    if (begin >= end) {
+                        return;
+                    }
+                    void* piece = mmap(virtual_base + virtual_offset + (begin - host_offset),
+                                       end - begin, prot_flags, flags, source,
+                                       static_cast<off_t>(begin));
+                    ASSERT_MSG(piece != MAP_FAILED, "mmap: {} {}", strerror(errno), source);
+                };
+                size_t cursor = host_offset;
+                const boost::icl::interval_set<size_t> hit = cold_ranges & range;
+                for (const auto& piece : hit) {
+                    map_piece(fd, cursor, piece.lower());
+                    map_piece(cold_fd, piece.lower(), piece.upper());
+                    cursor = piece.upper();
+                }
+                map_piece(fd, cursor, host_offset + length);
+                return;
+            }
+        }
+#endif
         void* ret = mmap(virtual_base + virtual_offset, length, prot_flags, flags, fd, host_offset);
         ASSERT_MSG(ret != MAP_FAILED, "mmap: {} {}", strerror(errno), fd);
     }
@@ -700,6 +751,337 @@ private:
 
     int fd{-1}; // memfd file descriptor, -1 is the error value of memfd_create
     FreeRegionManager free_manager{};
+
+#ifdef __ANDROID__
+public:
+    // ---- Cold store: guest memory that stopped changing lives in a file instead of the memfd.
+    //
+    // A phone has no swap but zram, which is RAM, and the data that goes cold here (texture pools
+    // the game filled once: 2 GB in Ocarina of Time) is already compressed. MADV_PAGEOUT does
+    // nothing for it either: every guest page is mapped twice (backing view and guest view) and
+    // the kernel only pages out pages mapped once. In a file the pages are ordinary page cache:
+    // written back once, then dropped whenever RAM is short and read again on use.
+    //
+    // A physical range is either in the memfd or in the cold file, at the same offset in both.
+    // cold_ranges says which; Map consults it, so every view of a page agrees.
+    static constexpr size_t ColdBlock = size_t{64} << 10;
+    /// Smaller runs cost more mappings than they save.
+    static constexpr size_t ColdMinRun = size_t{1} << 20;
+    /// One move holds the lock this long.
+    static constexpr size_t ColdMaxRun = size_t{32} << 20;
+    static constexpr size_t ColdCallBudget = size_t{256} << 20;
+
+    struct ColdView {
+        u8* address;
+        size_t length;
+        size_t file_offset;
+        int prot;
+    };
+
+    bool OpenColdFile() {
+        if (cold_tried) {
+            return cold_fd >= 0;
+        }
+        cold_tried = true;
+        if (fd < 0) {
+            return false;
+        }
+        // The app's private cache folder: /data/data/<process name>/cache.
+        char name[256]{};
+        if (FILE* const file = std::fopen("/proc/self/cmdline", "r")) {
+            static_cast<void>(std::fread(name, 1, sizeof(name) - 1, file));
+            std::fclose(file);
+        }
+        if (name[0] == 0 || std::strchr(name, '/') != nullptr) {
+            return false;
+        }
+        const std::string path = std::string{"/data/data/"} + name + "/cache/guest-cold.bin";
+        const int file = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (file < 0) {
+            LOG_WARNING(Common_Memory, "Cold store: cannot create {}: {}", path, strerror(errno));
+            return false;
+        }
+        unlink(path.c_str());
+        struct stat memfd_stat {};
+        struct stat cold_stat {};
+        if (ftruncate(file, static_cast<off_t>(backing_size)) != 0 ||
+            fstat(fd, &memfd_stat) != 0 || fstat(file, &cold_stat) != 0) {
+            LOG_WARNING(Common_Memory, "Cold store: cannot size the file: {}", strerror(errno));
+            close(file);
+            return false;
+        }
+        memfd_inode = memfd_stat.st_ino;
+        cold_inode = cold_stat.st_ino;
+        cold_fd = file;
+        LOG_INFO(Common_Memory, "Cold store: guest memory that stops changing moves to storage");
+        return true;
+    }
+
+    /// Every shared mapping of the file with this inode, from /proc/self/maps.
+    static std::vector<ColdView> ViewsOf(ino_t inode) {
+        std::vector<ColdView> views;
+        FILE* const maps = std::fopen("/proc/self/maps", "r");
+        if (maps == nullptr) {
+            return views;
+        }
+        char line[512];
+        while (std::fgets(line, sizeof(line), maps) != nullptr) {
+            unsigned long long start{}, end{}, offset{}, node{};
+            char perms[8]{};
+            if (std::sscanf(line, "%llx-%llx %7s %llx %*s %llu", &start, &end, perms, &offset,
+                            &node) != 5 ||
+                node != static_cast<unsigned long long>(inode) || perms[3] != 's') {
+                continue;
+            }
+            int prot = PROT_NONE;
+            prot |= perms[0] == 'r' ? PROT_READ : 0;
+            prot |= perms[1] == 'w' ? PROT_WRITE : 0;
+            prot |= perms[2] == 'x' ? PROT_EXEC : 0;
+            views.push_back({reinterpret_cast<u8*>(static_cast<uintptr_t>(start)),
+                             static_cast<size_t>(end - start), static_cast<size_t>(offset), prot});
+        }
+        std::fclose(maps);
+        return views;
+    }
+
+    /// Points every view of [start, start + length) in `views` at `target` (same offset).
+    static bool Retarget(const std::vector<ColdView>& views, int target, size_t start,
+                         size_t length) {
+        bool ok = true;
+        for (const ColdView& view : views) {
+            const size_t begin = (std::max)(start, view.file_offset);
+            const size_t end = (std::min)(start + length, view.file_offset + view.length);
+            if (begin >= end) {
+                continue;
+            }
+            if (mmap(view.address + (begin - view.file_offset), end - begin, view.prot,
+                     MAP_SHARED | MAP_FIXED, target, static_cast<off_t>(begin)) == MAP_FAILED) {
+                LOG_ERROR(Common_Memory, "Cold store: remap failed: {}", strerror(errno));
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    bool MoveRun(const std::vector<ColdView>& views, size_t start, size_t length) {
+        struct statvfs space {};
+        if (fstatvfs(cold_fd, &space) != 0 ||
+            u64{space.f_bavail} * space.f_frsize < u64{length} + (u64{2} << 30)) {
+            if (!std::exchange(cold_full_logged, true)) {
+                LOG_WARNING(Common_Memory, "Cold store: storage is nearly full, nothing more moves");
+            }
+            return false;
+        }
+        // 1. A copy in the file. 2. Every view on the file. 3. What was written to the memfd in
+        // between (through a view not switched yet) copied over. 4. The memfd's pages released.
+        for (size_t done = 0; done < length;) {
+            const ssize_t written = pwrite(cold_fd, backing_base + start + done, length - done,
+                                           static_cast<off_t>(start + done));
+            if (written <= 0) {
+                LOG_WARNING(Common_Memory, "Cold store: write failed: {}", strerror(errno));
+                return false;
+            }
+            done += static_cast<size_t>(written);
+        }
+        if (!Retarget(views, cold_fd, start, length)) {
+            // Views may disagree now: put all of them back on the memfd, which still has it all.
+            Retarget(views, fd, start, length);
+            return false;
+        }
+        void* const old = mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(start));
+        if (old != MAP_FAILED) {
+            const u8* const before = static_cast<const u8*>(old);
+            u8* const now = backing_base + start;
+            for (size_t page = 0; page < length; page += 0x1000) {
+                if (std::memcmp(before + page, now + page, 0x1000) != 0) {
+                    std::memcpy(now + page, before + page, 0x1000);
+                }
+            }
+            munmap(old, length);
+        }
+        fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start),
+                  static_cast<off_t>(length));
+        cold_ranges += boost::icl::interval<size_t>::right_open(start, start + length);
+        cold_bytes += length;
+        return true;
+    }
+
+    /// One pass of the scan, at most every 5 s (any cold hint calls it; the hinted range itself
+    /// is not used: the emulator's hints cover a few MiB of the gigabytes that go cold). Hashes
+    /// up to ColdScanBudget of resident guest memory from where the last pass stopped; blocks
+    /// whose hash equals the one from their previous visit (a full round earlier, 30 s or more)
+    /// move to the file in merged runs. Returns the bytes moved.
+    size_t MoveColdToFile(size_t, size_t) {
+        std::unique_lock scan{cold_scan_mutex, std::try_to_lock};
+        if (!scan.owns_lock()) {
+            return 0;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - cold_last_pass < std::chrono::seconds{5}) {
+            return 0;
+        }
+        cold_last_pass = now;
+        {
+            std::scoped_lock lock{cold_mutex};
+            if (!OpenColdFile()) {
+                return 0;
+            }
+        }
+        const size_t blocks = backing_size / ColdBlock;
+        if (cold_hashes.empty()) {
+            cold_hashes.assign(blocks, 0);
+            cold_state.assign(blocks, 0);
+            cold_zero_hash = [] {
+                const std::vector<char> zero(ColdBlock, 0);
+                return CityHash64(zero.data(), zero.size());
+            }();
+        }
+        // The scan itself runs without cold_mutex: it only reads, and only this thread touches
+        // its tables. State: 0 never seen, 1 hashed once, 2 moved.
+        std::vector<std::pair<size_t, size_t>> runs;
+        size_t hashed = 0, planned = 0, zero = 0, absent = 0;
+        size_t run_start = 0, run_length = 0;
+        const auto close_run = [&] {
+            if (run_length >= ColdMinRun && planned < ColdCallBudget) {
+                runs.emplace_back(run_start, run_length);
+                planned += run_length;
+            }
+            run_length = 0;
+        };
+        static constexpr size_t Window = size_t{8} << 20;
+        std::vector<unsigned char> resident(Window / 0x1000);
+        size_t visited = 0;
+        while (visited < blocks && hashed < ColdScanBudget) {
+            const size_t window_start = Common::AlignDown(cold_cursor * ColdBlock, Window);
+            if (mincore(backing_base + window_start, Window, resident.data()) != 0) {
+                std::fill(resident.begin(), resident.end(), static_cast<unsigned char>(0));
+            }
+            const size_t window_end = (std::min)(window_start + Window, backing_size);
+            for (; cold_cursor * ColdBlock < window_end && visited < blocks; ++cold_cursor, ++visited) {
+                const size_t block = cold_cursor * ColdBlock;
+                if (cold_state[cold_cursor] == 2) {
+                    close_run();
+                    continue;
+                }
+                const unsigned char* const pages = resident.data() + (block - window_start) / 0x1000;
+                bool all = true;
+                for (size_t page = 0; page < ColdBlock / 0x1000; ++page) {
+                    all = all && (pages[page] & 1) != 0;
+                }
+                if (!all) {
+                    // Not in RAM (never touched, a hole, or compressed away already).
+                    cold_state[cold_cursor] = 0;
+                    ++absent;
+                    close_run();
+                    continue;
+                }
+                const u64 hash = CityHash64(reinterpret_cast<const char*>(backing_base + block),
+                                            ColdBlock);
+                hashed += ColdBlock;
+                const bool unchanged = cold_state[cold_cursor] == 1 && cold_hashes[cold_cursor] == hash;
+                cold_hashes[cold_cursor] = hash;
+                cold_state[cold_cursor] = 1;
+                if (hash == cold_zero_hash) {
+                    ++zero;
+                    close_run();
+                    continue;
+                }
+                if (!unchanged) {
+                    close_run();
+                    continue;
+                }
+                if (run_length != 0 && run_start + run_length != block) {
+                    close_run();
+                }
+                if (run_length == 0) {
+                    run_start = block;
+                }
+                run_length += ColdBlock;
+                if (run_length >= ColdMaxRun) {
+                    close_run();
+                }
+            }
+            if (cold_cursor >= blocks) {
+                cold_cursor = 0;
+                close_run();
+            }
+        }
+        close_run();
+        size_t moved = 0;
+        if (!runs.empty()) {
+            const std::vector<ColdView> views = ViewsOf(memfd_inode);
+            for (const auto& [start, size] : runs) {
+                // The lock is taken per run, so a guest thread mapping memory waits for one run.
+                std::scoped_lock lock{cold_mutex};
+                if (!MoveRun(views, start, size)) {
+                    break;
+                }
+                for (size_t block = start / ColdBlock; block < (start + size) / ColdBlock; ++block) {
+                    cold_state[block] = 2;
+                }
+                moved += size;
+            }
+        }
+        if (moved != 0 || (cold_passes++ % 6) == 0) {
+            LOG_INFO(Common_Memory,
+                     "Cold store: pass hashed {} MiB ({} MiB zero, {} MiB not in RAM), moved {} "
+                     "MiB to storage, {} MiB there in all",
+                     hashed >> 20, (zero * ColdBlock) >> 20, (absent * ColdBlock) >> 20,
+                     moved >> 20, cold_bytes >> 20);
+        }
+        return moved;
+    }
+
+    /// Guest memory handed out again (cleared): back to the memfd, whose range is a hole (zero).
+    void ReturnFromColdFile(size_t physical_offset, size_t length) {
+        std::scoped_lock lock{cold_mutex};
+        if (cold_fd < 0) {
+            return;
+        }
+        const auto range = boost::icl::interval<size_t>::right_open(physical_offset,
+                                                                    physical_offset + length);
+        if (cold_ranges.empty()) {
+            return;
+        }
+        if (!boost::icl::intersects(cold_ranges, range)) {
+            return;
+        }
+        const std::vector<ColdView> views = ViewsOf(cold_inode);
+        const boost::icl::interval_set<size_t> hit = cold_ranges & range;
+        for (const auto& piece : hit) {
+            const size_t start = piece.lower();
+            const size_t size = piece.upper() - piece.lower();
+            Retarget(views, fd, start, size);
+            fallocate(cold_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                      static_cast<off_t>(start), static_cast<off_t>(size));
+            cold_bytes -= (std::min)(cold_bytes, size);
+            for (size_t block = start / ColdBlock;
+                 block < Common::DivCeil(start + size, ColdBlock) && block < cold_state.size();
+                 ++block) {
+                cold_state[block] = 0;
+            }
+        }
+        cold_ranges -= range;
+    }
+
+    int cold_fd{-1};
+    bool cold_tried{};
+    bool cold_full_logged{};
+    ino_t memfd_inode{};
+    ino_t cold_inode{};
+    size_t cold_bytes{};
+    std::mutex cold_mutex;
+    boost::icl::interval_set<size_t> cold_ranges;
+    static constexpr size_t ColdScanBudget = size_t{768} << 20;
+    /// Serializes the scan; cold_mutex guards the ranges and the mappings.
+    std::mutex cold_scan_mutex;
+    std::vector<u64> cold_hashes;
+    std::vector<u8> cold_state;
+    u64 cold_zero_hash{};
+    size_t cold_cursor{};
+    u32 cold_passes{};
+    std::chrono::steady_clock::time_point cold_last_pass{};
+#endif
 };
 
 #endif // ^^^ POSIX ^^^
@@ -707,7 +1089,9 @@ private:
 HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
     : backing_size(backing_size_)
     , virtual_size(virtual_size_)
+    , num_granules(Common::DivCeil(backing_size_, size_t{1} << GranuleShift))
 {
+    granules = std::make_unique<std::atomic<u8>[]>(num_granules);
 #if defined(__OPENORBIS__) || defined(__managarm__)
     LOG_WARNING(HW_Memory, "Platform doesn't support fastmem");
     backing_base = static_cast<u8*>(mmap(nullptr, backing_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -792,17 +1176,260 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission 
 #endif
 }
 
+namespace {
+// -1: follow the setting; otherwise the overriding Settings::ColdHintMode.
+std::atomic<int> g_cold_hint_override{[] {
+    const char* const value = std::getenv("EDEN_NX2_COLD_HINT");
+    if (value == nullptr || value[0] == '\0') {
+        return -1;
+    }
+    const std::string_view mode{value};
+    if (mode == "0" || mode == "off") {
+        return static_cast<int>(Settings::ColdHintMode::Off);
+    }
+    if (mode == "low" || mode == "2") {
+        return static_cast<int>(Settings::ColdHintMode::WhenRamIsLow);
+    }
+    return static_cast<int>(Settings::ColdHintMode::Always);
+}()};
+
+const char* ColdHintModeName(Settings::ColdHintMode mode) {
+    switch (mode) {
+    case Settings::ColdHintMode::Off:
+        return "off";
+    case Settings::ColdHintMode::WhenRamIsLow:
+        return "when RAM is low";
+    case Settings::ColdHintMode::Always:
+        return "always";
+    }
+    return "?";
+}
+
+bool ReadMemoryIsLow() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) {
+        return false;
+    }
+    const u64 floor = std::max<u64>(u64{1} << 30, status.ullTotalPhys / 10);
+    return status.ullAvailPhys < floor;
+#elif defined(__linux__)
+    const auto read_file = [](const char* path) {
+        std::string text;
+        if (FILE* const file = std::fopen(path, "r")) {
+            char buffer[4096];
+            const size_t size = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+            std::fclose(file);
+            text.assign(buffer, size);
+        }
+        return text;
+    };
+    // Some task stalled on memory for over 5% of the last 10 s: the kernel is reclaiming. Our
+    // own cgroup first (a memory limit there, as in a container or systemd scope, shows in it
+    // and not system-wide), then the whole system.
+    const auto stalled = [&](const std::string& path) {
+        const std::string pressure = read_file(path.c_str());
+        const size_t at = pressure.find("some avg10=");
+        return at != std::string::npos && std::strtod(pressure.c_str() + at + 11, nullptr) > 5.0;
+    };
+    static const std::string cgroup_pressure = [&] {
+        // cgroup v2: "0::/path".
+        const std::string self = read_file("/proc/self/cgroup");
+        const size_t at = self.find("0::");
+        if (at == std::string::npos) {
+            return std::string{};
+        }
+        const size_t end = self.find('\n', at);
+        return "/sys/fs/cgroup" + self.substr(at + 3, end - at - 3) + "/memory.pressure";
+    }();
+    if ((!cgroup_pressure.empty() && stalled(cgroup_pressure)) ||
+        stalled("/proc/pressure/memory")) {
+        return true;
+    }
+    const std::string meminfo = read_file("/proc/meminfo");
+    const auto field = [&](const char* name) -> u64 {
+        const size_t at = meminfo.find(name);
+        return at == std::string::npos
+                   ? 0
+                   : std::strtoull(meminfo.c_str() + at + std::strlen(name), nullptr, 10) * 1024;
+    };
+    const u64 total = field("MemTotal:");
+    const u64 available = field("MemAvailable:");
+    if (total == 0 || available == 0) {
+        return false;
+    }
+#ifdef __ANDROID__
+    // Android's low memory killer acts long before a tenth is left (Odin 2, 16 GB: Ocarina of
+    // Time killed with 2 GB available), and a 3D scene takes 5 GB within seconds, too fast to
+    // start making room only then: half of RAM counts as low here.
+    return available < std::max<u64>(u64{1} << 30, total / 2);
+#else
+    return available < std::max<u64>(u64{1} << 30, total / 10);
+#endif
+#else
+    return false;
+#endif
+}
+} // Anonymous namespace
+
+Settings::ColdHintMode ColdHintModeInEffect() {
+    const int override_value = g_cold_hint_override.load(std::memory_order_relaxed);
+    return override_value < 0 ? Settings::values.cold_hint_mode.GetValue()
+                              : static_cast<Settings::ColdHintMode>(override_value);
+}
+
+void OverrideColdHintMode(Settings::ColdHintMode mode) {
+    g_cold_hint_override.store(static_cast<int>(mode), std::memory_order_relaxed);
+    LOG_INFO(Common_Memory, "Cold hints: {}", ColdHintModeName(mode));
+}
+
+bool MemoryIsLow() {
+    using Clock = std::chrono::steady_clock;
+    static std::atomic<s64> checked_at{};
+    static std::atomic<bool> low{};
+    const s64 now = Clock::now().time_since_epoch().count();
+    const s64 last = checked_at.load(std::memory_order_relaxed);
+    if (last == 0 || now - last >= std::chrono::nanoseconds{std::chrono::seconds{1}}.count()) {
+        checked_at.store(now, std::memory_order_relaxed);
+        const bool is_low = ReadMemoryIsLow();
+        if (is_low != low.exchange(is_low, std::memory_order_relaxed)) {
+            LOG_INFO(Common_Memory, "System memory {}", is_low ? "low" : "no longer low");
+        }
+    }
+    return low.load(std::memory_order_relaxed);
+}
+
+ColdHintAction HostMemory::HintCold(size_t physical_offset, size_t length,
+                                    std::optional<size_t> virtual_offset) const {
+    if (length == 0 || backing_base == nullptr) {
+        return ColdHintAction::None;
+    }
+    const Settings::ColdHintMode mode = ColdHintModeInEffect();
+    if (mode == Settings::ColdHintMode::Off) {
+        return ColdHintAction::None;
+    }
+    const bool page_out = mode == Settings::ColdHintMode::Always || MemoryIsLow();
+#ifdef __ANDROID__
+    // MADV_PAGEOUT skips these pages (mapped twice) and zram would not shrink them: what has
+    // stopped changing goes to the cold file instead.
+    if (page_out && impl) {
+        return impl->MoveColdToFile(physical_offset, length) != 0 ? ColdHintAction::PagedOut
+                                                                  : ColdHintAction::None;
+    }
+#endif
+#if defined(_WIN32)
+    // Windows has no cheap mark: leave the memory alone until it is short.
+    if (!page_out) {
+        return ColdHintAction::None;
+    }
+#elif !defined(__linux__) || !defined(MADV_COLD) || !defined(MADV_PAGEOUT)
+    return ColdHintAction::None;
+#endif
+    // Paging out reclaims synchronously (compressing into zram, writing swap, unmapping), which
+    // also slows the threads touching nearby memory: work in pieces and pause between them.
+    static constexpr size_t Piece = size_t{8} << 20;
+    static constexpr auto Budget = std::chrono::milliseconds{2};
+    const auto hint = [page_out, length](u8* address) {
+        auto slice_start = std::chrono::steady_clock::now();
+        for (size_t done = 0; done < length;) {
+            const size_t size = std::min(Piece, length - done);
+#ifdef _WIN32
+            // Unlocking pages that are not locked takes them out of the working set.
+            VirtualUnlock(address + done, size);
+#elif defined(__linux__) && defined(MADV_COLD) && defined(MADV_PAGEOUT)
+            madvise(address + done, size, page_out ? MADV_PAGEOUT : MADV_COLD);
+#endif
+            done += size;
+            if (page_out && std::chrono::steady_clock::now() - slice_start >= Budget) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{2});
+                slice_start = std::chrono::steady_clock::now();
+            }
+        }
+    };
+    hint(backing_base + physical_offset);
+    if (virtual_offset && virtual_base != nullptr && *virtual_offset + length <= virtual_size) {
+        hint(virtual_base + *virtual_offset);
+    }
+    return page_out ? ColdHintAction::PagedOut : ColdHintAction::MarkedCold;
+}
+
 void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
+    if (length == 0) {
+        return;
+    }
+    MarkUsed(physical_offset, length);
+#ifdef __ANDROID__
+    if (impl && length >= PageAlignment && IsAligned(physical_offset, PageAlignment) &&
+        IsAligned(length, PageAlignment)) {
+        impl->ReturnFromColdFile(physical_offset, length);
+    }
+#endif
+    if (fill_value != 0) {
+        std::memset(backing_base + physical_offset, fill_value, length);
+        MarkDirty(physical_offset, length);
+        return;
+    }
 #if defined(__linux__)
+    // Linux/Android: discard the range outright, whatever the granule state says (it saves the
+    // same RAM as the skip below and also holds for memory written without MarkDirty).
     // Remove shared backing pages, not just this mapping's view of their contents.
     // Unaligned clears fall back to memset; split off the edge bytes if a caller needs this fast.
-    if (fill_value == 0 && length >= PageAlignment &&
-        IsAligned(physical_offset, PageAlignment) && IsAligned(length, PageAlignment) &&
+    if (length >= PageAlignment && IsAligned(physical_offset, PageAlignment) &&
+        IsAligned(length, PageAlignment) &&
         madvise(backing_base + physical_offset, length, MADV_REMOVE) == 0) {
         return;
     }
+    std::memset(backing_base + physical_offset, 0, length);
+#else
+    // Fresh backing memory is zero and the host gives it no RAM until it's touched: clear only
+    // the granules that may hold data (title 1's heap made the host commit every page of it).
+    // A granule cleared in full is zero again.
+    const size_t end = physical_offset + length;
+    for (size_t offset = physical_offset; offset < end;) {
+        const size_t index = offset >> GranuleShift;
+        const size_t granule_begin = index << GranuleShift;
+        const size_t granule_end = granule_begin + (size_t{1} << GranuleShift);
+        const size_t clear_end = (std::min)(granule_end, end);
+        if ((granules[index].load(std::memory_order_acquire) & GranuleDirty) != 0) {
+            std::memset(backing_base + offset, 0, clear_end - offset);
+            if (offset == granule_begin && clear_end == granule_end) {
+                granules[index].fetch_and(static_cast<u8>(~GranuleDirty), std::memory_order_release);
+            }
+        }
+        offset = clear_end;
+    }
 #endif
-    std::memset(backing_base + physical_offset, fill_value, length);
+}
+
+void HostMemory::MarkUsed(size_t physical_offset, size_t length) {
+    if (length == 0) {
+        return;
+    }
+    const size_t last = (physical_offset + length - 1) >> GranuleShift;
+    for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
+        if ((granules[index].load(std::memory_order_relaxed) & GranuleUsed) == 0) {
+            granules[index].fetch_or(GranuleUsed, std::memory_order_release);
+        }
+    }
+}
+
+void HostMemory::MarkDirty(size_t physical_offset, size_t length) {
+    if (length == 0) {
+        return;
+    }
+    const size_t last = (physical_offset + length - 1) >> GranuleShift;
+    for (size_t index = physical_offset >> GranuleShift; index <= last; ++index) {
+        granules[index].fetch_or(GranuleDirty, std::memory_order_release);
+    }
+}
+
+void HostMemory::ForgetContents() {
+    for (size_t index = 0; index < num_granules; ++index) {
+        if ((granules[index].load(std::memory_order_relaxed) & GranuleUsed) != 0) {
+            granules[index].fetch_or(GranuleDirty, std::memory_order_release);
+        }
+    }
 }
 
 void HostMemory::EnableDirectMappedAddress() {

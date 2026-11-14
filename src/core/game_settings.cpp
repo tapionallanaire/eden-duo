@@ -264,6 +264,19 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
             // (OptimalDriver), which owns driver_path.
             return true;
+        case TitleID::OcarinaOfTimeNx2:
+            // From Eglantine's desktop preset (Settings::SetOcarinaOfTimeRecommendedSettings):
+            // reactive flushing and FifoRelaxed. Not its docked mode or async shaders: handheld
+            // keeps the render targets and the upscale output small on a phone, and with async
+            // shaders the draws skipped while pipelines build left a GPU channel waiting on a
+            // semaphore, then garbage commands and a crash 25 s into the first 3D scene (Galaxy
+            // S24 Ultra, Turnip; one run each way).
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Handheld);
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, false);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
+            return true;
         default:
             return false;
     }

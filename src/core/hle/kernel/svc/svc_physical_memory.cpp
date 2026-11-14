@@ -5,10 +5,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_system_control.h"
 #include "core/hle/kernel/svc.h"
 
 namespace Kernel::Svc {
@@ -19,7 +21,10 @@ Result SetHeapSize(Core::System& system, u64* out_address, u64 size) {
 
     // Validate size.
     R_UNLESS(Common::IsAligned(size, HeapSizeAlignment), ResultInvalidSize);
-    R_UNLESS(size < MainMemorySizeMax, ResultInvalidSize);
+    // Switch 2 titles size their heap from the total memory, which exceeds Switch 1's 8 GiB.
+    const size_t max_heap_size =
+        (std::max)(MainMemorySizeMax, KSystemControl::Init::GetIntendedMemorySize());
+    R_UNLESS(size < max_heap_size, ResultInvalidSize);
 
     // Set the heap size.
     KProcessAddress address{};
@@ -159,16 +164,47 @@ Result SetUnsafeLimit(Core::System& system, uint64_t limit) {
     R_THROW(ResultNotImplemented);
 }
 
+// EDEN_NX2_MEM_TRACE: log the heap and physical memory requests of a title (diagnostics).
+static bool MemTrace() {
+    static const bool trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
+    return trace;
+}
+
 Result SetHeapSize64(Core::System& system, uint64_t* out_address, uint64_t size) {
-    R_RETURN(SetHeapSize(system, out_address, size));
+    const Result result = SetHeapSize(system, out_address, size);
+    if (MemTrace()) {
+        LOG_INFO(Kernel_SVC, "mem trace: SetHeapSize {:#x} -> {:#x} at {:#x}", size, result.raw,
+                 *out_address);
+    }
+    R_RETURN(result);
 }
 
 Result MapPhysicalMemory64(Core::System& system, uint64_t address, uint64_t size) {
-    R_RETURN(MapPhysicalMemory(system, address, size));
+    const Result result = MapPhysicalMemory(system, address, size);
+    static u64 total{};
+    if (MemTrace()) {
+        if (result.IsSuccess()) {
+            total += size;
+        }
+        static u32 logs{};
+        if (result.IsError() || logs++ < 400) {
+            LOG_INFO(Kernel_SVC, "mem trace: MapPhysicalMemory {:#x}+{:#x} -> {:#x} (mapped total {:#x})",
+                     address, size, result.raw, total);
+        }
+    }
+    R_RETURN(result);
 }
 
 Result UnmapPhysicalMemory64(Core::System& system, uint64_t address, uint64_t size) {
-    R_RETURN(UnmapPhysicalMemory(system, address, size));
+    const Result result = UnmapPhysicalMemory(system, address, size);
+    if (MemTrace()) {
+        static u32 logs{};
+        if (result.IsError() || logs++ < 400) {
+            LOG_INFO(Kernel_SVC, "mem trace: UnmapPhysicalMemory {:#x}+{:#x} -> {:#x}", address,
+                     size, result.raw);
+        }
+    }
+    R_RETURN(result);
 }
 
 Result MapPhysicalMemoryUnsafe64(Core::System& system, uint64_t address, uint64_t size) {

@@ -1,8 +1,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <string>
+
 #include <QApplication>
+
+#include "common/driver_shader_cache.h"
+#include "common/fs/path_util.h"
+#include "common/settings.h"
+#include "frontend_common/config.h"
 #include "startup_checks.h"
+#include "yuzu/nx2_switches.h"
 
 #if YUZU_ROOM
 #include <cstring>
@@ -23,6 +35,10 @@
 #endif
 
 #include "main_window.h"
+
+#ifdef YUZU_CRASH_DUMPS
+#include "yuzu/breakpad.h"
+#endif
 
 #ifdef _WIN32
 #include <QScreen>
@@ -77,7 +93,85 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #endif
 }
 
+// The NX2 switches are read from the environment (EDEN_NX2_*), which a GUI launch has no way to
+// set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
+// in the real environment always wins, so a launcher script can still override one run; between
+// files the later one wins, so the copy next to the executable (shipped with the build) can be
+// overridden by the user's copy (Nx2Switches::UserFilePath: %APPDATA%\eglantine, or the portable user
+// folder) without editing the one that gets replaced.
+static void ParseSwitchFile(const std::filesystem::path& path,
+                            std::map<std::string, std::string>& entries) {
+    std::ifstream file{path};
+    if (!file) {
+        return;
+    }
+    constexpr const char* blank = " \t\r";
+    std::string line;
+    while (std::getline(file, line)) {
+        line.erase(0, line.find_first_not_of(blank));
+        line.erase(line.find_last_not_of(blank) + 1);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        std::string name = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        name.erase(name.find_last_not_of(blank) + 1);
+        value.erase(0, value.find_first_not_of(blank));
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (!name.empty()) {
+            entries.insert_or_assign(std::move(name), std::move(value));
+        }
+    }
+}
+
+static std::filesystem::path GetSwitchExeDirectory(const char* argv0) {
+#ifdef _WIN32
+    return Common::FS::GetExeDirectory();
+#else
+    std::error_code ec;
+#ifdef __linux__
+    if (auto exe = std::filesystem::read_symlink("/proc/self/exe", ec); !ec) {
+        return exe.parent_path();
+    }
+#endif
+    const auto exe = std::filesystem::absolute(argv0, ec);
+    return ec ? std::filesystem::path{} : exe.parent_path();
+#endif
+}
+
+static void LoadNx2Switches(const char* argv0) {
+    // Later files overwrite earlier entries; the real environment is checked only at the end.
+    std::map<std::string, std::string> entries;
+    if (const auto exe_dir = GetSwitchExeDirectory(argv0); !exe_dir.empty()) {
+        ParseSwitchFile(exe_dir / "nx2_switches.txt", entries);
+    }
+    ParseSwitchFile(Nx2Switches::UserFilePath(), entries);
+    for (const auto& [name, value] : entries) {
+        if (std::getenv(name.c_str()) != nullptr) {
+            continue;
+        }
+#ifdef _WIN32
+        _putenv_s(name.c_str(), value.c_str());
+#else
+        setenv(name.c_str(), value.c_str(), 1);
+#endif
+    }
+}
+
 int main(int argc, char* argv[]) {
+    LoadNx2Switches(argv[0]);
+    // Before StartupChecks: its Vulkan check is the first thing to load a GPU driver. The config
+    // isn't loaded yet, so the setting is read from the file.
+    Config::ReadGlobalSettingEarly("qt-config", Settings::values.private_driver_shader_cache);
+    Config::ReadGlobalSettingEarly("qt-config", Settings::values.driver_shader_cache_size);
+    Common::ConfigureDriverShaderCache(Settings::values.private_driver_shader_cache.GetValue(),
+                                       Settings::values.driver_shader_cache_size.GetValue());
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
@@ -109,7 +203,7 @@ int main(int argc, char* argv[]) {
 
     // Init settings params
     QCoreApplication::setOrganizationName(QStringLiteral("eden"));
-    QCoreApplication::setApplicationName(QStringLiteral("eden"));
+    QCoreApplication::setApplicationName(QStringLiteral("Eglantine"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.
@@ -122,11 +216,11 @@ int main(int argc, char* argv[]) {
     _setmaxstdio(8192);
 #endif // __MSVCRT__
 #elif defined(__unix__) || defined(__APPLE__)
-    // Set the max open file limit to 8192, or the hard limit.
+    // Raise the open file limit to at least 8192, or the hard limit.
     // Most sane systems should not hit the hard limit here.
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        rl.rlim_cur = std::min<rlim_t>(8192, rl.rlim_max);
+        rl.rlim_cur = std::min<rlim_t>(1048576, rl.rlim_max);
         setrlimit(RLIMIT_NOFILE, &rl);
     }
 #endif // _WIN32
@@ -161,7 +255,7 @@ int main(int argc, char* argv[]) {
 
     // Fix the Wayland appId. This needs to match the name of the .desktop file without the .desktop
     // suffix.
-    QGuiApplication::setDesktopFileName(QStringLiteral("dev.eden_emu.eden"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("dev.eglantine.eglantine"));
 #endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();

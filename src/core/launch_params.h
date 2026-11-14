@@ -21,8 +21,23 @@ struct LaunchParams {
     std::string program_args{};
     std::optional<std::string> config_path{};
     std::optional<int> selected_user{};
+    bool enable_gdbstub = false;
     std::optional<u16> override_gdb_port{};
     std::optional<std::string> log_filter{};
+    // Built-in MCP server: --mcp, --mcp-port <port>, --mcp-allow-writes
+    bool mcp_enable = false;
+    std::optional<u16> mcp_port{};
+    bool mcp_allow_writes = false;
+    // --pack-nup <dump> [<out.nup>]: packs a loose dump instead of booting a game (eden-cli).
+    std::optional<std::string> pack_nup_source{};
+    // --unpack-nup <file.nup> [<out_dir>]: extracts a NUP back into a loose dump.
+    std::optional<std::string> unpack_nup_source{};
+    // --edit-nup <file.nup>: rewrites default-language metadata in place.
+    std::optional<std::string> edit_nup_source{};
+    std::optional<std::string> edit_nup_name{};
+    std::optional<std::string> edit_nup_icon{};
+    std::optional<std::string> edit_nup_version{};
+    std::optional<std::string> edit_nup_publisher{};
     u16 port = Network::DefaultRoomPort;
     bool use_multiplayer = false;
     bool fullscreen = false;

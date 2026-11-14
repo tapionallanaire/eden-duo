@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <bit>
 #include <numeric>
@@ -14,6 +15,7 @@
 #include "common/settings.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 
 namespace Vulkan {
@@ -123,7 +125,8 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     tessellation_spacing.Assign(static_cast<u32>(regs.tessellation.params.spacing.Value()));
     tessellation_clockwise.Assign(regs.tessellation.params.output_primitives.Value() ==
                                   Maxwell::Tessellation::OutputPrimitives::Triangles_CW);
-    patch_control_points_minus_one.Assign(regs.patch_vertices - 1);
+    // The field holds 1..32 points; an unset (0) or oversized register would wrap or truncate.
+    patch_control_points_minus_one.Assign(std::clamp<u32>(regs.patch_vertices, 1, 32) - 1);
     const bool can_collapse_topology_class =
         features.has_extended_dynamic_state && features.has_extended_dynamic_state_2;
     // The guest's topology field is wider than the enum: an unknown value stays as it is.
@@ -131,10 +134,16 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
                             static_cast<size_t>(topology_) < TOPOLOGY_CLASS_REPRESENTATIVE_LUT.size()
                         ? TOPOLOGY_CLASS_REPRESENTATIVE_LUT[static_cast<size_t>(topology_)]
                         : topology_);
-    // One sample per pixel when the title's multisampled targets are kept single-sampled.
-    msaa_mode.Assign(Settings::values.msaa_single_sample_by_title
-                         ? Tegra::Texture::MsaaMode::Msaa1x1
-                         : regs.anti_alias_samples_mode);
+    if (Settings::values.msaa_single_sample_by_title) {
+        // One sample per pixel when the title's multisampled targets are kept single-sampled.
+        msaa_mode.Assign(Tegra::Texture::MsaaMode::Msaa1x1);
+    } else if (regs.tir_mode == Maxwell::TIRMode::RasterNTargetM &&
+               regs.anti_alias_raster != Maxwell::AntiAliasRaster::Mode1x1) {
+        // Target-independent rasterization rasterizes (and depth tests) at the raster sample count
+        msaa_mode.Assign(static_cast<Tegra::Texture::MsaaMode>(regs.anti_alias_raster));
+    } else {
+        msaa_mode.Assign(regs.anti_alias_samples_mode);
+    }
     attachment0_dual_source_blend.Assign(ComputeAttachment0DualSourceBlend(regs) ? 1 : 0);
 
     raw2 = 0;
@@ -184,7 +193,22 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     for (size_t i = 0; i < regs.rt.size(); ++i) {
         color_formats[i] = static_cast<u8>(regs.rt[i].format);
     }
-    alpha_test_ref = std::bit_cast<u32>(regs.alpha_test_ref);
+    // The reference is part of the pipeline only while the test compares with it: title 1
+    // animates the register with the test off (text fading in and out), which made a new
+    // pipeline, translated on the GPU thread, for every value (~84% of its runtime pipelines).
+    // Other titles fade with the test on, moving the reference by less than one step of 8-bit
+    // alpha per frame. Rounding it to 1/255 keeps those fades to one pipeline per step that
+    // the textures can tell apart, instead of one per frame and a new set every run.
+    if (regs.alpha_test_enabled == 0) {
+        alpha_test_ref = 0;
+    } else {
+        const u32 packed_alpha_test = alpha_test_func.Value();
+        alpha_test_ref =
+            packed_alpha_test != PackComparisonOp(Maxwell::ComparisonOp::Never_GL) &&
+                    packed_alpha_test != PackComparisonOp(Maxwell::ComparisonOp::Always_GL)
+                ? std::bit_cast<u32>(std::round(regs.alpha_test_ref * 255.0f) / 255.0f)
+                : 0;
+    }
     point_size = std::bit_cast<u32>(regs.point_size);
 
     if (maxwell3d.dirty.flags[Dirty::VertexInput]) {
@@ -265,6 +289,18 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     dynamic_state.Refresh3(regs, features);
     if (xfb_enabled) {
         RefreshXfbState(xfb_state, regs);
+    }
+    if (!dynamic_vertex_input && features.has_static_vertex_repack) {
+        const u32 repack_mask = VertexRepackMask(regs);
+        // Refresh from guest values even when only the stride changed: offsets must not accumulate.
+        for (size_t index = 0; index < attributes.size(); ++index) {
+            const auto& input = regs.vertex_attrib_format[index];
+            attributes[index].offset.Assign(RepackedVertexOffset(repack_mask, input.buffer, input.offset));
+        }
+        for (u32 binding = 0; binding < vertex_strides.size(); ++binding) {
+            vertex_strides[binding] = static_cast<u16>(RepackedVertexStride(
+                repack_mask, binding, regs.vertex_streams[binding].stride));
+        }
     }
 }
 
@@ -370,19 +406,27 @@ void FixedPipelineState::DynamicState::Refresh2(const Maxwell& regs,
     depth_bias_enable.Assign(enabled_lut[offset_class] != 0 ? 1 : 0);
 }
 
+DepthClampClip MaxwellDepthClampClip(const Maxwell& regs, bool has_depth_clip_enable) {
+    using GeometryClip = Maxwell::ViewportClipControl::GeometryClip;
+    const auto& control = regs.viewport_clip_control;
+    const bool clips_z = control.geometry_clip == GeometryClip::Passthrough ||
+                         control.geometry_clip == GeometryClip::FrustumXYZ ||
+                         control.geometry_clip == GeometryClip::FrustumZ;
+    if (!has_depth_clip_enable) {
+        return {.clamp = !clips_z, .clip = clips_z};
+    }
+    const bool clamp = control.pixel_min_z != 0 || control.pixel_max_z != 0;
+    return {.clamp = clamp, .clip = clips_z};
+}
+
 void FixedPipelineState::DynamicState::Refresh3(const Maxwell& regs,
                                                 const DynamicFeatures& features) {
     if (!features.has_dynamic_state3_logic_op_enable) {
         logic_op_enable.Assign(regs.logic_op.enable != 0 ? 1 : 0);
     }
-    if (!features.has_dynamic_state3_depth_clamp_enable) {
-        depth_clamp_disabled.Assign(regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::Passthrough ||
-                                    regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::FrustumXYZ ||
-                                    regs.viewport_clip_control.geometry_clip ==
-                                        Maxwell::ViewportClipControl::GeometryClip::FrustumZ);
-    }
+    const auto depth = MaxwellDepthClampClip(regs, features.has_depth_clip_enable);
+    depth_clamp_disabled.Assign(depth.clamp ? 0 : 1);
+    depth_clip_disabled.Assign(depth.clip ? 0 : 1);
     if (!features.has_dynamic_state3_line_stipple_enable) {
         line_stipple_enable.Assign(regs.line_stipple_enable);
     }

@@ -13,6 +13,9 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/renderer_vulkan/present/fsr.h"
+#ifndef __ANDROID__ // FSR 3.1 is desktop only
+#include "video_core/renderer_vulkan/present/fsr3.h"
+#endif
 #include "video_core/renderer_vulkan/present/sgsr.h"
 #include "video_core/renderer_vulkan/present/fxaa.h"
 #ifdef HAS_RESHADE
@@ -101,7 +104,11 @@ private:
 
     Settings::AntiAliasing anti_alias_setting{};
     std::variant<std::monostate, FXAA, SMAA> anti_alias{};
+#ifdef __ANDROID__
     std::variant<std::monostate, SGSR, FSR> sr_filter{};
+#else
+    std::variant<std::monostate, SGSR, FSR, FSR3> sr_filter{};
+#endif
 #ifdef HAS_RESHADE
     std::optional<PostProcessChain> post_process{};
     u64 post_process_generation{};

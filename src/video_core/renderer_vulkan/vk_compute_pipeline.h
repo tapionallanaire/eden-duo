@@ -7,9 +7,13 @@
 #pragma once
 
 #include <atomic>
-#include <functional>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <span>
+#include <vector>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
@@ -57,15 +61,43 @@ public:
         return static_cast<bool>(pipeline);
     }
 
+    /// Whether no build of this pipeline is left queued on a worker thread, which holds it
+    [[nodiscard]] bool IsBuildTaskDone() const noexcept {
+        return build_task_done.load(std::memory_order::acquire);
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
-        return is_built.load(std::memory_order::relaxed);
+        return is_built.load(std::memory_order::acquire);
     }
 
     /// A dispatch needs this pipeline now: build it on [worker] unless a build already started,
     /// instead of behind every pipeline queued before it.
     void BuildUrgently(Common::ThreadWorker& worker);
 
+    [[nodiscard]] u64 ShaderHash() const noexcept {
+        return shader_hash;
+    }
+
+    /// Storage images written by the last configured dispatch, kept while a frame dump runs.
+    [[nodiscard]] std::span<const VideoCommon::ImageViewId> WrittenImages() const noexcept {
+        return written_images;
+    }
+
+    struct SampledImage {
+        u32 tic;
+        VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
+    };
+
+    /// The textures sampled by the last configured dispatch, kept while a sampled frame dump runs.
+    [[nodiscard]] std::span<const SampledImage> SampledImages() const noexcept {
+        return sampled_images;
+    }
+
 private:
+    /// Builds the pipeline once, on whichever thread gets here first.
+    void RunBuild();
+
     const Device& device;
     vk::PipelineCache& pipeline_cache;
     GuestDescriptorQueue& guest_descriptor_queue;
@@ -73,6 +105,10 @@ private:
     Shader::Info info;
     u64 shader_hash{};
     u32 num_descriptor_entries{};
+    bool has_image_resources{false};
+    bool has_rescaling_push_constants{false};
+    boost::container::small_vector<VideoCommon::ImageViewId, 8> written_images;
+    std::vector<SampledImage> sampled_images;
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};
 
@@ -81,17 +117,22 @@ private:
     bool uses_push_descriptor{false};
     bool uses_descriptor_buffer{false};
     DescriptorBufferLayout descriptor_buffer_layout;
+    std::vector<DescriptorUpdateEntry> last_descriptor_payload;
+    std::vector<u8> last_descriptor_bytes;
+    VkDeviceSize last_descriptor_buffer_offset{};
+    u32 last_descriptor_buffer_chunk{};
+    u64 last_descriptor_buffer_generation{};
     DescriptorAllocator* descriptor_allocator{};
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
 
+    std::atomic_bool build_task_done{true};
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     /// The build runs once, on whichever thread claims it first.
     std::function<void()> build_func;
     std::atomic_bool build_claimed{false};
-    void RunBuild();
     std::atomic_bool is_built{false};
 };
 

@@ -7,11 +7,11 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
 
-#include <fmt/format.h>
 #include <nlohmann/json.hpp>
 #include <openssl/sha.h>
 
@@ -114,7 +114,7 @@ std::string Digest(const std::vector<u8>& bytes) {
     std::string result;
     result.reserve(hash.size() * 2);
     for (const auto byte : hash) {
-        result += fmt::format("{:02x}", byte);
+        result += std::format("{:02x}", byte);
     }
     return result;
 }
@@ -205,7 +205,7 @@ std::unique_ptr<GameModule> GameModule::Load(FileSys::VirtualDir assets, u64 tit
             }
             return nullptr;
         }
-        const auto title = fmt::format("{:016X}", title_id);
+        const auto title = std::format("{:016X}", title_id);
         const auto declared_title = manifest.at("title_id").get<std::string>();
         if (!IsHex(declared_title, 16) || Upper(declared_title) != title) {
             throw std::runtime_error("module title ID does not match the running game");
@@ -235,10 +235,10 @@ std::unique_ptr<GameModule> GameModule::Load(FileSys::VirtualDir assets, u64 tit
         }
         const auto& libraries = module.at("libraries");
         if (!libraries.contains(platform)) {
-            throw std::runtime_error(fmt::format("package has no {} module", platform));
+            throw std::runtime_error(std::format("package has no {} module", platform));
         }
         const auto& entry = libraries.at(platform);
-        const auto expected_path = fmt::format("modules/{}/{}.so", platform, title);
+        const auto expected_path = std::format("modules/{}/{}.so", platform, title);
         if (entry.at("path").get<std::string>() != expected_path) {
             throw std::runtime_error("invalid title-ID module filename");
         }
@@ -308,6 +308,20 @@ std::unique_ptr<GameModule> GameModule::Load(FileSys::VirtualDir assets, u64 tit
                 loaded->library, "eden_dsmod_get_data_extensions", EDEN_DSMOD_DATA_EXT_VERSION,
                 EDEN_DSMOD_DATA_EXT_HASH, &EdenDsmodModuleDataExtensions::load_data, false,
                 "incompatible dual-screen data extensions");
+        // Runtime 24: only a module that reads guest GPU textures back exports this; the host
+        // offers it only when the manifest declares it too (ModRuntime decides at configure).
+        loaded->texture_extensions =
+            NegotiateExtension<EdenDsmodModuleTextureExtensions, EdenDsmodGetTextureExtensionsFn>(
+                loaded->library, "eden_dsmod_get_texture_extensions",
+                EDEN_DSMOD_TEXTURE_EXT_VERSION, EDEN_DSMOD_TEXTURE_EXT_HASH,
+                &EdenDsmodModuleTextureExtensions::configure, false,
+                "incompatible dual-screen texture extensions");
+        if (const auto declared = module.find("texture_readback"); declared != module.end()) {
+            if (!declared->is_boolean()) {
+                throw std::runtime_error("module texture_readback must be true or false");
+            }
+            loaded->texture_readback_declared = declared->get<bool>();
+        }
         LOG_INFO(Core, "DSMod module: loaded {} for title {} build {} ({})",
                  api->name ? api->name : "unnamed", title, build, platform);
         return loaded;

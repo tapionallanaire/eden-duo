@@ -71,12 +71,47 @@ void Maxwell3D::DrawManager::Clear(Maxwell3D& maxwell3d, u32 layer_count) {
     }
 }
 
-void Maxwell3D::DrawManager::DrawDeferred(Maxwell3D& maxwell3d) {
+void Maxwell3D::DrawManager::DrawDeferred(Maxwell3D& maxwell3d, bool loop_continues) {
     if (draw_state.draw_mode != DrawMode::Instance || draw_state.instance_count == 0) {
+        if (!loop_continues) {
+            draw_state.drawn_instances = 0;
+        }
         return;
     }
-    DrawEnd(maxwell3d, draw_state.instance_count + 1, true);
+    // The first draw of a batch also covers the loop's first instance; a batch that continues a
+    // loop split by a register write draws only the instances after the ones already drawn.
+    const bool continued = draw_state.drawn_instances != 0;
+    DrawEnd(maxwell3d, draw_state.instance_count + (continued ? 0 : 1), true);
+    draw_state.drawn_instances =
+        loop_continues ? draw_state.drawn_instances + draw_state.instance_count : 0;
     draw_state.instance_count = 0;
+}
+
+bool Maxwell3D::DrawManager::IsInstanceLoopMethod(u32 method) noexcept {
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(draw.begin):
+    case MAXWELL3D_REG_INDEX(draw.end):
+    case MAXWELL3D_REG_INDEX(vertex_buffer.first):
+    case MAXWELL3D_REG_INDEX(vertex_buffer.count):
+    case MAXWELL3D_REG_INDEX(index_buffer.first):
+    case MAXWELL3D_REG_INDEX(index_buffer.count):
+    case MAXWELL3D_REG_INDEX(index_buffer32_first):
+    case MAXWELL3D_REG_INDEX(index_buffer16_first):
+    case MAXWELL3D_REG_INDEX(index_buffer8_first):
+    case MAXWELL3D_REG_INDEX(index_buffer32_subsequent):
+    case MAXWELL3D_REG_INDEX(index_buffer16_subsequent):
+    case MAXWELL3D_REG_INDEX(index_buffer8_subsequent):
+    case MAXWELL3D_REG_INDEX(draw_inline_index):
+    case MAXWELL3D_REG_INDEX(inline_index_2x16.count):
+    case MAXWELL3D_REG_INDEX(inline_index_2x16.even):
+    case MAXWELL3D_REG_INDEX(inline_index_4x8.count):
+    case MAXWELL3D_REG_INDEX(inline_index_4x8.index0):
+    case MAXWELL3D_REG_INDEX(vertex_array_instance_first):
+    case MAXWELL3D_REG_INDEX(vertex_array_instance_subsequent):
+        return true;
+    default:
+        return false;
+    }
 }
 
 void Maxwell3D::DrawManager::DrawArray(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 vertex_first, u32 vertex_count, u32 base_instance, u32 num_instances) {
@@ -93,6 +128,7 @@ void Maxwell3D::DrawManager::DrawArrayInstanced(Maxwell3D& maxwell3d, Maxwell3D:
     draw_state.vertex_buffer.count = vertex_count;
     if (!subsequent) {
         draw_state.instance_count = 1;
+        draw_state.drawn_instances = 0;
     }
     draw_state.base_instance = draw_state.instance_count - 1;
     draw_state.draw_mode = DrawMode::Instance;
@@ -183,6 +219,13 @@ void Maxwell3D::DrawManager::DrawBegin(Maxwell3D& maxwell3d) {
     draw_state.topology = maxwell3d.regs.draw.topology;
 }
 
+void Maxwell3D::DrawManager::AddInstances(Maxwell3D& maxwell3d, u32 repeats) {
+    // The front counts only Subsequent begins (an instance loop): each adds one instance.
+    if (maxwell3d.regs.draw.instance_id == Maxwell3D::Regs::Draw::InstanceId::Subsequent) {
+        draw_state.instance_count += repeats;
+    }
+}
+
 void Maxwell3D::DrawManager::DrawEnd(Maxwell3D& maxwell3d, u32 instance_count, bool force_draw) {
     switch (draw_state.draw_mode) {
     case DrawMode::Instance:
@@ -192,6 +235,9 @@ void Maxwell3D::DrawManager::DrawEnd(Maxwell3D& maxwell3d, u32 instance_count, b
         [[fallthrough]];
     case DrawMode::General:
         draw_state.base_instance = maxwell3d.regs.global_base_instance_index;
+        if (draw_state.draw_mode == DrawMode::Instance && draw_state.drawn_instances != 0) {
+            draw_state.base_instance += draw_state.drawn_instances + 1;
+        }
         draw_state.base_index = maxwell3d.regs.global_base_vertex_index;
         if (draw_state.draw_indexed) {
             draw_state.index_buffer = maxwell3d.regs.index_buffer;
@@ -273,14 +319,40 @@ void Maxwell3D::DrawManager::UpdateTopology(Maxwell3D& maxwell3d) {
 }
 
 void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed, u32 instance_count) {
+    draw_state.draw_element_count =
+        draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
     UpdateTopology(maxwell3d);
-    if (maxwell3d.ShouldExecute()) {
+    // EDEN_NX2_DRAW_STATS=1: how many draws reach the rasterizer, and how many of them are empty
+    // (no elements or no instances) or skipped by a render-enable condition (diagnostic).
+    static const bool stats_enabled = std::getenv("EDEN_NX2_DRAW_STATS") != nullptr;
+    const bool execute = maxwell3d.ShouldExecute();
+    if (stats_enabled) [[unlikely]] {
+        static std::atomic<u64> total{0}, skipped{0}, empty{0}, executed{0};
+        static std::atomic<u64> next_log{5000};
+        total.fetch_add(1, std::memory_order_relaxed);
+        if (!execute) {
+            skipped.fetch_add(1, std::memory_order_relaxed);
+        } else if (draw_state.draw_element_count == 0 || instance_count == 0) {
+            empty.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            executed.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (const u64 n = total.load(std::memory_order_relaxed); n >= next_log.load()) {
+            next_log.store(n + 100000);
+            LOG_INFO(HW_GPU,
+                     "nx2 draws: {} so far, {} skipped by a render-enable condition, {} empty, {} "
+                     "real",
+                     n, skipped.load(), empty.load(), executed.load());
+        }
+    }
+    if (execute) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
     }
 }
 
 void Maxwell3D::DrawManager::ProcessDrawIndirect(Maxwell3D& maxwell3d) {
+    draw_state.draw_element_count = 0;
     LOG_TRACE(HW_GPU, "called, topology={}, is_indexed={}, includes_count={}, buffer_size={}, max_draw_count={}", draw_state.topology, indirect_state.is_indexed, indirect_state.include_count, indirect_state.buffer_size, indirect_state.max_draw_counts);
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {

@@ -1,10 +1,14 @@
+#pragma GCC diagnostic ignored "-Wunused-variable"
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 #include "common/assert.h"
 #include "common/logging.h"
 #include "core/core.h"
@@ -14,12 +18,14 @@
 #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
 #include "core/hle/service/nvdrv/devices/nvhost_gpu.h"
+#include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "core/hle/service/nvdrv/nvdrv.h"
 #include "core/memory.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/puller.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/memory_manager.h"
 
 namespace Service::Nvidia::Devices {
 namespace {
@@ -48,6 +54,9 @@ nvhost_gpu::~nvhost_gpu() {
     events_interface.FreeEvent(sm_exception_breakpoint_int_report_event);
     events_interface.FreeEvent(sm_exception_breakpoint_pause_report_event);
     events_interface.FreeEvent(error_notifier_event);
+    for (auto& [id, event] : nx2_events) {
+        events_interface.FreeEvent(event);
+    }
     syncpoint_manager.FreeSyncpoint(channel_syncpoint);
 }
 
@@ -101,6 +110,9 @@ NvResult nvhost_gpu::Ioctl1(DeviceFD fd, Ioctl command, std::span<const u8> inpu
         }
         break;
     }
+    if (g_nx2_driver) {
+        return Nx2UnknownIoctl("nvhost-gpu", command, input, output);
+    }
     UNIMPLEMENTED_MSG("Unimplemented ioctl={:08X}", command.raw);
     return NvResult::NotImplemented;
 };
@@ -116,12 +128,19 @@ NvResult nvhost_gpu::Ioctl2(DeviceFD fd, Ioctl command, std::span<const u8> inpu
         }
         break;
     }
+    if (g_nx2_driver) {
+        return Nx2UnknownIoctl("nvhost-gpu", command, input, output);
+    }
     UNIMPLEMENTED_MSG("Unimplemented ioctl={:08X}", command.raw);
     return NvResult::NotImplemented;
 }
 
 NvResult nvhost_gpu::Ioctl3(DeviceFD fd, Ioctl command, std::span<const u8> input,
                             std::span<u8> output, std::span<u8> inline_output) {
+    if (g_nx2_driver) {
+        std::fill(inline_output.begin(), inline_output.end(), u8{0});
+        return Nx2UnknownIoctl("nvhost-gpu", command, input, output);
+    }
     UNIMPLEMENTED_MSG("Unimplemented ioctl={:08X}", command.raw);
     return NvResult::NotImplemented;
 }
@@ -278,6 +297,35 @@ NvResult nvhost_gpu::AllocateObjectContext(IoctlAllocObjCtx& params) {
         params.flags = allowed_mask;
     }
 
+    if (g_nx2_driver) {
+        // Switch 2 NvRm asks for Ampere classes, or class 0 (it reads the class numbers from a
+        // characteristics layout we don't know yet). Map them onto the Maxwell engine slots.
+        u32 mapped = params.class_num;
+        switch (params.class_num) {
+        case 0xC797: case 0xC697: case 0xC597: mapped = static_cast<u32>(CtxClasses::Ctx3D); break;
+        case 0xC7C0: case 0xC6C0: case 0xC5C0: mapped = static_cast<u32>(CtxClasses::CtxCompute); break;
+        case 0xC7B5: case 0xC6B5: case 0xC5B5: mapped = static_cast<u32>(CtxClasses::CtxDMA); break;
+        case 0xC56F: case 0xC76F: mapped = static_cast<u32>(CtxClasses::CtxChannelGPFIFO); break;
+        case 0: {
+            for (const auto candidate : {CtxClasses::Ctx3D, CtxClasses::CtxCompute, CtxClasses::CtxDMA,
+                                         CtxClasses::Ctx2D, CtxClasses::CtxKepler}) {
+                const auto index = GetObjectContextClassNumberIndex(candidate);
+                if (index >= 0 && !ctxObjs[index].has_value()) {
+                    mapped = static_cast<u32>(candidate);
+                    break;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        if (mapped != params.class_num) {
+            LOG_WARNING(Service_NVDRV, "Switch 2 object class {:#x} -> {:#x}", params.class_num, mapped);
+            params.class_num = mapped;
+        }
+    }
+
     s32_le ctx_class_number_index =
         GetObjectContextClassNumberIndex(static_cast<CtxClasses>(params.class_num));
     if (ctx_class_number_index < 0) {
@@ -327,6 +375,27 @@ static boost::container::small_vector<Tegra::CommandHeader, 512> BuildIncrementC
     return result;
 }
 
+// Switch 2 pushbuffers signal completion with semaphore releases, never host1x syncpoint methods,
+// but the driver still has the kernel raise the syncpoint max by the submission's increment value
+// and then waits for that value. Append the increments after its commands.
+static boost::container::small_vector<Tegra::CommandHeader, 512> BuildIncrementCountCommandList(
+    NvFence fence, u32 count) {
+    boost::container::small_vector<Tegra::CommandHeader, 512> result{
+        Tegra::BuildCommandHeader(Tegra::BufferMethods::WaitForIdle, 1,
+                                  Tegra::SubmissionMode::Increasing),
+        {},
+        Tegra::BuildCommandHeader(Tegra::BufferMethods::SyncpointPayload, 1,
+                                  Tegra::SubmissionMode::Increasing),
+        {}};
+    for (u32 i = 0; i < count; ++i) {
+        result.push_back(Tegra::BuildCommandHeader(Tegra::BufferMethods::SyncpointOperation, 1,
+                                                   Tegra::SubmissionMode::Increasing));
+        result.push_back(
+            BuildFenceAction(Tegra::Engines::Puller::FenceOperation::Increment, fence.id));
+    }
+    return result;
+}
+
 static boost::container::small_vector<Tegra::CommandHeader, 512> BuildIncrementWithWfiCommandList(
     NvFence fence) {
     boost::container::small_vector<Tegra::CommandHeader, 512> result{
@@ -353,6 +422,69 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
 
     const auto bind_id = channel_state->bind_id;
 
+    if (g_nx2_driver) {
+        for ([[maybe_unused]] const auto& entry : entries.command_lists) {
+            LOG_TRACE(Service_NVDRV, "nx2 GPFIFO entry raw={:#018x} addr={:#x} size={:#x}", entry.raw,
+                     entry.addr.Value(), entry.size.Value());
+        }
+        static const bool check = std::getenv("EDEN_NX2_PB_CHECK") != nullptr;
+        if (check) {
+            std::vector<u32> words;
+            for (const auto& entry : entries.command_lists) {
+                words.resize(entry.size);
+                system.ApplicationMemory().ReadBlock(entry.addr.Value(), words.data(),
+                                                     words.size() * sizeof(u32));
+                entries.submit_hashes.push_back(Tegra::HashPushbufferWords(words));
+            }
+        }
+        // The present returns before the GPU thread reaches this frame's work (nx2_gsv.h,
+        // frames ahead), and Mario Kart World then refills command memory it already
+        // submitted: the end of a frame ran with the next frame's present image as its render
+        // target, leaving an image three frames old to be shown. Keep the words as submitted.
+        // EDEN_NX2_PB_SNAPSHOT=0: execute from memory.
+        static const bool snapshot = [] {
+            const char* value = std::getenv("EDEN_NX2_PB_SNAPSHOT");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (snapshot && channel_state->memory_manager && channel_state->payload) {
+            // Before the copy: a suspension during it must count as one after it.
+            entries.snapshot_suspensions =
+                channel_state->payload->dma_pusher.suspensions.load(std::memory_order_acquire);
+            size_t words = 0;
+            for (const auto& entry : entries.command_lists) {
+                words += entry.size;
+            }
+            entries.submitted_words.resize(words);
+            entries.submitted_offsets.reserve(entries.command_lists.size());
+            size_t offset = 0;
+            for (u32 i = 0; i < entries.command_lists.size(); ++i) {
+                const auto& entry = entries.command_lists[i];
+                entries.submitted_offsets.push_back(static_cast<u32>(offset));
+                // GMMU maps run on the GPU thread (GPU::MapInOrder): an entry on addresses a
+                // queued map changes would copy as zeros (Pokopia's first lists). DmaPusher::Push
+                // copies it after the map instead.
+                const u64 bytes = static_cast<u64>(entry.size) * sizeof(u32);
+                static std::atomic<u64> counted_entries{};
+                static std::atomic<u64> deferred_total{};
+                const u64 counted = ++counted_entries;
+                if (system.GPU().IsMapPending(entry.addr, bytes)) {
+                    entries.deferred_entries.push_back(i);
+                    if (const u64 deferred = ++deferred_total; deferred <= 8 || deferred % 1000 == 0) {
+                        LOG_INFO(Service_NVDRV,
+                                 "Command list entry {:#x}+{:#x} is behind a queued GPU map and is "
+                                 "copied after it ({} of {} entries so far)",
+                                 u64{entry.addr}, bytes, deferred, counted);
+                    }
+                } else {
+                    channel_state->memory_manager->ReadBlockUnsafe(
+                        entry.addr, entries.submitted_words.data() + offset,
+                        entry.size * sizeof(u32));
+                }
+                offset += entry.size;
+            }
+        }
+    }
+
     auto& flags = params.flags;
 
     if (flags.fence_wait.Value()) {
@@ -372,6 +504,11 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
     params.fence.value = syncpoint_manager.IncrementSyncpointMaxExt(channel_syncpoint, increment);
     gpu.PushGPUEntries(bind_id, std::move(entries));
 
+    if (g_nx2_driver && !flags.fence_increment.Value() && increment > 0) {
+        gpu.PushGPUEntries(bind_id,
+                           Tegra::CommandList{BuildIncrementCountCommandList(params.fence, increment)});
+    }
+
     if (flags.fence_increment.Value()) {
         if (flags.suppress_wfi.Value()) {
             gpu.PushGPUEntries(bind_id,
@@ -382,6 +519,12 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
         }
     }
 
+    if (g_nx2_driver) {
+        LOG_TRACE(Service_NVDRV,
+                 "nx2 SubmitGPFIFO entries={} flags={:#x} fence_out=({}, {}) guest_value={}",
+                 params.num_entries, flags.raw, params.fence.id, params.fence.value,
+                 system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(params.fence.id));
+    }
     flags.raw = 0;
 
     return NvResult::Success;
@@ -464,6 +607,16 @@ Kernel::KEvent* nvhost_gpu::QueryEvent(u32 event_id) {
     case 3:
         return error_notifier_event;
     default:
+        if (g_nx2_driver) {
+            // Switch 2 NVN also asks for event 7 and multi-waits on it with its syncpoint events.
+            // Nothing signals it yet.
+            auto*& event = nx2_events[event_id];
+            if (event == nullptr) {
+                event = events_interface.CreateEvent(std::format("GpuChannelNx2Event{}", event_id));
+            }
+            LOG_WARNING(Service_NVDRV, "(STUBBED) Switch 2 channel event {}", event_id);
+            return event;
+        }
         LOG_CRITICAL(Service_NVDRV, "Unknown Ctrl GPU Event {}", event_id);
         return nullptr;
     }

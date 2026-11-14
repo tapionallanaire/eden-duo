@@ -11,7 +11,7 @@
 #include <mutex>
 
 #include <boost/icl/interval_set.hpp>
-#include <fmt/format.h>
+#include <format>
 #include "common/assert.h"
 #include <bit>
 #include "common/common_types.h"
@@ -202,7 +202,7 @@ private:
         // LocationDescriptor ctor() does important ops (like tflags) do not skip
         auto const arch_descriptor = A32::LocationDescriptor{descriptor};
         ir_block.Reset(arch_descriptor);
-        A32::Translate(ir_block, arch_descriptor, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+        A32::Translate(ir_block, arch_descriptor, conf);
         Optimization::Optimize(ir_block, conf, polyfill_options);
         return emitter.Emit(ir_block);
     }

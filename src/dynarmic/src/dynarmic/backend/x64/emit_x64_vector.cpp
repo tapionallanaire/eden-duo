@@ -903,7 +903,8 @@ void EmitX64::EmitVectorCountLeadingZeros16(EmitContext& ctx, IR::Inst* inst) {
         // then subtract 16-bit cuz of the zext32
         /*4*/ code.vpmovzxwd(tmp0.cvt256(), tmp0);
         /*4*/ code.vplzcntd(tmp0.cvt256(), tmp0.cvt256());
-        /*1*/ code.vpxor(tmp1, tmp1, tmp1);
+        // an XMM vpackusdw reads only the low half of the YMM: bring lanes 4-7 down for it
+        /*3*/ code.vextracti128(tmp1, tmp0.cvt256(), 1);
         /*1*/ code.vpackusdw(tmp0, tmp0, tmp1);
         /*1*/ code.vpaddw(tmp0, tmp0, code.BConst<16>(xword, 65520));
         /*4*/ code.vzeroupper();
@@ -5069,6 +5070,49 @@ void EmitX64::EmitVectorSignedSaturatedNeg64(EmitContext& ctx, IR::Inst* inst) {
     });
 }
 
+template<typename T, typename U = std::make_unsigned_t<T>>
+    requires std::is_signed_v<T>
+static bool VectorSignedSaturatedRoundingShiftLeft(VectorArray<T>& dst, const VectorArray<T>& data, const VectorArray<T>& shift_values) {
+    constexpr s64 bit_size = s64(mcl::bitsizeof<T>);
+    bool qc_flag = false;
+    for (size_t i = 0; i < dst.size(); i++) {
+        const T element = data[i];
+        const s64 shift = s64(s8(shift_values[i] & 0xFF));
+        if (shift < 0) {
+            // (element + 2^(n-1)) >> n without the intermediate overflowing
+            const s64 n = -shift;
+            dst[i] = n >= bit_size ? T(0) : T((element >> n) + ((element >> (n - 1)) & 1));
+        } else if (element == 0) {
+            dst[i] = 0;
+        } else {
+            const T shifted = shift >= bit_size ? T(0) : T(U(element) << shift);
+            if (shift >= bit_size || T(shifted >> shift) != element) {
+                dst[i] = element < 0 ? (std::numeric_limits<T>::min)() : (std::numeric_limits<T>::max)();
+                qc_flag = true;
+            } else {
+                dst[i] = shifted;
+            }
+        }
+    }
+    return qc_flag;
+}
+
+void EmitX64::EmitVectorSignedSaturatedRoundingShiftLeft8(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorSignedSaturatedRoundingShiftLeft<s8>);
+}
+
+void EmitX64::EmitVectorSignedSaturatedRoundingShiftLeft16(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorSignedSaturatedRoundingShiftLeft<s16>);
+}
+
+void EmitX64::EmitVectorSignedSaturatedRoundingShiftLeft32(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorSignedSaturatedRoundingShiftLeft<s32>);
+}
+
+void EmitX64::EmitVectorSignedSaturatedRoundingShiftLeft64(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorSignedSaturatedRoundingShiftLeft<s64>);
+}
+
 // MSVC requires the capture within the saturate lambda, but it's
 // determined to be unnecessary via clang and GCC.
 #ifdef __clang__
@@ -5139,9 +5183,9 @@ static bool VectorSignedSaturatedShiftLeftUnsigned(VectorArray<T>& dst, const Ve
     bool qc_flag = false;
     for (size_t i = 0; i < dst.size(); i++) {
         auto const element = data[i];
-        auto const shifted = U(element) << U(T(shift_amount));
+        U const shifted = U(U(element) << U(T(shift_amount)));
         auto const shifted_test = shifted >> U(T(shift_amount));
-        auto result = 0;
+        T result = 0;
         if (element > 0 && shifted_test != U(element))
             result = T((std::numeric_limits<U>::max)());
         if (element > 0 && shifted_test == U(element))
@@ -6129,6 +6173,49 @@ void EmitX64::EmitVectorUnsignedSaturatedNarrow64(EmitContext& ctx, IR::Inst* in
     });
 }
 
+template<typename T>
+    requires std::is_unsigned_v<T>
+static bool VectorUnsignedSaturatedRoundingShiftLeft(VectorArray<T>& dst, const VectorArray<T>& data, const VectorArray<T>& shift_values) {
+    constexpr s64 bit_size = s64(mcl::bitsizeof<T>);
+    bool qc_flag = false;
+    for (size_t i = 0; i < dst.size(); i++) {
+        const T element = data[i];
+        const s64 shift = s64(s8(shift_values[i] & 0xFF));
+        if (shift < 0) {
+            // (element + 2^(n-1)) >> n without the intermediate overflowing
+            const s64 n = -shift;
+            dst[i] = n > bit_size ? T(0) : T((n == bit_size ? T(0) : T(element >> n)) + ((element >> (n - 1)) & 1));
+        } else if (element == 0) {
+            dst[i] = 0;
+        } else {
+            const T shifted = shift >= bit_size ? T(0) : T(element << shift);
+            if (shift >= bit_size || T(shifted >> shift) != element) {
+                dst[i] = (std::numeric_limits<T>::max)();
+                qc_flag = true;
+            } else {
+                dst[i] = shifted;
+            }
+        }
+    }
+    return qc_flag;
+}
+
+void EmitX64::EmitVectorUnsignedSaturatedRoundingShiftLeft8(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorUnsignedSaturatedRoundingShiftLeft<u8>);
+}
+
+void EmitX64::EmitVectorUnsignedSaturatedRoundingShiftLeft16(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorUnsignedSaturatedRoundingShiftLeft<u16>);
+}
+
+void EmitX64::EmitVectorUnsignedSaturatedRoundingShiftLeft32(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorUnsignedSaturatedRoundingShiftLeft<u32>);
+}
+
+void EmitX64::EmitVectorUnsignedSaturatedRoundingShiftLeft64(EmitContext& ctx, IR::Inst* inst) {
+    EmitTwoArgumentFallbackWithSaturation(code, ctx, inst, VectorUnsignedSaturatedRoundingShiftLeft<u64>);
+}
+
 template<typename T, typename S = std::make_signed_t<T>>
     requires std::is_unsigned_v<T>
 static bool VectorUnsignedSaturatedShiftLeft(VectorArray<T>& dst, const VectorArray<T>& data, const VectorArray<T>& shift_values) {
@@ -6226,9 +6313,7 @@ void EmitX64::EmitVectorZeroExtend64(EmitContext& ctx, IR::Inst* inst) {
 void EmitX64::EmitVectorZeroUpper(EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto const a = ctx.reg_alloc.UseScratchXmm(code, args[0]);
-
     code.movq(a, a);  // TODO: !IsLastUse
-
     ctx.reg_alloc.DefineValue(code, inst, a);
 }
 

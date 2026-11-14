@@ -8,8 +8,7 @@
 
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 
-#include <fmt/format.h>
-#include <fmt/ostream.h>
+#include <format>
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "dynarmic/ir/terminal.h"
@@ -559,6 +558,20 @@ void A64EmitX64::EmitA64GetCNTFRQ(A64EmitContext& ctx, IR::Inst* inst) {
 }
 
 void A64EmitX64::EmitA64GetCNTPCT(A64EmitContext& ctx, IR::Inst* inst) {
+    if (conf.wall_clock_cntpct && conf.inline_cntpct_tsc_factor != 0) {
+        const Xbyak::Reg64 rax_reg = ctx.reg_alloc.ScratchGpr(code, HostLoc::RAX);
+        const Xbyak::Reg64 rdx_reg = ctx.reg_alloc.ScratchGpr(code, HostLoc::RDX);
+        const Xbyak::Reg64 tmp = ctx.reg_alloc.ScratchGpr(code);
+        code.rdtsc();
+        code.shl(rdx_reg, 32);
+        code.or_(rax_reg, rdx_reg);
+        code.mov(tmp, conf.inline_cntpct_tsc_base);
+        code.sub(rax_reg, tmp);
+        code.mov(tmp, conf.inline_cntpct_tsc_factor);
+        code.mul(tmp);
+        ctx.reg_alloc.DefineValue(code, inst, rdx_reg);
+        return;
+    }
     ctx.reg_alloc.HostCall(code, inst);
     if (!conf.wall_clock_cntpct) {
         code.UpdateTicks();
@@ -612,7 +625,7 @@ void A64EmitX64::EmitA64SetTPIDR(A64EmitContext& ctx, IR::Inst* inst) {
 
 std::string A64EmitX64::LocationDescriptorToFriendlyName(const IR::LocationDescriptor& ir_descriptor) const {
     const A64::LocationDescriptor descriptor{ir_descriptor};
-    return fmt::format("a64_{:016X}_fpcr{:08X}",
+    return std::format("a64_{:016X}_fpcr{:08X}",
                        descriptor.PC(),
                        descriptor.FPCR().Value());
 }
@@ -628,7 +641,7 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::LinkBlock terminal, IR::LocationD
     if (e.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
         if (e.conf.enable_cycle_counting) {
             e.code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
-            e.patch_information[terminal.next].jg.push_back(e.code.getCurr());
+            e.AddPatchLocation(terminal.next, EmitX64::PatchKind::Jg);
             if (const auto next_bb = e.GetBasicBlock(terminal.next)) {
                 e.EmitPatchJg(terminal.next, next_bb->entrypoint);
             } else {
@@ -636,7 +649,7 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::LinkBlock terminal, IR::LocationD
             }
         } else {
             e.code.cmp(dword[e.code.ABI_JIT_PTR + offsetof(A64JitState, halt_reason)], 0);
-            e.patch_information[terminal.next].jz.push_back(e.code.getCurr());
+            e.AddPatchLocation(terminal.next, EmitX64::PatchKind::Jz);
             if (const auto next_bb = e.GetBasicBlock(terminal.next)) {
                 e.EmitPatchJz(terminal.next, next_bb->entrypoint);
             } else {
@@ -656,7 +669,7 @@ bool EmitTerminalImpl(A64EmitX64& e, IR::Term::LinkBlock terminal, IR::LocationD
 
 bool EmitTerminalImpl(A64EmitX64& e, IR::Term::LinkBlockFast terminal, IR::LocationDescriptor, bool is_single_step) {
     if (e.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
-        e.patch_information[terminal.next].jmp.push_back(e.code.getCurr());
+        e.AddPatchLocation(terminal.next, EmitX64::PatchKind::Jmp);
         if (auto next_bb = e.GetBasicBlock(terminal.next)) {
             e.EmitPatchJmp(terminal.next, next_bb->entrypoint);
         } else {

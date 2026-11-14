@@ -20,13 +20,25 @@
 #endif
 
 namespace Core {
+
+/// Parses a whole decimal TCP port (1-65535); nullopt for anything else.
+static std::optional<u16> ParsePort(const char* text) {
+    char* end = nullptr;
+    const unsigned long port = std::strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || port == 0 || port > 65535) {
+        return std::nullopt;
+    }
+    return static_cast<u16>(port);
+}
+
+/// Parses the command line options into a LaunchParams.
 LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wchar_t *argv_w[]) noexcept {
     LaunchParams p{};
 
     int option_index = 0;
     static struct option long_options[] = {
         // clang-format off
-        {"debug", no_argument, 0, 'd'},
+        {"debug", optional_argument, 0, 'd'},
         {"config", required_argument, 0, 'c'},
         {"fullscreen", no_argument, 0, 'f'},
         {"help", no_argument, 0, 'h'},
@@ -35,19 +47,44 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
         {"program", optional_argument, 0, 'p'},
         {"user", required_argument, 0, 'u'},
         {"version", no_argument, 0, 'v'},
-        {"input-profile", no_argument, 0, 'i'},
+        {"input-profile", required_argument, 0, 'i'},
         {"null-render", no_argument, 0, 'n'},
         {"singlecore", no_argument, 0, 's'},
         {"filter", no_argument, 0, 'x'},
+        {"mcp", no_argument, 0, 'M'},
+        {"mcp-port", required_argument, 0, 'P'},
+        {"mcp-allow-writes", no_argument, 0, 'W'},
+        {"pack-nup", required_argument, 0, 'N'},
+        {"unpack-nup", required_argument, 0, 'U'},
+        {"edit-nup", required_argument, 0, 'E'},
+        {"nup-name", required_argument, 0, 0x100},
+        {"nup-icon", required_argument, 0, 0x101},
+        {"nup-version", required_argument, 0, 0x102},
+        {"nup-publisher", required_argument, 0, 0x103},
+        {"clear-nup-name", no_argument, 0, 0x104},
+        {"clear-nup-icon", no_argument, 0, 0x105},
+        {"clear-nup-version", no_argument, 0, 0x106},
+        {"clear-nup-publisher", no_argument, 0, 0x107},
         {0, 0, 0, 0},
         // clang-format on
     };
 
     while (optind < argc) {
-        if (int arg = getopt_long(argc, argv, "dc:fhg:m:p:u:vinsx", long_options, &option_index); arg != -1) {
-            switch (char(arg)) {
+        // -d takes an optional port (-d1234); -i takes the input profile. Both read optarg but
+        // were declared without arguments, so optarg was null and they crashed.
+        if (int arg = getopt_long(argc, argv, "d::c:fhg:m:p:u:vi:nsx", long_options, &option_index); arg != -1) {
+            switch (arg) {
             case 'd':
-                p.override_gdb_port = uint16_t(atoi(optarg));
+                // Without a port, the configured one is used (the config is not loaded yet).
+                p.enable_gdbstub = true;
+                if (optarg != nullptr) {
+                    if (const auto port = ParsePort(optarg)) {
+                        p.override_gdb_port = *port;
+                    } else {
+                        LOG_ERROR(Frontend, "Invalid --debug port '{}', using the configured port",
+                                  optarg);
+                    }
+                }
                 break;
             case 'c':
                 p.config_path = optarg;
@@ -61,6 +98,54 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
                 break;
             case 'g':
                 p.filepath = std::string(optarg);
+                break;
+            case 'M':
+                p.mcp_enable = true;
+                break;
+            case 'P':
+                p.mcp_enable = true;
+                if (const auto port = ParsePort(optarg)) {
+                    p.mcp_port = *port;
+                } else {
+                    LOG_ERROR(Frontend, "Invalid --mcp-port '{}', using the configured port",
+                              optarg);
+                }
+                break;
+            case 'W':
+                p.mcp_allow_writes = true;
+                break;
+            case 'N':
+                p.pack_nup_source = std::string(optarg);
+                break;
+            case 'U':
+                p.unpack_nup_source = std::string(optarg);
+                break;
+            case 'E':
+                p.edit_nup_source = std::string(optarg);
+                break;
+            case 0x100:
+                p.edit_nup_name = std::string(optarg);
+                break;
+            case 0x101:
+                p.edit_nup_icon = std::string(optarg);
+                break;
+            case 0x102:
+                p.edit_nup_version = std::string(optarg);
+                break;
+            case 0x103:
+                p.edit_nup_publisher = std::string(optarg);
+                break;
+            case 0x104:
+                p.edit_nup_name = std::string{};
+                break;
+            case 0x105:
+                p.edit_nup_icon = std::string{};
+                break;
+            case 0x106:
+                p.edit_nup_version = std::string{};
+                break;
+            case 0x107:
+                p.edit_nup_publisher = std::string{};
                 break;
             case 'i': {
                 p.input_profile = std::string(optarg);
@@ -94,7 +179,7 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
                 break;
             case 'u': {
                 // Launch game with a specific user
-                bool argument_ok = isdigit(optarg[0]);
+                bool argument_ok = isdigit(optarg[0]) != 0;
                 p.selected_user = atoi(optarg);
                 if (!argument_ok) {
                     // try to look it up by username, only finds the first username that matches.
@@ -152,6 +237,7 @@ LaunchParams ParseLaunchParams(Core::System& system, int argc, char *argv[], wch
     return p;
 }
 
+/// Applies the parsed command line options to the log filter and settings.
 void ApplyLaunchParams(LaunchParams const& lp) noexcept {
     // apply the log_filter setting
     // the logger was initialized before and doesn't pick up the filter on its own
@@ -169,8 +255,10 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
     if (lp.selected_user.has_value()) {
         Settings::values.current_user = std::clamp(*lp.selected_user, 0, 7);
     }
-    if (lp.override_gdb_port.has_value()) {
+    if (lp.enable_gdbstub) {
         Settings::values.use_gdbstub = true;
+    }
+    if (lp.override_gdb_port.has_value()) {
         Settings::values.gdbstub_port = *lp.override_gdb_port;
     }
     if (lp.force_single_core) {
@@ -181,7 +269,8 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
     }
 
     if (lp.print_version) {
-        LOG_INFO(Frontend, "Eden {} {}", Common::g_scm_branch, Common::g_scm_desc);
+        LOG_INFO(Frontend, "Eden {} {}", std::string_view{Common::g_scm_branch},
+                 std::string_view{Common::g_scm_desc});
     }
     if (lp.print_help) {
         LOG_INFO(Frontend,
@@ -196,7 +285,15 @@ void ApplyLaunchParams(LaunchParams const& lp) noexcept {
             "-p, --program         Pass following string as arguments to executable\n"
             "-u, --user            Select a specific user profile from 0 to 7\n"
             "-d, --debug           Run the GDB stub on a port from 1 to 65535\n"
-            "-v, --version         Output version information and exit\n",
+            "-v, --version         Output version information and exit\n"
+            "--pack-nup <dump> [<out.nup>]"
+            " Pack a loose dump with all its updates and DLC into a NUP file and exit\n"
+            "--unpack-nup <file.nup> [<out_dir>]"
+            " Extract a NUP back into a loose dump and exit\n"
+            "--edit-nup <file.nup> [--nup-name NAME --nup-icon PATH --nup-version VER"
+            " --nup-publisher NAME --clear-nup-name --clear-nup-icon --clear-nup-version"
+            " --clear-nup-publisher]"
+            " Rewrite default-language NUP metadata in place and exit\n",
             lp.argv0
         );
     }

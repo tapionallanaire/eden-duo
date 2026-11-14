@@ -7,7 +7,11 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
+#include <format>
+#include <deque>
+#include <mutex>
 #include <regex>
 #include <thread>
 
@@ -22,13 +26,14 @@
 #endif
 
 #include <boost/algorithm/string/replace.hpp>
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
+#include "common/log_ring.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 
@@ -86,11 +91,15 @@ const char* GetLevelName(Level log_level) {
 // Some IDEs prefer <file>:<line> instead, so let's just do that :)
 std::string FormatLogMessage(const Entry& entry) noexcept {
     if (!entry.filename) return "";
+
     auto const time_seconds = uint32_t(entry.timestamp.count() / 1000000);
     auto const time_fractional = uint32_t(entry.timestamp.count() % 1000000);
     auto const class_name = GetLogClassName(entry.log_class);
     auto const level_name = GetLevelName(entry.log_level);
-    return fmt::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional, class_name, level_name, entry.filename, entry.line_num, entry.function, entry.message);
+    return std::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: {}\n", time_seconds, time_fractional,
+                       class_name, level_name, entry.filename, entry.line_num,
+                       entry.function ? entry.function : "",
+                       entry.message ? entry.message : "");
 }
 
 template <typename It>
@@ -155,10 +164,7 @@ struct Backend {
     virtual void Flush() noexcept = 0;
 };
 
-/// @brief Formatting specifier (to use with printf) of the equivalent fmt::format() expression
-#define CCB_PRINTF_FMT "[%4d.%06d] %s <%s> %s:%u:%s: %s"
-
-/// @brief Instead of using fmt::format() just use the system's formatting capabilities directly
+/// @brief Instead of using std::format() just use the system's formatting capabilities directly
 struct DirectFormatArgs {
     const char *class_name;
     const char *level_name;
@@ -199,7 +205,12 @@ struct ColorConsoleBackend final : public Backend {
             }());
             SetConsoleTextAttribute(console_handle, color);
             auto const df = GetDirectFormatArgs(entry);
-            std::fprintf(stdout, CCB_PRINTF_FMT "\n", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
+            // One write per line: MinGW's fprintf emits each character separately, and stdout is
+            // unbuffered here, so every character became a WriteFile on the thread that logs.
+            std::string line = std::format("[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename ? entry.filename : "", entry.line_num, entry.function ? entry.function : "");
+            line.append(entry.message, entry.message_len);
+            line.push_back('\n');
+            std::fwrite(line.data(), 1, line.size(), stdout);
         }
     }
     void Flush() noexcept override {}
@@ -224,10 +235,14 @@ struct ColorConsoleBackend final : public Backend {
             auto const df = GetDirectFormatArgs(entry);
             // more restrictive, because take for example this simple prelude:
             // [  50.872256] Config <Info> common/settings.cpp:142:LogSettings:
-            char buffer[256];
-            auto result = fmt::format_to_n(buffer, sizeof(buffer) - 1, "\x1b{}[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", color_str, df.time_seconds, df.time_fractional, df.class_name, df.level_name, entry.filename, entry.line_num, entry.function, entry.message);
-            std::fwrite(buffer, 1, (std::min)(sizeof(buffer) - 1, result.size), stdout);
-            std::fwrite(entry.message, 1, entry.message_len, stdout);
+
+            auto result = std::format("\x1b{}[{:4d}.{:06d}] {} <{}> {}:{}:{}: ", color_str, df.time_seconds,
+                                      df.time_fractional, df.class_name, df.level_name,
+                                      entry.filename ? entry.filename : "", entry.line_num,
+                                      entry.function ? entry.function : "");
+            std::fwrite(result.data(), 1, result.size(), stdout);
+            if (entry.message && entry.message_len)
+                std::fwrite(entry.message, 1, entry.message_len, stdout);
             std::fwrite("\x1b[0m\n", 1, sizeof("\x1b[0m\n"), stdout);
         }
     }
@@ -300,6 +315,33 @@ private:
     bool enabled = true;
 };
 #endif
+/// @brief Backend that keeps the last lines in memory, off unless the debug server turns it on
+struct RingBackend final : public Backend {
+    void Write(const Entry& entry) noexcept override {
+        if (capacity.load(std::memory_order_relaxed) == 0) {
+            return;
+        }
+        try {
+            std::string text = FormatLogMessage(entry);
+            if (!text.empty() && text.back() == '\n') {
+                text.pop_back();
+            }
+            std::scoped_lock lock{mutex};
+            lines.push_back({next_sequence++, std::move(text)});
+            while (lines.size() > capacity.load(std::memory_order_relaxed)) {
+                lines.pop_front();
+            }
+        } catch (const std::exception&) {
+            // Out of memory: drop the line rather than the process.
+        }
+    }
+    void Flush() noexcept override {}
+
+    std::atomic<std::size_t> capacity{};
+    std::mutex mutex;
+    std::deque<RingLine> lines;
+    u64 next_sequence = 1;
+};
 #ifdef _WIN32
 /// @brief Backend that writes to Visual Studio's output window
 struct DebuggerBackend final : public Backend {
@@ -343,6 +385,7 @@ struct Impl {
     template<typename F>
     void ForEachBackend(F&& lambda) noexcept {
         lambda(static_cast<Backend&>(color_console_backend));
+        lambda(static_cast<Backend&>(ring_backend));
 #ifndef __OPENORBIS__
         if (file_backend)
             lambda(static_cast<Backend&>(*file_backend));
@@ -357,6 +400,7 @@ struct Impl {
 
     Filter filter;
     ColorConsoleBackend color_console_backend{};
+    RingBackend ring_backend{};
 #ifndef __OPENORBIS__
     std::optional<FileBackend> file_backend;
 #endif
@@ -389,6 +433,12 @@ void Filter::ParseFilterString(std::string_view filter_view) {
 // Constructor shall NOT depend upon Settings() or whatever
 // it's ran at global static ctor() time... so BE CAREFUL MFER!
 static std::optional<Common::Log::Impl> logging_instance{};
+/// See SetExternalSink. Loaded once per message that passes the filter; nullptr when unset.
+static std::atomic<Common::Log::ExternalSink> external_sink{nullptr};
+
+void SetExternalSink(ExternalSink sink) {
+    external_sink.store(sink, std::memory_order_release);
+}
 
 void Initialize() {
     if (logging_instance) {
@@ -418,19 +468,67 @@ void SetGlobalFilter(const Filter& filter) {
         logging_instance->filter = filter;
 }
 
+bool IsMessageEnabled(Class log_class, Level log_level) {
+    return logging_instance && logging_instance->filter.CheckMessage(log_class, log_level);
+}
+
 void SetColorConsoleBackendEnabled(bool enabled) {
     if (logging_instance)
         logging_instance->color_console_backend.enabled = enabled;
 }
 
-void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::string_view format, const fmt::format_args& args) {
+void SetRingCapacity(std::size_t capacity) {
+    if (!logging_instance)
+        return;
+    auto& ring = logging_instance->ring_backend;
+    std::scoped_lock lock{ring.mutex};
+    ring.capacity.store(capacity, std::memory_order_relaxed);
+    while (ring.lines.size() > capacity) {
+        ring.lines.pop_front();
+    }
+}
+
+std::size_t RingCapacity() {
+    return logging_instance ? logging_instance->ring_backend.capacity.load(std::memory_order_relaxed)
+                            : 0;
+}
+
+u64 RingNewestSequence() {
+    if (!logging_instance)
+        return 0;
+    auto& ring = logging_instance->ring_backend;
+    std::scoped_lock lock{ring.mutex};
+    return ring.next_sequence - 1;
+}
+
+std::vector<RingLine> ReadRing(u64 after) {
+    std::vector<RingLine> result;
+    if (!logging_instance)
+        return result;
+    auto& ring = logging_instance->ring_backend;
+    std::scoped_lock lock{ring.mutex};
+    for (const RingLine& line : ring.lines) {
+        if (line.sequence > after) {
+            result.push_back(line);
+        }
+    }
+    return result;
+}
+
+bool IsLevelEnabled(Class log_class, Level log_level) {
+    return logging_instance && logging_instance->filter.CheckMessage(log_class, log_level);
+}
+
+/// Formats a message that passes the filter and writes it to every backend and the external sink.
+void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, std::string_view format, const std::format_args& args) {
     if (logging_instance && logging_instance->filter.CheckMessage(log_class, log_level)) {
         auto const flush = ::Settings::values.log_flush_line.GetValue();
-        char buffer[BUFSIZ];
-        auto result = fmt::vformat_to_n(buffer, sizeof(buffer) - 1, format, args);
+
+        std::string msg = std::vformat(format, args);
+
         Entry e{
-            .message = nullptr,
-            .message_len = 0,
+            .message = msg.c_str(),
+            .message_len = msg.size(),
             .timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - logging_instance->time_origin),
             .log_class = log_class,
             .log_level = log_level,
@@ -438,22 +536,13 @@ void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, u
             .function = function,
             .line_num = line_num,
         };
-        if (result.size <= sizeof(buffer) - 1) {
-            buffer[(std::min)(result.size, sizeof(buffer) - 1)] = '\0';
-            e.message = buffer;
-            e.message_len = (std::min)(result.size, sizeof(buffer) - 1);
-            logging_instance->ForEachBackend([=](Backend& backend) {
-                backend.Write(e);
-                if (flush) backend.Flush();
-            });
-        } else {
-            std::string s = fmt::vformat(format, args);
-            e.message = s.c_str();
-            e.message_len = s.size();
-            logging_instance->ForEachBackend([=](Backend& backend) {
-                backend.Write(e);
-                if (flush) backend.Flush();
-            });
+
+        logging_instance->ForEachBackend([&](Backend& backend) {
+            backend.Write(e);
+            if (flush) backend.Flush();
+        });
+        if (const auto sink = external_sink.load(std::memory_order_acquire)) {
+            sink(GetLogClassName(log_class), log_level, msg);
         }
     }
 }

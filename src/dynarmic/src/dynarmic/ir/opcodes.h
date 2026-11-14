@@ -10,7 +10,7 @@
 
 #include <string>
 
-#include <fmt/format.h>
+#include <format>
 #include "common/common_types.h"
 
 namespace Dynarmic::IR {
@@ -493,6 +493,10 @@ constexpr bool WritesToFPSRCumulativeSaturationBit(const Opcode op) noexcept {
     case Opcode::VectorSignedSaturatedNeg16:
     case Opcode::VectorSignedSaturatedNeg32:
     case Opcode::VectorSignedSaturatedNeg64:
+    case Opcode::VectorSignedSaturatedRoundingShiftLeft8:
+    case Opcode::VectorSignedSaturatedRoundingShiftLeft16:
+    case Opcode::VectorSignedSaturatedRoundingShiftLeft32:
+    case Opcode::VectorSignedSaturatedRoundingShiftLeft64:
     case Opcode::VectorSignedSaturatedShiftLeft8:
     case Opcode::VectorSignedSaturatedShiftLeft16:
     case Opcode::VectorSignedSaturatedShiftLeft32:
@@ -516,6 +520,10 @@ constexpr bool WritesToFPSRCumulativeSaturationBit(const Opcode op) noexcept {
     case Opcode::VectorUnsignedSaturatedNarrow16:
     case Opcode::VectorUnsignedSaturatedNarrow32:
     case Opcode::VectorUnsignedSaturatedNarrow64:
+    case Opcode::VectorUnsignedSaturatedRoundingShiftLeft8:
+    case Opcode::VectorUnsignedSaturatedRoundingShiftLeft16:
+    case Opcode::VectorUnsignedSaturatedRoundingShiftLeft32:
+    case Opcode::VectorUnsignedSaturatedRoundingShiftLeft64:
     case Opcode::VectorUnsignedSaturatedShiftLeft8:
     case Opcode::VectorUnsignedSaturatedShiftLeft16:
     case Opcode::VectorUnsignedSaturatedShiftLeft32:
@@ -656,7 +664,7 @@ constexpr bool MayGetNZCVFromOp(const Opcode op) noexcept {
 }  // namespace Dynarmic::IR
 
 template<>
-struct fmt::formatter<Dynarmic::IR::Opcode> : fmt::formatter<std::string_view> {
+struct std::formatter<Dynarmic::IR::Opcode> : std::formatter<std::string_view> {
     template<typename FormatContext>
     auto format(Dynarmic::IR::Opcode op, FormatContext& ctx) const {
         return formatter<std::string_view>::format(GetNameOf(op), ctx);

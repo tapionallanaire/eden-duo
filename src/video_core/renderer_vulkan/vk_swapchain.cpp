@@ -157,6 +157,16 @@ void Swapchain::Create(
         return;
     }
 
+    // Submitted work may still wait on the old acquire/present semaphores; destroying them under
+    // it loses the device on MoltenVK (window moved to a display with a different scale).
+    if (swapchain) {
+        std::scoped_lock lock{scheduler.submit_mutex};
+        const VkResult result = device.GetLogical().WaitIdle();
+        if (result == VK_ERROR_DEVICE_LOST) {
+            device.ReportLoss();
+        }
+        vk::Check(result);
+    }
     Destroy();
 
     CreateSwapchain(capabilities);
@@ -166,7 +176,7 @@ void Swapchain::Create(
     resource_ticks.resize(image_count);
 }
 
-bool Swapchain::AcquireNextImage() {
+bool Swapchain::AcquireNextImage(bool may_flush) {
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
         VK_NULL_HANDLE, &image_index);
@@ -187,29 +197,29 @@ bool Swapchain::AcquireNextImage() {
         break;
     }
 
-    const auto wait_with_frame_pacing = [this] {
+    const auto wait_with_frame_pacing = [this, may_flush] {
     switch (Settings::values.frame_pacing_mode.GetValue()) {
     case Settings::FramePacingMode::Target_Auto:
-        scheduler.Wait(resource_ticks[image_index]);
+        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
         break;
     case Settings::FramePacingMode::Target_30:
-        scheduler.Wait(resource_ticks[image_index], 30.0);
+        scheduler.Wait(resource_ticks[image_index], 30.0, may_flush);
         break;
     case Settings::FramePacingMode::Target_60:
-        scheduler.Wait(resource_ticks[image_index], 60.0);
+        scheduler.Wait(resource_ticks[image_index], 60.0, may_flush);
         break;
     case Settings::FramePacingMode::Target_90:
-        scheduler.Wait(resource_ticks[image_index], 90.0);
+        scheduler.Wait(resource_ticks[image_index], 90.0, may_flush);
         break;
     case Settings::FramePacingMode::Target_120:
-        scheduler.Wait(resource_ticks[image_index], 120.0);
+        scheduler.Wait(resource_ticks[image_index], 120.0, may_flush);
         break;
     }
     };
 
 #ifdef __ANDROID__
     if (android_get_device_api_level() >= 30) {
-        scheduler.Wait(resource_ticks[image_index]);
+        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
     } else {
         wait_with_frame_pacing();
     }
@@ -219,7 +229,9 @@ bool Swapchain::AcquireNextImage() {
 
     resource_ticks[image_index] = scheduler.CurrentTick();
 
-    return is_suboptimal || is_outdated;
+    // A suboptimal acquire still acquired an image and signals its semaphore: present it, and let
+    // NeedsRecreation() recreate at the next frame. Out of date acquired nothing.
+    return is_outdated;
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {

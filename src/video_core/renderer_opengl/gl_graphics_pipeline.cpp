@@ -17,10 +17,13 @@
 #include "video_core/renderer_opengl/gl_shader_manager.h"
 #include "video_core/renderer_opengl/gl_shader_util.h"
 #include "video_core/renderer_opengl/gl_state_tracker.h"
+#include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
 
-#if defined(_MSC_VER) && defined(NDEBUG)
+#if defined(__clang__) && defined(NDEBUG)
+#define LAMBDA_FORCEINLINE __attribute__((always_inline))
+#elif defined(_MSC_VER) && defined(NDEBUG)
 #define LAMBDA_FORCEINLINE [[msvc::forceinline]]
 #else
 #define LAMBDA_FORCEINLINE
@@ -182,7 +185,8 @@ GraphicsPipeline::GraphicsPipeline(const Device& device, TextureCache& texture_c
                                    const std::array<const Shader::Info*, 5>& infos,
                                    const GraphicsPipelineKey& key_, bool force_context_flush)
     : texture_cache{texture_cache_}, buffer_cache{buffer_cache_}, program_manager{program_manager_},
-      state_tracker{state_tracker_}, key{key_} {
+      state_tracker{state_tracker_}, key{key_},
+      storage_buffer_alignment{device.GetShaderStorageBufferAlignment()} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -300,15 +304,36 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written);
+                                                       desc.cbuf_offset, desc.is_written,
+                                                       desc.indirect_offset);
                 ++ssbo_index;
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
         const auto read_handle{[&](const auto& desc, u32 index) {
+            if (desc.handle_program != ~0U) {
+                // Read by the shader from a storage buffer: computed for this draw.
+                return TexturePair(VideoCommon::EvaluateTextureHandle(
+                                       info, desc.handle_program, *gpu_memory,
+                                       [&](u32 cbuf) -> GPUVAddr {
+                                           return cbuf < cbufs.size() && cbufs[cbuf].enabled
+                                                      ? cbufs[cbuf].address
+                                                      : GPUVAddr{};
+                                       },
+                                       storage_buffer_alignment),
+                                   via_header_index);
+            }
             ASSERT(cbufs[desc.cbuf_index].enabled);
             const u32 index_offset{index << desc.size_shift};
-            const u32 offset{desc.cbuf_offset + index_offset};
+            u32 offset{desc.cbuf_offset + index_offset};
+            if constexpr (std::is_same_v<decltype(desc), const TextureDescriptor&>) {
+                if (desc.has_index_cbuf) {
+                    ASSERT(cbufs[desc.index_cbuf_index].enabled);
+                    offset += gpu_memory->Read<u32>(cbufs[desc.index_cbuf_index].address +
+                                                    desc.index_cbuf_offset)
+                              << desc.index_shift;
+                }
+            }
             const GPUVAddr addr{cbufs[desc.cbuf_index].address + offset};
             if constexpr (std::is_same_v<decltype(desc), const TextureDescriptor&> ||
                           std::is_same_v<decltype(desc), const TextureBufferDescriptor&>) {
@@ -317,14 +342,20 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     const u32 second_offset{desc.secondary_cbuf_offset};
                     const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].address +
                                                  second_offset};
-                    const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
-                    const u32 rhs_raw{gpu_memory->Read<u32>(separate_addr)
-                                      << desc.secondary_shift_left};
+                    const u32 lhs_raw{(gpu_memory->Read<u32>(addr) << desc.shift_left) & desc.mask};
+                    const u32 rhs_raw{(gpu_memory->Read<u32>(separate_addr)
+                                       << desc.secondary_shift_left) &
+                                      desc.secondary_mask};
                     const u32 raw{lhs_raw | rhs_raw};
                     return TexturePair(raw, via_header_index);
                 }
             }
-            return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
+            u32 raw{gpu_memory->Read<u32>(addr)};
+            if constexpr (std::is_same_v<decltype(desc), const TextureDescriptor&> ||
+                          std::is_same_v<decltype(desc), const TextureBufferDescriptor&>) {
+                raw &= desc.mask;
+            }
+            return TexturePair(raw, via_header_index);
         }};
         const auto add_image{[&](const auto& desc, bool blacklist) LAMBDA_FORCEINLINE {
             for (u32 index = 0; index < desc.count; ++index) {

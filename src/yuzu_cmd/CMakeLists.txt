@@ -39,6 +39,12 @@ add_executable(yuzu-cmd
 )
 
 target_link_libraries(yuzu-cmd PRIVATE common core input_common frontend_common video_core)
+
+if (ENABLE_MCP_SERVER)
+    target_sources(yuzu-cmd PRIVATE mcp_host_cli.cpp mcp_host_cli.h)
+    target_link_libraries(yuzu-cmd PRIVATE mcp hid_core)
+    target_compile_definitions(yuzu-cmd PRIVATE YUZU_ENABLE_MCP)
+endif()
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu-cmd PRIVATE glad)
 endif()
@@ -51,6 +57,7 @@ target_link_libraries(yuzu-cmd PRIVATE SDL3::SDL3)
 if (MSVC)
     target_link_libraries(yuzu-cmd PRIVATE getopt)
 endif()
+target_link_libraries(yuzu-cmd PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if(UNIX AND NOT APPLE)
     install(TARGETS yuzu-cmd)
@@ -59,7 +66,14 @@ endif()
 if(WIN32)
     # compile as a win32 gui application instead of a console application
     if(MSVC)
-        set_target_properties(yuzu-cmd PROPERTIES LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup")
+        # SDL's main implementation provides wmain when UNICODE is defined, which src/CMakeLists.txt
+        # does for cl.exe but not for clang-cl; forcing mainCRTStartup failed to link with cl.exe.
+        if(CXX_CLANG)
+            set(YUZU_CMD_ENTRY mainCRTStartup)
+        else()
+            set(YUZU_CMD_ENTRY wmainCRTStartup)
+        endif()
+        set_target_properties(yuzu-cmd PROPERTIES LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS /ENTRY:${YUZU_CMD_ENTRY}")
     elseif(MINGW)
         set_target_properties(yuzu-cmd PROPERTIES LINK_FLAGS_RELEASE "-Wl,--subsystem,windows")
     endif()

@@ -12,6 +12,7 @@
 #include "video_core/renderer_opengl/gl_compute_pipeline.h"
 #include "video_core/renderer_opengl/gl_shader_manager.h"
 #include "video_core/renderer_opengl/gl_shader_util.h"
+#include "video_core/shader_handle_program.h"
 
 namespace OpenGL {
 
@@ -36,7 +37,8 @@ ComputePipeline::ComputePipeline(const Device& device, TextureCache& texture_cac
                                  const Shader::Info& info_, std::string code,
                                  std::vector<u32> code_v, bool force_context_flush)
     : texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
-      program_manager{program_manager_}, info{info_} {
+      program_manager{program_manager_}, info{info_},
+      storage_buffer_alignment{device.GetShaderStorageBufferAlignment()} {
     switch (::Settings::values.renderer_backend.GetValue()) {
     case Settings::RendererBackend::OpenGL_GLSL:
         source_program = CreateProgram(code, GL_COMPUTE_SHADER);
@@ -87,7 +89,7 @@ void ComputePipeline::Configure() {
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
         buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written);
+                                              desc.is_written, desc.indirect_offset);
         ++ssbo_index;
     }
     texture_cache.SynchronizeDescriptors(true);
@@ -105,9 +107,31 @@ void ComputePipeline::Configure() {
     const auto& cbufs{qmd.const_buffer_config};
     const bool via_header_index{qmd.linked_tsc != 0};
     const auto read_handle{[&](const auto& desc, u32 index) {
+        if (desc.handle_program != ~0U) {
+            // Read by the shader from a storage buffer: computed for this dispatch.
+            return TexturePair(VideoCommon::EvaluateTextureHandle(
+                                   info, desc.handle_program, *gpu_memory,
+                                   [&](u32 cbuf) -> GPUVAddr {
+                                       return cbuf < cbufs.size() &&
+                                                      ((qmd.const_buffer_enable_mask >> cbuf) &
+                                                       1) != 0
+                                                  ? cbufs[cbuf].Address()
+                                                  : GPUVAddr{};
+                                   },
+                                   storage_buffer_alignment),
+                               via_header_index);
+        }
         ASSERT(((qmd.const_buffer_enable_mask >> desc.cbuf_index) & 1) != 0);
         const u32 index_offset{index << desc.size_shift};
-        const u32 offset{desc.cbuf_offset + index_offset};
+        u32 offset{desc.cbuf_offset + index_offset};
+        if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&>) {
+            if (desc.has_index_cbuf) {
+                ASSERT(((qmd.const_buffer_enable_mask >> desc.index_cbuf_index) & 1) != 0);
+                offset += gpu_memory->Read<u32>(cbufs[desc.index_cbuf_index].Address() +
+                                                desc.index_cbuf_offset)
+                          << desc.index_shift;
+            }
+        }
         const GPUVAddr addr{cbufs[desc.cbuf_index].Address() + offset};
         if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
                       std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
@@ -116,13 +140,19 @@ void ComputePipeline::Configure() {
                 const u32 secondary_offset{desc.secondary_cbuf_offset};
                 const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].Address() +
                                              secondary_offset};
-                const u32 lhs_raw{gpu_memory->Read<u32>(addr) << desc.shift_left};
-                const u32 rhs_raw{gpu_memory->Read<u32>(separate_addr)
-                                  << desc.secondary_shift_left};
+                const u32 lhs_raw{(gpu_memory->Read<u32>(addr) << desc.shift_left) & desc.mask};
+                const u32 rhs_raw{(gpu_memory->Read<u32>(separate_addr)
+                                   << desc.secondary_shift_left) &
+                                  desc.secondary_mask};
                 return TexturePair(lhs_raw | rhs_raw, via_header_index);
             }
         }
-        return TexturePair(gpu_memory->Read<u32>(addr), via_header_index);
+        u32 raw{gpu_memory->Read<u32>(addr)};
+        if constexpr (std::is_same_v<decltype(desc), const Shader::TextureDescriptor&> ||
+                      std::is_same_v<decltype(desc), const Shader::TextureBufferDescriptor&>) {
+            raw &= desc.mask;
+        }
+        return TexturePair(raw, via_header_index);
     }};
     const auto add_image{[&](const auto& desc, bool blacklist) {
         for (u32 index = 0; index < desc.count; ++index) {
