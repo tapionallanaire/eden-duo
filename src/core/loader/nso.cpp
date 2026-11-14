@@ -25,6 +25,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/service/nx2_frame_interval.h"
 #include "core/hle/service/nx2_oot_time.h"
 #include "core/loader/nso.h"
@@ -575,6 +576,12 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Load codeset for current process
     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
+    if (name == "main" || name == "sdk") {
+        auto& base = name == "main" ? Kernel::Nx2KStats::g_main_base : Kernel::Nx2KStats::g_sdk_base;
+        auto& size = name == "main" ? Kernel::Nx2KStats::g_main_size : Kernel::Nx2KStats::g_sdk_size;
+        base = load_base;
+        size = image_size;
+    }
     if (name == "main" && process.GetProgramId() == Service::Nx2OotTime::ProgramId) {
         const size_t hook = module_start + Service::Nx2OotTime::HookOffset;
         u32 word = 0;
