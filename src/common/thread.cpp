@@ -114,6 +114,8 @@ enum class CoreGroup {
     Efficiency,
     /// The performance cores, including one kept for this group alone (see performance_shared).
     Critical,
+    /// The one core Critical keeps for itself (EDEN_NX2_BACK_CORE=prime).
+    Prime,
 };
 
 struct ThreadPolicy {
@@ -136,6 +138,7 @@ struct CpuTopologyState {
     /// The performance cores other threads use: all but a strictly fastest one (Snapdragon 865's
     /// prime core), which is left to the critical group.
     cpu_set_t performance_shared{};
+    cpu_set_t prime{};
     cpu_set_t efficiency{};
     bool separated = false;
     bool initialized = false;
@@ -297,6 +300,7 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     CPU_ZERO(&state.allowed);
     CPU_ZERO(&state.performance);
     CPU_ZERO(&state.performance_shared);
+    CPU_ZERO(&state.prime);
     CPU_ZERO(&state.efficiency);
 
     if (!ReadAllowedCpus(0, state.allowed)) {
@@ -352,6 +356,7 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     state.performance_shared = state.performance;
     if (taken >= 3 && cores[0].weight > cores[1].weight) {
         CPU_CLR(cores[0].cpu, &state.performance_shared);
+        CPU_SET(cores[0].cpu, &state.prime);
     }
 
     for (s32 cpu = 0; cpu < total; ++cpu) {
@@ -393,6 +398,8 @@ bool ApplyCoreGroupLocked(CpuTopologyState& state, pid_t tid, CoreGroup group,
     const cpu_set_t* mask = &state.allowed;
     if (restrict_group) {
         mask = group == CoreGroup::Critical      ? &state.performance
+               : group == CoreGroup::Prime       ? (CPU_COUNT(&state.prime) > 0 ? &state.prime
+                                                                              : &state.performance)
                : group == CoreGroup::Performance ? &state.performance_shared
                                                  : &state.efficiency;
     }
@@ -1049,6 +1056,13 @@ void SetCurrentThreadToCriticalCores() {
 #if defined(__ANDROID__)
     ADPF::AddCurrentThread(ADPF::Session::Render);
     SetCurrentThreadCoreGroup(CoreGroup::Critical);
+#endif
+}
+
+void SetCurrentThreadToPrimeCore() {
+#if defined(__ANDROID__)
+    ADPF::AddCurrentThread(ADPF::Session::Render);
+    SetCurrentThreadCoreGroup(CoreGroup::Prime);
 #endif
 }
 

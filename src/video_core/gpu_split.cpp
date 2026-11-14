@@ -643,7 +643,16 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     on_back_thread = true;
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
-    Common::SetCurrentThreadToPerformanceCores();
+    // EDEN_NX2_BACK_CORE=critical|prime: let the back thread use the prime core too, or only it.
+    // Odin 2, Ocarina with the write barrier: the back thread sets the frame (~35 ms of CPU) on
+    // cores 3-6 next to the guest threads while the prime core stays nearly idle.
+    if (const char* core = std::getenv("EDEN_NX2_BACK_CORE"); core && std::strcmp(core, "prime") == 0) {
+        Common::SetCurrentThreadToPrimeCore();
+    } else if (core && std::strcmp(core, "critical") == 0) {
+        Common::SetCurrentThreadToCriticalCores();
+    } else {
+        Common::SetCurrentThreadToPerformanceCores();
+    }
     system->RegisterHostThread();
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);

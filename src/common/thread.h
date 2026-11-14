@@ -113,6 +113,8 @@ void SetCurrentThreadAffinity(u64 mask);
 /// Performance cores, plus a fastest core no other thread is given: for the one thread the frame
 /// waits on most (the GPU thread).
 void SetCurrentThreadToCriticalCores();
+/// Android: the fastest core alone (the one the Critical group keeps for itself).
+void SetCurrentThreadToPrimeCore();
 void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();
 void SetCurrentThreadToAllCores();
