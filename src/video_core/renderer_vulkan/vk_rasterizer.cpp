@@ -2963,7 +2963,7 @@ void RasterizerVulkan::NoteCameraMotionDraw() {
     if (!motion.armed) {
         return;
     }
-    if (!UsesNvidiaDlss()) {
+    if (!UsesNvidiaDlss() && !Ocarina::Fsr3Requested()) {
         motion.armed = false;
         motion.jitter_active = false;
         motion.jitter_ready = false;
@@ -3191,8 +3191,9 @@ bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi
     }
     if (motion.evaluations < 4 || (!done && motion.evaluations < 64)) {
         LOG_INFO(Render_Vulkan,
-                 "Ocarina of Time anti-aliasing: NVIDIA DLSS {} (scene depth {:#x} {}x{} -> "
+                 "Ocarina of Time anti-aliasing: {} {} (scene depth {:#x} {}x{} -> "
                  "{}x{}, {} draws, camera {:#x}, jitter {},{}, reset {})",
+                 UsesNvidiaDlss() ? "NVIDIA DLSS" : "FSR 3.1",
                  done ? "applied" : "unavailable; the game's own runs", scene->depth, src.width,
                  src.height, dst.width, dst.height, scene->draws, scene->camera, jitter[0],
                  jitter[1], reset);

@@ -318,14 +318,17 @@ add_library(video_core STATIC
     video_core.h
 )
 
-# Desktop only (Eglantine): FSR 3.1 upscaling, FSR 3 frame generation and the game DLSS network
-# probe are not built into the Android app.
+# The FSR 3.1 upscaler is built everywhere (on Android it runs only for Ocarina of Time with
+# EDEN_OOT_FSR3=1). Desktop only (Eglantine): FSR 3.1 at presentation, FSR 3 frame generation and
+# the game DLSS network probe are not built into the Android app.
+target_sources(video_core PRIVATE
+    renderer_vulkan/vk_fsr3_upscaler.cpp
+    renderer_vulkan/vk_fsr3_upscaler.h
+)
 if (NOT ANDROID)
     target_sources(video_core PRIVATE
         renderer_vulkan/present/fsr3.cpp
         renderer_vulkan/present/fsr3.h
-        renderer_vulkan/vk_fsr3_upscaler.cpp
-        renderer_vulkan/vk_fsr3_upscaler.h
         renderer_vulkan/vk_dlss_network_probe.cpp
         renderer_vulkan/vk_dlss_network_probe.h
     )

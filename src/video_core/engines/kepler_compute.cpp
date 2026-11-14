@@ -1140,9 +1140,11 @@ bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 sh
         return value != nullptr && value[0] != '0';
 #endif
     }();
-    const bool uses_dlss = rasterizer->UsesNvidiaDlss();
+    // NVIDIA DLSS, or FSR 3.1 when asked for (Fsr3Requested), from the camera's motion; a frame
+    // either can't take falls back to the copy when that is on.
+    const bool camera_motion = rasterizer->UsesNvidiaDlss() || Fsr3Requested();
     if (program_id != ProgramId || (!input_pass && !output_pass) ||
-        (!uses_dlss && !simple_copy)) {
+        (!camera_motion && !simple_copy)) {
         return false;
     }
     const auto& cbuf = launch_description.const_buffer_config[0];
@@ -1225,8 +1227,13 @@ bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 sh
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    if (uses_dlss) {
-        return rasterizer->AccelerateCameraMotionUpscale(surface(*input), surface(*output));
+    if (camera_motion) {
+        if (rasterizer->AccelerateCameraMotionUpscale(surface(*input), surface(*output))) {
+            return true;
+        }
+        if (!simple_copy) {
+            return false;
+        }
     }
     const Fermi2D::Config config{
         .operation = Fermi2D::Operation::SrcCopy,

@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 
@@ -62,6 +63,16 @@ constexpr u32 CameraBytes = 0xb0;
 
 /// Frames in a cycle of the camera jitter.
 constexpr u32 JitterPhases = 16;
+
+/// EDEN_OOT_FSR3=1: FSR 3.1 takes the camera's motion where NVIDIA DLSS isn't running (Android
+/// among them), in place of the plain copy or the game's own pass. Off by default.
+[[nodiscard]] inline bool Fsr3Requested() {
+    static const bool requested = [] {
+        const char* const value = std::getenv("EDEN_OOT_FSR3");
+        return value != nullptr && value[0] != '0';
+    }();
+    return requested;
+}
 
 using Matrix = std::array<f64, 16>; ///< Row-major 4x4.
 

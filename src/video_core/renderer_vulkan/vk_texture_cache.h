@@ -17,9 +17,9 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_vulkan/vk_camera_motion_pass.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
-#ifndef __ANDROID__ // FSR 3.1 and the DLSS network probe are desktop only
-#include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#ifndef __ANDROID__ // the DLSS network probe is desktop only
+#include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #endif
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
@@ -124,11 +124,12 @@ public:
     /// True while TemporalUpscale would use NVIDIA DLSS (on, Streamline running, not failed).
     [[nodiscard]] bool UsesNvidiaDlss() const;
 
-    /// NVIDIA DLSS (DLAA or Super Resolution) on input_color (tonemapped, render_size on the host)
-    /// into dst, for a game that renders no jitter and no motion vectors (Ocarina of Time): the
-    /// host jittered the scene's draws, and the motion comes from the depth (standard, not
-    /// reversed) through reprojection, a column-major matrix from (pixel x, pixel y, device depth,
-    /// 1) to the previous frame's pixel. False when DLSS can't run; the caller keeps its own pass.
+    /// NVIDIA DLSS (DLAA or Super Resolution), or FSR 3.1 where DLSS isn't running, on input_color
+    /// (tonemapped, render_size on the host) into dst, for a game that renders no jitter and no
+    /// motion vectors (Ocarina of Time): the host jittered the scene's draws, and the motion comes
+    /// from the depth (standard, not reversed) through reprojection, a column-major matrix from
+    /// (pixel x, pixel y, device depth, 1) to the previous frame's pixel. False when neither can
+    /// run; the caller keeps its own pass.
     bool UpscaleWithCameraMotion(Framebuffer* dst_framebuffer, ImageView& input_color,
                                  ImageView& depth, std::array<u32, 2> render_size,
                                  const std::array<f32, 16>& reprojection,
@@ -234,10 +235,14 @@ public:
                          ImageView& motion_vectors, ImageView& depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
                          std::array<f32, 2> motion_scale);
-#ifdef __ANDROID__
-    bool fsr3_unsupported{true}; // not built: DLSS evaluations use the temporal stand-in
-#else
+    /// The FSR 3.1 upscaler, created on first use; null when it can't run (fsr3_failed).
+    Fsr3Upscaler* Fsr3();
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
+    bool fsr3_failed{};
+#ifdef __ANDROID__
+    // DLSS evaluations use the temporal stand-in; FSR 3.1 runs only for UpscaleWithCameraMotion.
+    bool fsr3_unsupported{true};
+#else
     bool fsr3_unsupported{};
     /// The game DLSS network's health check (ProbeGameDlssOutput), created on first use.
     std::unique_ptr<DlssNetworkProbe> dlss_network_probe;
@@ -258,9 +263,9 @@ public:
     StreamlineDlssUpscaler* DlssUpscaler();
     std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
     bool dlss_unsupported{};
+#endif
     /// UpscaleWithCameraMotion's motion vectors, created on first use.
     std::unique_ptr<CameraMotionPass> camera_motion_pass;
-#endif
 
     /// TemporalUpscale's history: its previous result (images[current]) and the image the next
     /// result is stored to.
