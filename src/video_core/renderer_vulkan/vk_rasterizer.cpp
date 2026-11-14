@@ -1226,6 +1226,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool is_indirect, Func&& dra
         report_failure("configure failed");
         return;
     }
+    if (static const bool pipeline_stats{std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr};
+        pipeline_stats && !pipeline->StatisticsLogged()) {
+        // Native keys through the diagnostics' program map (needs EDEN_NX2_DIAG_DIR): the shader
+        // cache's bound-shader table can be stale here (the fast pipeline cache skips it).
+        auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+        std::array<u64, 6> native_keys{};
+        native_keys[1] = diag.KeyOfLocked(DiagShader(*maxwell3d, 1));
+        native_keys[5] = diag.KeyOfLocked(DiagShader(*maxwell3d, 5));
+        pipeline->LogExecutableStatistics(native_keys);
+    }
     if (frame_dump.Capturing()) {
         frame_dump.NoteKeys(pipeline->ShaderHashes(),
                             pipeline_cache.GraphicsNativeKeys(pipeline->ShaderHashes()));
