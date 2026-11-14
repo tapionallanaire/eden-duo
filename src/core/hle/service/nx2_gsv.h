@@ -1912,12 +1912,12 @@ private:
             }();
             // Only in steady gameplay: twice a run read garbage command words in the first second
             // of the 3D scene after the title (the game rewrites command memory there as if the
-            // present had waited). A frame counts as steady when the GPU thread needed 6-80 ms
+            // present had waited). A frame counts as steady when the GPU thread needed 6-250 ms
             // after the present; 300 of them in a row engage the barrier, any other frame (a
             // menu, a loading hitch) goes back to the wait for the frame.
             const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
             const auto note_lag = [this](s64 lag_us) {
-                m_barrier_steady = lag_us >= 6000 && lag_us <= 80000 ? m_barrier_steady + 1 : 0;
+                m_barrier_steady = lag_us >= 6000 && lag_us <= 250000 ? m_barrier_steady + 1 : 0;
             };
             if (ocarina_back_wait && barrier != 0 && m_barrier_steady >= 300) {
                 if (Core::g_nx2_barrier.exchange(barrier, std::memory_order_relaxed) == 0) {
