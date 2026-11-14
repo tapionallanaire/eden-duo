@@ -109,7 +109,7 @@ private:
             sample.who = static_cast<s32>(syscall(SYS_gettid));
             return;
         }
-#endif
+#else
         void* frames[Depth + 2];
         const int n = backtrace(frames, Depth + 2);
         const size_t slot = self.head.fetch_add(1, std::memory_order_relaxed) % RingSize;
@@ -119,6 +119,7 @@ private:
             sample.pc[i] = frames[i + 2];
         }
         sample.who = static_cast<s32>(syscall(SYS_gettid));
+#endif
     }
 
     void Start() {
