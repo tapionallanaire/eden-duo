@@ -177,6 +177,13 @@ void LogKernelStats(u64 presents) {
                  take(st.idle_entries) / frames, blocked / frames,
                  take(st.idle_blocked_ns) / 1000.0 / std::max<u64>(blocked, 1),
                  take(st.switches) / frames);
+        const u64 interrupts = take(st.interrupt[0]);
+        const u64 spun = take(st.interrupt[2]);
+        LOG_INFO(Core,
+                 "nx2 kstats: Interrupt calls {:.1f}/f, mean {:.2f}us in it; idle cores leaving "
+                 "the spin on one {:.1f}/f, mean {:.2f}us after it",
+                 interrupts / frames, take(st.interrupt[1]) / 1000.0 / std::max<u64>(interrupts, 1),
+                 spun / frames, take(st.interrupt[3]) / 1000.0 / std::max<u64>(spun, 1));
         const u64 yields = take(st.yields[0]);
         const u64 sleeps = take(st.sleeps[0]);
         std::string sleep_hist;
@@ -192,11 +199,9 @@ void LogKernelStats(u64 presents) {
                  asked_hist, take(st.busy_priority[0]), take(st.busy_priority[1]),
                  take(st.busy_priority[2]));
         LOG_INFO(Core,
-                 "nx2 kstats: SleepThread per frame: yields {:.1f} (mean {:.2f}us in the call, "
-                 "{:.1f} without the lock), "
+                 "nx2 kstats: SleepThread per frame: yields {:.1f} (mean {:.2f}us in the call), "
                  "sleeps {:.1f} (mean {:.1f}us asked, {:.1f}us in the call; us <1 <2 .. more:{})",
                  yields / frames, take(st.yields[1]) / 1000.0 / std::max<u64>(yields, 1),
-                 take(st.fast_yields) / frames,
                  sleeps / frames, take(st.sleeps[1]) / 1000.0 / std::max<u64>(sleeps, 1),
                  take(st.sleeps[2]) / 1000.0 / std::max<u64>(sleeps, 1), sleep_hist);
     }

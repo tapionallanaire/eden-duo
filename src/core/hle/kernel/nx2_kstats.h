@@ -53,7 +53,9 @@ struct Stats {
     std::array<std::atomic<u64>, Buckets> sleep_asked_hist{}; ///< ... and time asked
     /// Wakes onto a busy core: the woken thread's priority above, equal to, below the running one
     std::array<std::atomic<u64>, 3> busy_priority{};
-    std::atomic<u64> fast_yields{}; ///< EDEN_NX2_FAST_YIELD: yields that skipped the lock
+    /// PhysicalCore::Interrupt: calls, ns in it; idle cores that saw one while spinning: count,
+    /// ns from the interrupt to leaving the spin.
+    std::array<std::atomic<u64>, 4> interrupt{}; ///< EDEN_NX2_FAST_YIELD: yields that skipped the lock
     /// The scheduler lock: acquisitions, contended ones, ns waited, ns held (outermost holds,
     /// the unlock's scheduling update included, the reschedule after it not).
     std::array<std::atomic<u64>, 4> sched_lock{};

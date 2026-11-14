@@ -68,6 +68,7 @@ public:
 
 private:
     const std::size_t m_core_index;
+    std::atomic<u64> m_nx2_interrupt_ns{};
     std::mutex m_guard;
     std::condition_variable m_on_interrupt;
     Core::ArmInterface* m_arm_interface{};

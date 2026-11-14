@@ -981,6 +981,16 @@ void SetCurrentThreadName(const char* name) {
         pf(GetCurrentThread(), UTF8ToUTF16W(name).data()); // Windows 10+
     else
         ; // No-op
+    // EDEN_NX2_OTHER_AFFINITY=<hex mask>: the logical CPUs every other named emulator thread may
+    // use, to keep them off the CPUs EDEN_NX2_CORE_AFFINITY gives the emulated cores (those set
+    // their own mask after naming themselves).
+    static const u64 other_mask = [] {
+        const char* text = std::getenv("EDEN_NX2_OTHER_AFFINITY");
+        return text != nullptr ? std::strtoull(text, nullptr, 16) : 0ULL;
+    }();
+    if (other_mask != 0) {
+        SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(other_mask));
+    }
 #elif  defined(__APPLE__)
     pthread_setname_np(name);
 #elif defined(__HAIKU__)
@@ -1026,6 +1036,12 @@ void SetCurrentThreadToPerformanceCores() {
     }
 #elif defined(__linux__)
     SetCurrentThreadLinuxGroup(LinuxCoreGroup::Performance);
+#endif
+}
+
+void SetCurrentThreadAffinity([[maybe_unused]] u64 mask) {
+#ifdef _WIN32
+    SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask));
 #endif
 }
 

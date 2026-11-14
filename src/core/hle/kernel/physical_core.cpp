@@ -292,6 +292,13 @@ void PhysicalCore::Idle(KernelCore& kernel) {
                std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }
+        if (Nx2KStats::g_enabled && m_is_interrupted.load(std::memory_order_acquire)) {
+            if (const u64 at = m_nx2_interrupt_ns.load(std::memory_order_relaxed); at != 0) {
+                const u64 now = Nx2KStats::NowNs();
+                Nx2KStats::Add(Nx2KStats::g_stats.interrupt[2]);
+                Nx2KStats::Add(Nx2KStats::g_stats.interrupt[3], now > at ? now - at : 0);
+            }
+        }
     }
     if (Nx2KStats::g_enabled) {
         Nx2KStats::Add(Nx2KStats::g_stats.idle_entries);
@@ -315,6 +322,17 @@ bool PhysicalCore::IsInterrupted() const {
 }
 
 void PhysicalCore::Interrupt() {
+    const u64 nx2_start = Nx2KStats::g_enabled ? Nx2KStats::NowNs() : 0;
+    SCOPE_EXIT {
+        if (nx2_start != 0) {
+            Nx2KStats::Add(Nx2KStats::g_stats.interrupt[0]);
+            Nx2KStats::Add(Nx2KStats::g_stats.interrupt[1], Nx2KStats::NowNs() - nx2_start);
+        }
+    };
+    if (nx2_start != 0) {
+        m_nx2_interrupt_ns.store(nx2_start, std::memory_order_relaxed);
+    }
+
     // Lock core context.
     std::scoped_lock lk{m_guard};
 

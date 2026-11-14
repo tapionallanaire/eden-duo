@@ -108,6 +108,8 @@ enum class ThreadPlacement : u32 {
 void SetCurrentThreadPriority(ThreadPriority new_priority);
 void SetCurrentThreadName(const char* name);
 void SetCurrentThreadToPerformanceCores();
+/// Windows: restricts the current thread to the logical CPUs in `mask` (no-op elsewhere).
+void SetCurrentThreadAffinity(u64 mask);
 /// Performance cores, plus a fastest core no other thread is given: for the one thread the frame
 /// waits on most (the GPU thread).
 void SetCurrentThreadToCriticalCores();
