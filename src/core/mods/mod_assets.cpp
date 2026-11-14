@@ -26,6 +26,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <format>
 #include <span>
 
 #include "bc_decoder.h"
@@ -47,6 +48,7 @@
 #include "core/mods/mod_nx_assets.h"
 #include "core/mods/mod_romfs_sources.h"
 #include "core/mods/mod_runtime.h"
+#include "core/mods/mod_sysfont_source.h"
 #include "core/mods/mod_user_source.h"
 
 namespace Core::Mods {
@@ -204,6 +206,17 @@ void ModRuntime::RegisterAssetSources() {
     // Runtime 17: files the player supplies, <EdenDir>/dualscreen/user/<TITLEID>/
     // (mod_user_source.h).
     asset_sources->Register(MakeUserSource(UserSourceDir(UserSourceRoot(), manifest.title_id)));
+    // Runtime 23: the console's shared system fonts, from the REAL firmware archives only
+    // (mod_sysfont_source.h) -- no SynthesizeSystemArchive fallback here, unlike pl:u itself.
+    asset_sources->Register(MakeSysfontSource([this](u64 archive_id) -> FileSys::VirtualDir {
+        const auto* const nand = system.GetFileSystemController().GetSystemNANDContents();
+        if (nand == nullptr) {
+            return nullptr;
+        }
+        const auto nca = nand->GetEntry(archive_id, FileSys::ContentRecordType::Data);
+        const auto romfs = nca ? nca->GetRomFS() : nullptr;
+        return romfs ? FileSys::ExtractRomFS(romfs) : nullptr;
+    }));
 }
 
 FileSys::VirtualDir ModRuntime::OpenGameRomFS() {
@@ -425,7 +438,7 @@ void ModRuntime::LoadFont() {
     font_metrics = std::move(decoded);
     LOG_INFO(Core, "DSMod: font '{}' has {} glyph(s), line height {} (via {}{})",
              manifest.font_metrics_src, font_metrics.glyphs.size(), font_metrics.line_height,
-             font_source, redecode ? fmt::format(", font epoch {}", font_epoch.decoded) : "");
+             font_source, redecode ? std::format(", font epoch {}", font_epoch.decoded) : "");
     if (redecode) {
         // The atlas goes with the metrics: drop the cached picture so the next draw asks the
         // module again (text is blank until it lands, then the landed image repaints the page),

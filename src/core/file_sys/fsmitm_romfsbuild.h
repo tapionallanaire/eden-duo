@@ -30,8 +30,7 @@ private:
     std::shared_ptr<RomFSBuildDirectoryContext> root;
     std::vector<std::shared_ptr<RomFSBuildDirectoryContext>> directories;
     std::vector<std::shared_ptr<RomFSBuildFileContext>> files;
-    /// The contexts link parent <-> child/sibling/file with shared_ptr, so a built tree keeps
-    /// itself alive after the context is gone (about 300 bytes per build). Unlinked on destruction.
+    /// Clears the (non-owning) links between the contexts on destruction.
     void Unlink();
     u64 num_dirs = 0;
     u64 num_files = 0;

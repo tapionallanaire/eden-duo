@@ -5,9 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <span>
 
 #include "common/assert.h"
 #include "common/hex_util.h"
@@ -29,6 +31,7 @@
 #include "core/file_sys/vfs/vfs_layered.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/hle/service/nx2_oot_time.h"
 #include "core/hle/service/ns/language.h"
 #include "core/hle/service/set/settings_server.h"
 #include "core/loader/loader.h"
@@ -43,6 +46,56 @@ constexpr u32 SINGLE_BYTE_MODULUS = 0x100;
 constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "main",    "main.npdm", "rtld",    "sdk",     "subsdk0", "subsdk1", "subsdk2",
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
+};
+
+struct BuiltinPatchWord {
+    size_t module_offset;
+    u32 original;
+    u32 replacement;
+};
+
+/// All of a patch's words apply together, or none of them do.
+struct BuiltinPatch {
+    std::string_view name;
+    u64 title_id;
+    std::string_view module;
+    std::string_view build_id;
+    std::span<const BuiltinPatchWord> words;
+};
+
+constexpr std::array OCARINA_MAX_RESOLUTION{
+    BuiltinPatchWord{0x805BD0, 0x360041E8, 0x1400020F}, // tbz w8, #0, 0x80640c -> b 0x80640c
+};
+
+constexpr std::array OCARINA_REAL_TIME{
+    BuiltinPatchWord{Service::Nx2OotTime::DeltaOffset, 0x00000000, 0x3F800000}, // 1.0f
+    BuiltinPatchWord{Service::Nx2OotTime::LoadDeltaOffset, 0x00000000,
+                     0x1CFFFFE8}, // ldr s8, 0x3c461e0
+    BuiltinPatchWord{Service::Nx2OotTime::ReturnOffset, 0x00000000, 0x172A82B8}, // b 0x6e6cc8
+    // fdiv s8, s1, s0 -> b 0x3c461e4
+    BuiltinPatchWord{Service::Nx2OotTime::HookOffset, 0x1E201828,
+                     Service::Nx2OotTime::HookInstruction},
+};
+
+constexpr std::array BUILTIN_PATCHES{
+    // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
+    // instead of following the GPU-time controller down to its 480p floor.
+    BuiltinPatch{
+        .name = "Max Resolution (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .words = OCARINA_MAX_RESOLUTION,
+    },
+    // Ocarina of Time's frame delta comes from the measured frame time, so it doesn't run in slow
+    // motion below 60 fps: see nx2_oot_time.h.
+    BuiltinPatch{
+        .name = "Real-time speed (built-in)",
+        .title_id = Service::Nx2OotTime::ProgramId,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .words = OCARINA_REAL_TIME,
+    },
 };
 
 enum class TitleVersionFormat : u8 {
@@ -60,9 +113,9 @@ std::string FormatTitleVersion(u32 version,
     }
 
     if (format == TitleVersionFormat::FourElements) {
-        return fmt::format("v{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]);
+        return std::format("v{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]);
     }
-    return fmt::format("v{}.{}.{}", bytes[3], bytes[2], bytes[1]);
+    return std::format("v{}.{}.{}", bytes[3], bytes[2], bytes[1]);
 }
 
 // Returns a directory with name matching name case-insensitive. Returns nullptr if directory
@@ -87,7 +140,7 @@ std::optional<std::vector<Core::Memory::CheatEntry>> ReadCheatFileFromFolder(
     u64 title_id, const PatchManager::BuildID& build_id_, const VirtualDir& base_path, bool upper) {
     const auto build_id_raw = Common::HexToString(build_id_, upper);
     const auto build_id = build_id_raw.substr(0, sizeof(u64) * 2);
-    const auto file = base_path->GetFile(fmt::format("{}.txt", build_id));
+    const auto file = base_path->GetFile(std::format("{}.txt", build_id));
 
     if (file == nullptr) {
         LOG_INFO(Common_Filesystem, "No cheats file found for title_id={:016X}, build_id={}",
@@ -120,7 +173,7 @@ bool IsDirValidAndNonEmpty(const VirtualDir& dir) {
 }
 
 bool IsVersionedExternalUpdateDisabled(const std::vector<std::string>& disabled, u32 version) {
-    const std::string disabled_key = fmt::format("Update@{}", version);
+    const std::string disabled_key = std::format("Update@{}", version);
     return std::find(disabled.cbegin(), disabled.cend(), disabled_key) != disabled.cend() ||
            std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
 }
@@ -332,7 +385,10 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     const auto load_dir = GetModificationLoadRoot();
     const auto sdmc_load_dir = GetModificationLoadRoot(true);
 
-    std::vector<VirtualDir> patch_dirs = {sdmc_load_dir};
+    std::vector<VirtualDir> patch_dirs;
+    if (sdmc_load_dir != nullptr) {
+        patch_dirs.push_back(sdmc_load_dir);
+    }
     if (load_dir != nullptr) {
         const auto load_patch_dirs = load_dir->GetSubdirectories();
         patch_dirs.insert(patch_dirs.end(), load_patch_dirs.begin(), load_patch_dirs.end());
@@ -373,7 +429,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
 
 std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualDir>& patch_dirs, const std::string& build_id) const {
     const auto disabled = GetDisabledAddons();
-    const auto nso_build_id = fmt::format("{:0<64}", build_id);
+    const auto nso_build_id = std::format("{:0<64}", build_id);
 
     std::vector<VirtualFile> out;
     out.reserve(patch_dirs.size());
@@ -386,7 +442,7 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
             for (const auto& file : exefs_dir->GetFiles()) {
                 if (file->GetExtension() == "ips") {
                     auto name = file->GetName();
-                    const auto this_build_id = fmt::format("{:0<64}", name.substr(0, name.find('.')));
+                    const auto this_build_id = std::format("{:0<64}", name.substr(0, name.find('.')));
                     if (nso_build_id == this_build_id)
                         out.push_back(file);
                 } else if (file->GetExtension() == "pchtxt") {
@@ -422,7 +478,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         const auto dump_dir = fs_controller.GetModificationDumpRoot(title_id);
         if (dump_dir != nullptr) {
             const auto nso_dir = GetOrCreateDirectoryRelative(dump_dir, "/nso");
-            const auto file = nso_dir->CreateFile(fmt::format("{}-{}.nso", name, build_id));
+            const auto file = nso_dir->CreateFile(std::format("{}-{}.nso", name, build_id));
 
             file->Resize(nso.size());
             file->WriteBytes(nso);
@@ -460,6 +516,79 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
     }
 
+    const auto disabled = GetDisabledAddons();
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id || patch.module != name) {
+            continue;
+        }
+        // Duet Plus: phones keep the game's own dynamic resolution (the 3D scene below the
+        // window's size is what their GPU and memory can carry). EDEN_OOT_NO_MAX_RES=1 does the
+        // same on a desktop build.
+#ifdef __ANDROID__
+        constexpr bool keep_dynamic_resolution = true;
+#else
+        static const bool keep_dynamic_resolution = std::getenv("EDEN_OOT_NO_MAX_RES") != nullptr;
+#endif
+        if (patch.name == "Max Resolution (built-in)" && keep_dynamic_resolution) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": the game's dynamic resolution is kept",
+                     patch.name);
+            continue;
+        }
+        if (patch.name == "Max Resolution (built-in)" && Settings::values.nvidia_dlss.GetValue()) {
+            if (Settings::values.nvidia_dlss_quality.GetValue() != Settings::DlssQuality::DLAA) {
+                LOG_INFO(Loader,
+                         "    - Skipping \"{}\": NVIDIA DLSS quality is set to Super Resolution "
+                         "(use DLAA for native 1440p)",
+                         patch.name);
+                continue;
+            }
+        } else if (std::find(disabled.cbegin(), disabled.cend(), patch.name) != disabled.cend()) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": disabled in Add-Ons", patch.name);
+            continue;
+        }
+        if (patch.build_id != build_id) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
+                     patch.build_id);
+            continue;
+        }
+        const auto word_at = [](const std::vector<u8>& data, size_t offset) -> std::optional<u32> {
+            if (data.size() < offset + sizeof(u32)) {
+                return std::nullopt;
+            }
+            u32 word;
+            std::memcpy(&word, data.data() + offset, sizeof(word));
+            return word;
+        };
+        const bool applies = std::ranges::all_of(patch.words, [&](const BuiltinPatchWord& word) {
+            const size_t offset = sizeof(Loader::NSOHeader) + word.module_offset;
+            const auto original = word_at(nso, offset);
+            if (original != word.original) {
+                LOG_WARNING(Loader,
+                            "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
+                            patch.name, name, word.module_offset, original.value_or(0),
+                            word.original);
+                return false;
+            }
+            if (const auto modded = word_at(out, offset); modded != word.original) {
+                LOG_INFO(Loader,
+                         "    - Skipping \"{}\": a user mod already patched {}+{:#x} to "
+                         "{:#010x}, the mod's patch is used",
+                         patch.name, name, word.module_offset, modded.value_or(0));
+                return false;
+            }
+            return true;
+        });
+        if (!applies) {
+            continue;
+        }
+        for (const auto& word : patch.words) {
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + word.module_offset,
+                        &word.replacement, sizeof(word.replacement));
+            LOG_INFO(Loader, "    - Applying built-in patch \"{}\" at {}+{:#x}", patch.name, name,
+                     word.module_offset);
+        }
+    }
+
     if (out.size() < sizeof(Loader::NSOHeader)) {
         return nso;
     }
@@ -473,6 +602,12 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
     const auto build_id = build_id_raw.substr(0, build_id_raw.find_last_not_of('0') + 1);
 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
+
+    if (std::ranges::any_of(BUILTIN_PATCHES, [&](const BuiltinPatch& patch) {
+            return patch.title_id == title_id && patch.module == name;
+        })) {
+        return true;
+    }
 
     const auto load_dir = GetModificationLoadRoot();
     if (load_dir == nullptr) {
@@ -503,10 +638,11 @@ std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildI
     for (const auto& subdir : patch_dirs) {
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) == disabled.cend()) {
             if (auto cheats_dir = FindSubdirectoryCaseless(subdir, "cheats"); cheats_dir != nullptr) {
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true))
+                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true)) {
                     std::copy(res->begin(), res->end(), std::back_inserter(out));
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
+                } else if (auto const lower_res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false)) {
+                    std::copy(lower_res->begin(), lower_res->end(), std::back_inserter(out));
+                }
             }
         }
     }
@@ -538,8 +674,12 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     }
 
     const auto disabled = GetDisabledAddons();
-    std::vector<VirtualDir> patch_dirs = load_dir->GetSubdirectories();
-    if (std::find(disabled.cbegin(), disabled.cend(), "SDMC") == disabled.cend()) {
+    std::vector<VirtualDir> patch_dirs;
+    if (load_dir != nullptr) {
+        patch_dirs = load_dir->GetSubdirectories();
+    }
+    if (std::find(disabled.cbegin(), disabled.cend(), "SDMC") == disabled.cend() &&
+        sdmc_load_dir != nullptr) {
         patch_dirs.push_back(sdmc_load_dir);
     }
     std::sort(patch_dirs.begin(), patch_dirs.end(),
@@ -578,9 +718,11 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     if (layers.empty() && layers_ext.empty()) {
         return;
     }
+    LOG_INFO(Loader, "    RomFS: {} mod layer(s) found", layers.size() + layers_ext.size());
 
     auto extracted = ExtractRomFS(romfs);
     if (extracted == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: could not be read as a directory tree; mods not applied");
         return;
     }
 
@@ -589,11 +731,13 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
     auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
     auto layered_ext = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers_ext));
     if (layered == nullptr && layered_ext == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: mod layers could not be combined; mods not applied");
         return;
     }
 
     auto packed = CreateRomFS(std::move(layered), std::move(layered_ext));
     if (packed == nullptr) {
+        LOG_ERROR(Loader, "    RomFS: could not be rebuilt with the mod layers; mods not applied");
         return;
     }
 
@@ -604,7 +748,7 @@ void PatchManager::ApplyLayeredFS(VirtualFile& romfs, ContentRecordType type) co
 VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs,
                                      ContentRecordType type, VirtualFile packed_update_raw,
                                      bool apply_layeredfs) const {
-    const auto log_string = fmt::format("Patching RomFS for title_id={:016X}, type={:02X}",
+    const auto log_string = std::format("Patching RomFS for title_id={:016X}, type={:02X}",
                                         title_id, static_cast<u8>(type));
     if (type == ContentRecordType::Program || type == ContentRecordType::Data) {
         LOG_INFO(Loader, "{}", log_string);
@@ -1009,6 +1153,21 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
         }
     }
 
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id) {
+            continue;
+        }
+        const auto patch_disabled =
+            std::find(disabled.begin(), disabled.end(), patch.name) != disabled.end();
+        out.push_back({.enabled = !patch_disabled,
+                       .name = std::string{patch.name},
+                       .version = "IPS",
+                       .type = PatchType::Mod,
+                       .program_id = title_id,
+                       .title_id = title_id,
+                       .source = PatchSource::Unknown});
+    }
+
     // DLC
     std::vector<ContentProviderEntry> dlc_match;
     bool has_external_dlc = false;
@@ -1071,9 +1230,9 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
 
         std::string list;
         for (size_t i = 0; i < dlc_match.size() - 1; ++i)
-            list += fmt::format("{}, ", dlc_match[i].title_id & 0x7FF);
+            list += std::format("{}, ", dlc_match[i].title_id & 0x7FF);
 
-        list += fmt::format("{}", dlc_match.back().title_id & 0x7FF);
+        list += std::format("{}", dlc_match.back().title_id & 0x7FF);
 
         const auto dlc_disabled =
             std::find(disabled.begin(), disabled.end(), "DLC") != disabled.end();

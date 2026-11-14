@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <set>
 #include <vector>
 #include <QByteArray>
 #include <QMetaType>
@@ -110,6 +111,7 @@ struct Values {
                                                            true};
 
     Setting<bool> first_start{linkage, true, "firstStart", Category::Ui};
+    std::set<u64> skipped_recommended_settings;
     Setting<bool> pause_when_in_background{linkage,
                                            false,
                                            "pauseWhenInBackground",
@@ -148,11 +150,6 @@ struct Values {
                                             false,
 #endif
                                             "enable_gamemode", Category::UiGeneral};
-#ifdef __unix__
-    SwitchableSetting<bool> gui_force_x11{linkage, false, "gui_force_x11", Category::UiGeneral};
-    Setting<bool> gui_hide_backend_warning{linkage, false, "gui_hide_backend_warning",
-                                           Category::UiGeneral};
-#endif
 
     // Discord RPC
     Setting<bool> enable_discord_presence{linkage, false, "enable_discord_presence", Category::Ui};
@@ -171,6 +168,9 @@ struct Values {
     QVector<GameDir> game_dirs;
     QStringList recent_files;
     Setting<std::string> language{linkage, {}, "language", Category::Paths};
+
+    // Optional key that enables the SteamGridDB icon fallback
+    Setting<std::string> steamgriddb_api_key{linkage, {}, "steamgriddb_api_key", Category::Ui};
 
     std::string theme;
 

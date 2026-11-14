@@ -166,6 +166,9 @@ void ModRuntime::ShutdownGameModule() {
         std::scoped_lock lock{module_save_mutex};
         module_save_dir = nullptr;
     }
+    // Runtime 24: open readbacks are dropped; a copy still in the renderer finds no broker.
+    texture_readback.reset();
+    module_texture_api = {};
     // Any synchronous module image call (Nx worker composite layer) finishes before the instance
     // goes.
     std::scoped_lock loader_lock{module_loader_mutex};
@@ -196,6 +199,9 @@ void ModRuntime::InitializeGameModule() {
                                EDEN_DSMOD_CAP_EXTENSIONS | EDEN_DSMOD_CAP_TICK_WHEN_HIDDEN |
                                EDEN_DSMOD_CAP_NO_TICK_WHEN_HIDDEN |
                                EDEN_DSMOD_CAP_FONT_EPOCH; // runtime 18
+    if (system.GPU().DSModTextureReadbackAvailable()) {
+        module_host.capabilities |= EDEN_DSMOD_CAP_TEXTURE_READBACK; // runtime 24
+    }
     module_host.userdata = this;
     module_host.title_id = manifest.title_id;
     module_host.main_base = main_region_begin;
@@ -419,7 +425,8 @@ void ModRuntime::InitializeGameModule() {
         // which could only ever miss, so a module could not tell it from a missing file).
         if (const auto prefix = AssetSources::PrefixOf(source); prefix.empty()) {
             source.insert(0, "romfs:");
-        } else if (!rt.asset_sources->IsDirectorySource(source)) {
+        } else if (!rt.asset_sources->IsDirectorySource(source) &&
+                   !rt.asset_sources->IsModuleReadableByteSource(source)) {
             static std::atomic<bool> warned{false};
             if (!warned.exchange(true)) {
                 LOG_WARNING(Core, "DSMod module: read_romfs('{}'): '{}:' is not a file source "
@@ -430,6 +437,8 @@ void ModRuntime::InitializeGameModule() {
         }
         // Range reads keep large ROMFS archives out of the 60 Hz reader path and avoid
         // allocating/rereading the entire file for every size/chunk request.
+        // Directory sources and opt-in byte sources ("sysfont:", runtime 23) read only the
+        // requested range; an archive member is read whole and sliced.
         if (source.find('#') == std::string::npos) {
             return rt.asset_sources->ReadRange(source, offset, output, size);
         }
@@ -492,6 +501,7 @@ void ModRuntime::InitializeGameModule() {
             InitializeModuleExtensions();
             InitializeModuleSaveExtensions();
             InitializeModuleWriteExtensions();
+            InitializeModuleTextureExtensions();
             StartModuleAssetWorker();
             StartModuleAreas();
         }

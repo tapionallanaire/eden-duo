@@ -8,13 +8,14 @@
 #include <utility>
 #include <vector>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/literals.h"
+#include "common/settings.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -36,11 +37,31 @@ constexpr VkDeviceSize MAX_ALIGNMENT = 256;
 #if defined(__FreeBSD__)
 constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 #else
-constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 256_MiB;
+// 128 MiB on Windows too: 256 MiB sat mostly unused in device memory on Switch 2 titles.
+constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 #endif
+
+// Unused space after the end of the stream buffer. Constant buffers are bound from it and the
+// shaders declare each one at its full 64 KiB, so Metal checks 64 KiB from the binding offset
+// against the end of the buffer ("argument c3[0] ... has space for 26624 bytes, but argument has a
+// length(65536)"). The tail is never handed out, so every binding has the full 64 KiB behind it.
+constexpr VkDeviceSize STREAM_BUFFER_TAIL = 64_KiB;
 
 size_t GetStreamBufferSize(const Device& device) {
     if (!device.HasDebuggingToolAttached()) {
+        if (device.IsIntegrated()) {
+            // An integrated GPU's device-local host-visible heap can be no bigger than the stream
+            // buffer (Radeon 780M: 256 MiB, 243 MiB budget), which then sat over that budget.
+            // Leave a quarter of it free.
+            VkDeviceSize heap_size = 0;
+            ForEachDeviceLocalHostVisibleHeap(
+                device, [&heap_size](size_t, VkMemoryHeap& heap) {
+                    heap_size = (std::max)(heap_size, heap.size);
+                });
+            if (heap_size != 0 && heap_size <= MAX_STREAM_BUFFER_SIZE) {
+                return Common::AlignUp(heap_size * 3 / 4, MAX_ALIGNMENT);
+            }
+        }
         return MAX_STREAM_BUFFER_SIZE;
     }
 
@@ -74,7 +95,8 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = stream_buffer_size,
+        .size = stream_buffer_size +
+                (Settings::CurrentProgramIsSwitch2() ? STREAM_BUFFER_TAIL : VkDeviceSize{0}),
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -243,7 +265,8 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .size = 1ULL << log2_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                 VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, // mesh emulation dispatch and draw arguments
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -257,7 +280,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
-        buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());
+        buffer.SetObjectNameEXT(std::format("Staging Buffer {}", buffer_index).c_str());
     }
     const std::span<u8> mapped_span = buffer.Mapped();
     const VkDeviceAddress buffer_address =

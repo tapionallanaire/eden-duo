@@ -7,6 +7,7 @@
 #pragma once
 #include <utility>
 
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "core/nx2_barrier.h"
 #include "core/file_sys/vfs/vfs_types.h"
 #include "core/hle/service/os/event.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -48,6 +50,7 @@ enum class ResultStatus : u16;
 
 namespace Core::Memory {
 struct CheatEntry;
+struct RuntimeCheatInfo;
 class Memory;
 } // namespace Core::Memory
 
@@ -124,6 +127,10 @@ class RenderdocAPI;
 }
 
 namespace Core {
+
+/// Frames the guest has presented (Switch 2 vi2 present calls); input replay is locked to it.
+extern std::atomic<u64> g_nx2_present_count;
+
 
 class CpuManager;
 class Debugger;
@@ -360,6 +367,8 @@ public:
     void RegisterCheatList(const std::vector<Memory::CheatEntry>& list,
                            const std::array<u8, 0x20>& build_id, u64 main_region_begin,
                            u64 main_region_size);
+    [[nodiscard]] std::vector<Memory::RuntimeCheatInfo> GetRuntimeCheats() const;
+    bool SetCheatEnabled(u32 cheat_id, bool enabled);
 
     void SetFrontendAppletSet(Service::AM::Frontend::FrontendAppletSet&& set);
 

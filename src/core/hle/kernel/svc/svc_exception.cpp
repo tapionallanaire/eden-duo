@@ -7,6 +7,7 @@
 #include <cctype>
 #include "core/core.h"
 #include "core/debugger/debugger.h"
+#include "core/debugger/trace_hooks.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/svc.h"
@@ -41,7 +42,7 @@ void Break(Core::System& system, BreakReason reason, u64 info1, u64 info2) {
             memory.ReadBlock(addr, debug_buffer.data(), sz);
             std::string hexdump;
             for (std::size_t i = 0; i < debug_buffer.size(); i++) {
-                hexdump += fmt::format("{:02X} ", debug_buffer[i]);
+                hexdump += std::format("{:02X} ", debug_buffer[i]);
                 if ((i + 1) % 32 == 0) {
                     hexdump += '\n';
                 }
@@ -108,6 +109,16 @@ void Break(Core::System& system, BreakReason reason, u64 info1, u64 info2) {
         handle_debug_buffer(info1, info2);
 
         system.CurrentPhysicalCore().LogBacktrace(system.Kernel());
+        if (Core::Trace::g_crash_hook.load(std::memory_order_relaxed)) {
+            // The observer backtraces from the thread's saved context, which is only refreshed
+            // here when a debugger is attached.
+            auto* const thread = system.Kernel().GetCurrentEmuThread();
+            system.CurrentPhysicalCore().SaveContext(thread);
+            Core::Trace::NotifyCrash("break",
+                                     std::format("svcBreak reason={:#x} info1={:#x} info2={:#x}",
+                                                 static_cast<u32>(reason), info1, info2),
+                                     thread);
+        }
     }
 
     const bool should_break = !notification_only;

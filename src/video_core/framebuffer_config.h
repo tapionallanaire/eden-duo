@@ -38,6 +38,7 @@ struct FramebufferConfig {
     Common::Rectangle<int> crop_rect{};
     BlendMode blending{};
     u64 layer_id{}; // VI layer id (DSMod aux routing)
+    bool native_tiling{};
     u32 layer_stack_mask{Service::Nvnflinger::DefaultLayerStackMask};
 };
 

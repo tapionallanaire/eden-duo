@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/common_funcs.h"
+#include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/lz4_compression.h"
@@ -24,6 +25,8 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/service/nx2_frame_interval.h"
+#include "core/hle/service/nx2_oot_time.h"
 #include "core/loader/nso.h"
 #include "core/memory.h"
 #include "core/mods/mod_load_plan.h"
@@ -324,6 +327,158 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         image_size += static_cast<u32>(code_size);
     }
 
+    // Star Fox output pacing for the tested build. The engine's explicit-rate path
+    // updates its render delta as well; simulation timing and the guest clock stay unchanged.
+    if (name == "main" && process.GetProgramId() == 0x0400E88025B1A000ULL) {
+        constexpr u32 Fps = 60;
+        constexpr size_t Offset = 0xB444ADC;
+        constexpr std::array<u32, 3> Original{0xBD4223E1, 0x1E202028, 0x540000ED};
+        constexpr std::array<u8, 20> BuildId{
+            0xA7, 0x73, 0x0D, 0x0F, 0x74, 0xD1, 0x68, 0xD9, 0x04, 0x22,
+            0x35, 0x4C, 0x83, 0x17, 0xF7, 0x6F, 0xF7, 0x8A, 0xD9, 0x38};
+        const auto& text = nso_header.segments[0];
+        if (std::equal(BuildId.begin(), BuildId.end(), nso_header.build_id.begin()) &&
+            Offset >= text.location && Offset + sizeof(Original) <= u64{text.location} + text.size &&
+            module_start + Offset + sizeof(Original) <= codeset.memory.size() &&
+            std::memcmp(codeset.memory.data() + module_start + Offset, Original.data(),
+                        sizeof(Original)) == 0) {
+            constexpr std::array<u32, 3> replacement{
+                0x52800019U | (Fps << 5), // mov w25, #60
+                0x1E2E1000,              // fmov s0, #1.0
+                0x14000035};             // b main+0xB444BB8 (explicit output-rate path)
+            std::memcpy(codeset.memory.data() + module_start + Offset, replacement.data(),
+                        sizeof(replacement));
+            LOG_INFO(Loader, "Star Fox output interval: {} FPS; guest clock unchanged", Fps);
+        } else {
+            LOG_WARNING(Loader,
+                        "Star Fox output patch skipped: unsupported build or instructions");
+        }
+    }
+
+    // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
+    // 30 FPS mode, or let it choose dynamically using the whole frame time (CPU + GPU wait).
+    // Match the instruction sequence instead of relying on a title-version-specific address.
+    const bool mkw_dynamic = Settings::values.mkw_dynamic_fps.GetValue();
+    bool mkw_dynamic_fps_patch_applied = false;
+    if ((mkw_dynamic || Settings::values.mkw_30fps.GetValue()) && name == "main" &&
+        process.GetProgramId() == Settings::MarioKartWorldProgramId) {
+        constexpr u32 ModeLoadInsn = 0xB9421268; // ldr w8, [x19, #0x210]
+        const u32 mode = mkw_dynamic ? 0U : 2U;
+        const u32 mode_instruction = 0x52800008U | (mode << 5); // mov w8, #mode
+        const auto& text = nso_header.segments[0];
+        u8* const code = codeset.memory.data() + module_start + text.location;
+        const size_t count = text.size / sizeof(u32);
+        const auto word = [code](size_t index) {
+            u32 value;
+            std::memcpy(&value, code + index * sizeof(u32), sizeof(value));
+            return value;
+        };
+        size_t mode_site = 0;
+        size_t mode_matches = 0;
+        for (size_t i = 2; i + 8 < count; ++i) {
+            if (word(i) != ModeLoadInsn || word(i - 2) != 0x6B01013F || // cmp w9, w1
+                (word(i - 1) & 0xFF00001F) != 0x54000001 ||             // b.ne
+                (word(i + 1) & 0xFF00001F) != 0x35000008) {             // cbnz w8
+                continue;
+            }
+            for (size_t j = i + 2; j < i + 8; ++j) {
+                if (word(j) == 0x52A84E08) { // mov w8, #60.0f
+                    mode_site = i;
+                    ++mode_matches;
+                    break;
+                }
+            }
+        }
+
+        size_t frame_time_site = 0;
+        size_t frame_time_matches = 0;
+        if (mode_matches == 1 && mkw_dynamic) {
+            for (size_t i = mode_site + 1; i < mode_site + 32 && i < count; ++i) {
+                if ((word(i) & 0xFFFFFFE0) == 0xF9409660) { // ldr xN, [x19, #0x128]
+                    frame_time_site = i;
+                    ++frame_time_matches;
+                }
+            }
+        }
+
+        if (mode_matches == 1 && (!mkw_dynamic || frame_time_matches == 1)) {
+            std::memcpy(code + mode_site * sizeof(u32), &mode_instruction,
+                        sizeof(mode_instruction));
+            if (mkw_dynamic) {
+                const u32 whole_frame_time = 0xF9407660 | (word(frame_time_site) & 0x1F);
+                std::memcpy(code + frame_time_site * sizeof(u32), &whole_frame_time,
+                            sizeof(whole_frame_time));
+                mkw_dynamic_fps_patch_applied = true;
+            }
+            LOG_INFO(Loader, "Mario Kart World: {} FPS mode enabled (main+{:#x})",
+                     mkw_dynamic ? "dynamic" : "30",
+                     text.location + mode_site * sizeof(u32));
+        } else {
+            LOG_WARNING(Loader,
+                        "Mario Kart World FPS patch skipped (mode matches {}, frame-time matches {})",
+                        mode_matches, frame_time_matches);
+        }
+    }
+
+    // Hyrule Warriors' frame interval (nx2_frame_interval.h). Its only copy into the global is
+    //   adrp x9, got; ...; ldr x9, [x9, #got]; ...; adrp x8, global; add x8, x8, #global;
+    //   ldr w19, [x9]; str w19, [x8]
+    // Nothing is patched; the present path writes both words with hyrule_dynamic_fps or
+    // hyrule_30fps.
+    u64 frame_interval_offset = 0;
+    u64 frame_interval_source_offset = 0;
+    if (name == "main" &&
+        process.GetProgramId() == Service::Nx2FrameInterval::HyruleWarriorsProgramId) {
+        const auto& text = nso_header.segments[0];
+        const u8* const image = codeset.memory.data() + module_start;
+        const u64 image_end = codeset.memory.size() - module_start;
+        const auto word = [image](u64 offset) {
+            u32 value;
+            std::memcpy(&value, image + offset, sizeof(value));
+            return value;
+        };
+        const auto fits = [image_end](u64 offset, u64 size) {
+            return image_end >= size && offset <= image_end - size;
+        };
+        const auto adrp_page =[](u64 pc, u32 insn) {
+            s64 pages = static_cast<s64>((((insn >> 5) & 0x7FFFF) << 2) | ((insn >> 29) & 3));
+            if (pages & (s64{1} << 20)) {
+                pages -= s64{1} << 21;
+            }
+            return (pc & ~u64{0xFFF}) + static_cast<u64>(pages * 0x1000);
+        };
+        size_t matches = 0;
+        for (u64 pc = text.location + 32; pc + 8 <= text.location + text.size; pc += 4) {
+            if (word(pc) != 0xB9400133 || word(pc + 4) != 0xB9000113) { // ldr w19, [x9]; str w19, [x8]
+                continue;
+            }
+            const u32 adrp_global = word(pc - 8);
+            const u32 add_global = word(pc - 4);
+            const u32 adrp_got = word(pc - 32);
+            const u32 ldr_got = word(pc - 24);
+            if ((adrp_global & 0x9F00001F) != 0x90000008 || (add_global & 0xFFC003FF) != 0x91000108 ||
+                (adrp_got & 0x9F00001F) != 0x90000009 || (ldr_got & 0xFFC003FF) != 0xF9400129) {
+                continue;
+            }
+            ++matches;
+            frame_interval_offset = adrp_page(pc - 8, adrp_global) + ((add_global >> 10) & 0xFFF);
+            const u64 got = adrp_page(pc - 32, adrp_got) + ((ldr_got >> 10) & 0xFFF) * 8;
+            frame_interval_source_offset = 0;
+            if (fits(got, sizeof(u64))) {
+                // Not relocated yet: the entry still holds the module-relative address.
+                std::memcpy(&frame_interval_source_offset, image + got, sizeof(u64));
+            }
+        }
+        if (matches == 1 && fits(frame_interval_offset, sizeof(u32)) &&
+            frame_interval_source_offset != 0 && fits(frame_interval_source_offset, sizeof(u32))) {
+            LOG_INFO(Loader, "Hyrule Warriors frame interval at main+{:#x} (from main+{:#x})",
+                     frame_interval_offset, frame_interval_source_offset);
+        } else {
+            LOG_WARNING(Loader, "Hyrule Warriors frame interval not found ({} matches)", matches);
+            frame_interval_offset = frame_interval_source_offset = 0;
+        }
+    }
+
 #ifdef HAS_NCE
     // If we are computing the process code layout and using nce backend, patch.
     const auto& code = codeset.CodeSegment();
@@ -419,7 +574,25 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // Load codeset for current process
+    LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
+    if (name == "main" && process.GetProgramId() == Service::Nx2OotTime::ProgramId) {
+        const size_t hook = module_start + Service::Nx2OotTime::HookOffset;
+        u32 word = 0;
+        if (codeset.memory.size() >= hook + sizeof(word)) {
+            std::memcpy(&word, codeset.memory.data() + hook, sizeof(word));
+        }
+        process.SetOotDeltaAddress(word == Service::Nx2OotTime::HookInstruction
+                                       ? load_base + module_start + Service::Nx2OotTime::DeltaOffset
+                                       : 0);
+    }
+    if (frame_interval_offset != 0) {
+        process.SetFrameIntervalAddresses(load_base + module_start + frame_interval_offset,
+                                          load_base + module_start + frame_interval_source_offset);
+    }
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
+    if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
+        process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);
+    }
     return load_base + image_size;
 }
 

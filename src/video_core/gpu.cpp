@@ -11,7 +11,9 @@
 #include <condition_variable>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -22,6 +24,7 @@
 #include "core/device_memory_manager.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
+#include "core/gpu_dirty_memory_manager.h"
 #include "core/hle/service/nvdrv/nvdata.h"
 #include "core/perf_stats.h"
 #include "video_core/cdma_pusher.h"
@@ -34,28 +37,20 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/composite_completion.h"
+#include "video_core/dsmod/texture_readback.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/gpu_thread.h"
+#include "video_core/gpu_timestamp.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
 namespace Tegra {
-
-namespace {
-constexpr u64 GpuClockMultiplier(Settings::GpuClock clock) {
-    switch (clock) {
-    case Settings::GpuClock::Boost:
-        return 256;
-    case Settings::GpuClock::Overclock:
-        return 512;
-    default:
-        return 1;
-    }
-}
-} // Anonymous namespace
 
 struct GPU::Impl {
     explicit Impl(Core::System& system_, bool is_async_, bool use_nvdec_)
@@ -117,10 +112,22 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        std::function<void(PAddr, size_t)> callback_writes([this](PAddr address, size_t size) {
-            renderer->ReadRasterizer()->OnCacheInvalidation(address, size);
-        });
+        // Runs at every fence (~17k/s), on more than one thread: keep each thread's buffer.
+        thread_local std::vector<std::pair<DAddr, u64>> thread_writes;
+        auto& writes = thread_writes;
+        writes.clear();
+        std::function<void(PAddr, size_t)> callback_writes(
+            [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
         system.GatherGPUDirtyMemory(callback_writes);
+        if (!writes.empty()) {
+            renderer->ReadRasterizer()->OnCacheInvalidations(writes);
+        }
+    }
+
+    void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
+        for (auto& manager : system.GetGPUDirtyMemoryManager()) {
+            manager.ForEachPending(callback);
+        }
     }
 
     /// Signal the ending of command list.
@@ -135,6 +142,7 @@ struct GPU::Impl {
         std::unique_lock lck{sync_request_mutex};
         const u64 fence = ++last_sync_fence;
         sync_requests.emplace_back(std::forward<Func>(action));
+        has_sync_requests.store(true, std::memory_order_release);
         return fence;
     }
 
@@ -168,8 +176,16 @@ struct GPU::Impl {
 
     /// Tick pending requests within the GPU.
     void TickWork() {
+        // Nx2Perf draw_preamble: the flag is set under the mutex with every enqueue and cleared
+        // under it only once the list is empty, so an empty list skips the mutex.
+        static const bool fast_check =
+            VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DrawPreamble);
+        if (fast_check && !has_sync_requests.load(std::memory_order_acquire)) {
+            return;
+        }
         std::unique_lock lck{sync_request_mutex};
         while (!sync_requests.empty()) {
+            DEBUG_ASSERT(has_sync_requests.load(std::memory_order_relaxed));
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
             sync_request_mutex.unlock();
@@ -178,14 +194,18 @@ struct GPU::Impl {
             sync_request_mutex.lock();
             sync_request_cv.notify_all();
         }
+        has_sync_requests.store(false, std::memory_order_relaxed);
     }
 
     [[nodiscard]] u64 GetTicks() const {
-        const u64 gpu_tick = system.CoreTiming().GetGPUTicks();
-        return gpu_tick / GpuClockMultiplier(Settings::values.gpu_clock.GetValue());
+        return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
+                                Settings::values.gpu_clock.GetValue(),
+                                present_ns.load(std::memory_order_relaxed));
     }
 
     void RendererFrameEndNotify() {
+        present_ns.store(static_cast<u64>(system.CoreTiming().GetGlobalTimeNs().count()),
+                         std::memory_order_relaxed);
         system.GetPerfStats().EndGameFrame();
     }
 
@@ -224,6 +244,40 @@ struct GPU::Impl {
         gpu_thread.SubmitList(channel, std::move(entries), is_async);
     }
 
+    // Queued without waiting, also with synchronous GPU: callers hold nx2:gpu locks that the GPU
+    // back thread takes while running the map (flushes write back into sparse regions).
+    void RunInOrder(std::function<void()>&& func) {
+        gpu_thread.Run(std::move(func), true);
+    }
+
+    void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+        u64 id;
+        {
+            std::scoped_lock lock{pending_maps_mutex};
+            id = ++last_pending_map;
+            pending_maps.push_back({id, gpu_addr, gpu_addr + size});
+            pending_map_count.store(pending_maps.size(), std::memory_order_release);
+        }
+        gpu_thread.Run(
+            [this, id, func = std::move(func)] {
+                func();
+                std::scoped_lock lock{pending_maps_mutex};
+                std::erase_if(pending_maps, [id](const PendingMap& map) { return map.id == id; });
+                pending_map_count.store(pending_maps.size(), std::memory_order_release);
+            },
+            true, true); // not waited for, as in RunInOrder
+    }
+
+    bool IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+        if (pending_map_count.load(std::memory_order_acquire) == 0 || size == 0) {
+            return false;
+        }
+        std::scoped_lock lock{pending_maps_mutex};
+        return std::ranges::any_of(pending_maps, [&](const PendingMap& map) {
+            return gpu_addr < map.end && map.begin < gpu_addr + size;
+        });
+    }
+
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size) {
         gpu_thread.FlushRegion(addr, size, is_async);
@@ -235,7 +289,16 @@ struct GPU::Impl {
             return raster_area;
         }
         raster_area.preemtive = true;
-        const u64 fence = RequestSyncOperation([this, &raster_area]() {
+        // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
+        // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
+        if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
+            LOG_INFO(HW_GPU, "CPU read of GPU-written memory [{:#x}, {:#x}) ({} so far)",
+                     raster_area.start_address, raster_area.end_address,
+                     reads.load(std::memory_order_relaxed));
+        }
+        const u64 fence = RequestSyncOperation([this, raster_area]() {
+            // Apply collected guest writes before downloading GPU data over guest memory.
+            InvalidateGPUCache();
             renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, raster_area.end_address - raster_area.start_address);
         });
         gpu_thread.TickGPU(is_async);
@@ -244,6 +307,30 @@ struct GPU::Impl {
     }
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
+    /// How long guest threads wait for the GPU thread in fault handling, reported every 5 s.
+    static void NoteFaultSync(std::chrono::steady_clock::duration waited, bool flushed) {
+        static std::atomic<u64> count{}, flushes{}, total_us{}, max_us{};
+        static std::atomic<s64> last_report{};
+        const u64 us = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(waited).count());
+        ++count;
+        flushes += flushed ? 1 : 0;
+        total_us += us;
+        u64 seen = max_us.load();
+        while (us > seen && !max_us.compare_exchange_weak(seen, us)) {
+        }
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        s64 last = last_report.load();
+        if (now - last >= 5 && last_report.compare_exchange_strong(last, now)) {
+            LOG_INFO(HW_GPU,
+                     "Fault-time GPU syncs in the last 5 s: {} ({} flushed), {} ms waited, longest {} ms",
+                     count.exchange(0), flushes.exchange(0), total_us.exchange(0) / 1000,
+                     max_us.exchange(0) / 1000);
+        }
+    }
+
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
         // NCE faults invalidate whole pages, including GPU-written bytes the CPU will not replace.
         if (preserve_gpu_writes) {
@@ -284,8 +371,10 @@ struct GPU::Impl {
                     rasterizer->OnCacheInvalidation(addr, size);
                     flushed = true;
                 });
+                const auto wait_start = std::chrono::steady_clock::now();
                 gpu_thread.TickGPU(is_async);
                 WaitForSyncOperation(fence);
+                NoteFaultSync(std::chrono::steady_clock::now() - wait_start, flushed);
                 if (flushed) {
                     return;
                 }
@@ -313,6 +402,10 @@ struct GPU::Impl {
             WaitForSyncOperation(fence);
         }
         return rasterizer->OnCPUWrite(addr, size);
+    }
+
+    bool MustFlushRegion(DAddr addr, u64 size) {
+        return renderer->ReadRasterizer()->MustFlushRegion(addr, size);
     }
 
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
@@ -399,6 +492,27 @@ struct GPU::Impl {
                !shutting_down.load(std::memory_order_relaxed);
     }
 
+    bool DSModTextureReadbackAvailable() const {
+        return is_async && renderer && !shutting_down.load(std::memory_order_relaxed) &&
+               renderer->ReadRasterizer()->DSModSupportsTextureReadback();
+    }
+
+    bool DSModRequestTextureReadback(const VideoCore::DSMod::ReadbackRequest& request,
+                                     VideoCore::DSMod::ReadbackCallback&& callback) {
+        if (!DSModTextureReadbackAvailable()) {
+            return false;
+        }
+        (void)RequestSyncOperation([this, request, callback = std::move(callback)]() mutable {
+            if (!renderer->ReadRasterizer()->DSModReadbackTexture(request, callback)) {
+                VideoCore::DSMod::ReadbackResult result;
+                result.status = VideoCore::DSMod::ReadbackStatus::Unsupported;
+                callback(std::move(result));
+            }
+        });
+        gpu_thread.TickGPU(is_async);
+        return true;
+    }
+
     std::vector<u8> GetAppletCaptureBuffer() {
         std::vector<u8> out;
 
@@ -443,8 +557,21 @@ struct GPU::Impl {
     std::condition_variable composite_cv;
 
     std::list<std::function<void()>> sync_requests;
+    std::atomic<bool> has_sync_requests{};
     std::atomic<u64> current_sync_fence{};
+    std::atomic<u64> present_ns{};
     u64 last_sync_fence{};
+
+    // Maps queued by MapInOrder and not run yet, by the GPU addresses they change.
+    struct PendingMap {
+        u64 id;
+        GPUVAddr begin;
+        GPUVAddr end;
+    };
+    mutable std::mutex pending_maps_mutex;
+    std::vector<PendingMap> pending_maps;
+    u64 last_pending_map{};
+    std::atomic<size_t> pending_map_count{};
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
 
@@ -501,6 +628,10 @@ void GPU::InvalidateGPUCache() {
     impl->InvalidateGPUCache();
 }
 
+void GPU::ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
+    impl->ForEachPendingCpuWrite(callback);
+}
+
 void GPU::OnCommandListEnd() {
     impl->OnCommandListEnd();
 }
@@ -509,6 +640,10 @@ u64 GPU::RequestFlush(DAddr addr, std::size_t size) {
     return impl->RequestSyncOperation([this, addr, size]() {
         impl->renderer->ReadRasterizer()->FlushRegion(addr, size);
     });
+}
+
+u64 GPU::RunOnGpuThread(std::function<void()>&& action) {
+    return impl->RequestSyncOperation(std::move(action));
 }
 
 u64 GPU::CurrentSyncRequestFence() const {
@@ -565,6 +700,16 @@ VideoCore::DSMod::AuxRouting& GPU::DSModAux() {
     return impl->dsmod_aux;
 }
 
+bool GPU::DSModTextureReadbackAvailable() const {
+    return impl->DSModTextureReadbackAvailable();
+}
+
+bool GPU::DSModRequestTextureReadback(
+    const VideoCore::DSMod::ReadbackRequest& request,
+    std::function<void(VideoCore::DSMod::ReadbackResult&&)> callback) {
+    return impl->DSModRequestTextureReadback(request, std::move(callback));
+}
+
 const VideoCore::RendererBase& GPU::Renderer() const {
     return *impl->renderer;
 }
@@ -600,6 +745,10 @@ u64 GPU::GetTicks() const {
 
 bool GPU::IsAsync() const {
     return impl->is_async;
+}
+
+bool GPU::HasSuspendedChannels() const {
+    return impl->scheduler.HasPendingChannelsAnyThread();
 }
 
 bool GPU::UseNvdec() const {
@@ -646,12 +795,32 @@ void GPU::FlushRegion(DAddr addr, u64 size) {
     impl->FlushRegion(addr, size);
 }
 
+void GPU::RunInOrder(std::function<void()>&& func) {
+    impl->RunInOrder(std::move(func));
+}
+
+void GPU::MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func) {
+    impl->MapInOrder(gpu_addr, size, std::move(func));
+}
+
+bool GPU::IsMapPending(GPUVAddr gpu_addr, u64 size) const {
+    return impl->IsMapPending(gpu_addr, size);
+}
+
 void GPU::InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes) {
     impl->InvalidateRegion(addr, size, preserve_gpu_writes);
 }
 
+bool GPU::InvalidateRegionWithoutSync(DAddr addr, u64 size) {
+    return impl->renderer->ReadRasterizer()->OnCacheInvalidationIfNotGpuModified(addr, size);
+}
+
 bool GPU::OnCPUWrite(DAddr addr, u64 size) {
     return impl->OnCPUWrite(addr, size);
+}
+
+bool GPU::MustFlushRegion(DAddr addr, u64 size) {
+    return impl->MustFlushRegion(addr, size);
 }
 
 void GPU::FlushAndInvalidateRegion(DAddr addr, u64 size) {

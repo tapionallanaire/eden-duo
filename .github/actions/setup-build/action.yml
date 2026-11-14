@@ -1,0 +1,92 @@
+name: Setup build
+description: >-
+  Writes the GIT-* files GetSCMRev reads (so the build embeds the version this run was given instead
+  of asking git), and restores the CPM and compiler-object caches. Run after actions/checkout.
+
+inputs:
+  platform:
+    description: Platform name, used in the compiler cache key (for example linux-x86_64-pgo)
+    required: true
+  sha:
+    description: Full commit SHA being built
+    required: true
+  refspec:
+    description: Value for GIT-REFSPEC (the version label of a daily or branch build)
+    required: true
+  tag:
+    description: Value for GIT-TAG
+    required: true
+  release:
+    description: "true for stable and rc builds: writes GIT-RELEASE, which makes the build a release build"
+    required: false
+    default: "false"
+  save-cache:
+    description: Save the caches at the end of the job (they are always restored)
+    required: false
+    default: ${{ github.event_name == 'schedule' || github.ref == 'refs/heads/nx2' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Write SCM files
+      shell: bash
+      env:
+        SCM_SHA: ${{ inputs.sha }}
+        SCM_REFSPEC: ${{ inputs.refspec }}
+        SCM_TAG: ${{ inputs.tag }}
+        SCM_RELEASE: ${{ inputs.release }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$SCM_SHA" > GIT-COMMIT
+        printf '%s\n' "$SCM_REFSPEC" > GIT-REFSPEC
+        printf '%s\n' "$SCM_TAG" > GIT-TAG
+        if [ "$SCM_RELEASE" = true ]; then
+          printf '%s\n' "$SCM_TAG" > GIT-RELEASE
+        else
+          rm -f GIT-RELEASE
+        fi
+        echo "GetSCMRev inputs:"
+        head -v GIT-COMMIT GIT-REFSPEC GIT-TAG GIT-RELEASE 2> /dev/null || true
+
+    - name: Cache CPM downloads (restore and save)
+      if: inputs.save-cache == 'true'
+      uses: actions/cache@v6
+      with:
+        path: .cache/cpm
+        key: cpm-v1-${{ runner.os }}-${{ hashFiles('**/cpmfile.json') }}
+        restore-keys: |
+          cpm-v1-${{ runner.os }}-
+
+    - name: Cache CPM downloads (restore only)
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: .cache/cpm
+        key: cpm-v1-${{ runner.os }}-${{ hashFiles('**/cpmfile.json') }}
+        restore-keys: |
+          cpm-v1-${{ runner.os }}-
+
+    # --- Compiler objects (ccache or sccache, whichever the job uses) ---
+    # The "--" after the platform stops linux-x86_64 from matching linux-x86_64-pgo.
+    # The sha makes every saving run write a fresh entry; restore-keys seeds it from the newest.
+    - name: Cache compiler objects (restore and save)
+      if: inputs.save-cache == 'true'
+      uses: actions/cache@v6
+      with:
+        path: |
+          .ccache
+          .sccache
+        key: objects-v1-${{ inputs.platform }}--${{ inputs.sha }}
+        restore-keys: |
+          objects-v1-${{ inputs.platform }}--
+
+    - name: Cache compiler objects (restore only)
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          .ccache
+          .sccache
+        key: objects-v1-${{ inputs.platform }}--${{ inputs.sha }}
+        restore-keys: |
+          objects-v1-${{ inputs.platform }}--

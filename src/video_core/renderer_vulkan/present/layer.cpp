@@ -15,6 +15,9 @@
 #include "common/settings.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/renderer_vulkan/present/fsr.h"
+#ifndef __ANDROID__ // FSR 3.1 is desktop only
+#include "video_core/renderer_vulkan/present/fsr3.h"
+#endif
 #include "video_core/renderer_vulkan/present/sgsr.h"
 #include "video_core/renderer_vulkan/present/fxaa.h"
 #include "video_core/renderer_vulkan/present/layer.h"
@@ -51,6 +54,8 @@ VkFormat GetFormat(const Tegra::FramebufferConfig& framebuffer) {
         return VK_FORMAT_R5G6B5_UNORM_PACK16;
     case Service::android::PixelFormat::Bgra8888:
         return VK_FORMAT_B8G8R8A8_UNORM;
+    case Service::android::PixelFormat::Rgba1010102:
+        return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     default:
         UNIMPLEMENTED_MSG("Unknown framebuffer pixel format: {}",
                           static_cast<u32>(framebuffer.pixel_format));
@@ -76,6 +81,11 @@ Layer::Layer(const Device& device, MemoryAllocator& memory_allocator_, Scheduler
     } else if (filters.get_scaling_filter() == Settings::ScalingFilter::SgsrEdge) {
         sr_filter.emplace<SGSR>(device, memory_allocator, image_count, output_size, true);
     }
+#ifndef __ANDROID__
+    else if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr3) {
+        sr_filter.emplace<FSR3>(device, memory_allocator, image_count, output_size);
+    }
+#endif
 }
 
 Layer::~Layer() {
@@ -147,6 +157,13 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
             crop_rect = {0, 0, 1, 1};
         }
     }
+#ifndef __ANDROID__
+    else if (auto* fsr3 = std::get_if<FSR3>(&sr_filter)) {
+        source_image_view = fsr3->Draw(device, scheduler, image_index, source_image,
+                                       source_image_view, render_extent, crop_rect);
+        crop_rect = {0, 0, 1, 1};
+    }
+#endif
 
     SetMatrixData(device, *out_push_constants, layout);
     SetVertexData(device, *out_push_constants, layout, crop_rect);
@@ -357,7 +374,7 @@ void Layer::UpdateRawImage(const Tegra::FramebufferConfig& framebuffer, size_t i
     if (host_ptr) {
         Tegra::Texture::UnswizzleTexture(
             mapped_span.subspan(image_offset, linear_size), std::span(host_ptr, tiled_size),
-            bytes_per_pixel, framebuffer.width, framebuffer.height, 1, block_height_log2, 0);
+            bytes_per_pixel, framebuffer.width, framebuffer.height, 1, block_height_log2, 0, 1, framebuffer.native_tiling);
         buffer.Flush();  // Ensure host writes are visible before the GPU copy.
     }
 

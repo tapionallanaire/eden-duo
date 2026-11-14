@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <array>
 #include <span>
+#include <string_view>
 #include "common/container/unordered_map.h"
 #include <vector>
 #include <oaknut/code_block.hpp>
@@ -12,6 +14,7 @@
 #include "common/logging.h"
 #include "common/common_types.h"
 #include "common/settings.h"
+#include "core/arm/nce/pac_identity.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_typed_address.h"
 #include <utility>
@@ -64,6 +67,11 @@ public:
     bool PatchText(std::span<const u8> program_image, const Kernel::CodeSet::Segment& code);
     bool RelocateAndCopy(Common::ProcessAddress load_base, const Kernel::CodeSet::Segment& code, std::vector<u8>& program_image, EntryTrampolines* out_trampolines);
     std::span<const u32> RelocateRuntimeTls(s64 patch_offset, std::vector<InstructionPatch>& out_patches);
+    /// Instructions of a run-time module (Patcher(text)) replaced in place: pointer authentication
+    /// as the identity (pac_identity.h). Empty unless the program is a Switch 2 one.
+    std::span<const InstructionPatch> RuntimeReplacements() const {
+        return modules.front().m_replacements;
+    }
     size_t GetSectionSize() const noexcept;
     size_t GetPreSectionSize() const noexcept;
 
@@ -89,6 +97,20 @@ private:
     void WriteMsrHandler(ModuleDestLabel module_dest, oaknut::XReg src_reg, oaknut::VectorCodeGenerator& code);
     void WriteCntfrqHandler(ModuleDestLabel module_dest, oaknut::XReg dest_reg, oaknut::VectorCodeGenerator& code);
     void WriteCntpctHandler(ModuleDestLabel module_dest, oaknut::XReg dest_reg, oaknut::VectorCodeGenerator& code);
+    /// The instructions replacing a PACGA or LDRAA/LDRAB that one instruction cannot replace.
+    void WritePacTrampoline(ModuleDestLabel module_dest, u32 inst, oaknut::VectorCodeGenerator& code);
+    /// Logs what was rewritten in the module just scanned.
+    void LogPacIdentity(size_t text_size) const;
+    /// Records one instruction of a module for the pointer authentication rewrite: an in-place
+    /// replacement, or true when the caller has to write a trampoline for it.
+    bool NotePacInstruction(uintptr_t offset, u32 inst);
+
+public:
+    /// Checks patched text: logs, as an error, every pointer authentication instruction that
+    /// would still run with the host's keys. Returns how many there are.
+    static size_t VerifyPacIdentity(std::span<const u32> text_words, std::string_view what);
+
+private:
 
     // Convenience wrappers using default code generator
     void WriteLoadContext() { WriteLoadContext(c); }
@@ -152,6 +174,10 @@ private:
         std::vector<Relocation> m_write_module_pc_relocations{};
         std::vector<Relocation> m_write_module_pc_relocations_pre{};
         std::vector<ModuleTextAddress> m_exclusives{};
+        /// Pointer authentication instructions replaced in place (offset from the text start).
+        std::vector<InstructionPatch> m_replacements{};
+        /// Instructions seen per PacForm.
+        std::array<u32, NumPacForms> m_pac_counts{};
     };
 
     oaknut::VectorCodeGenerator c;
@@ -161,6 +187,10 @@ private:
     oaknut::Label m_save_context_pre{};
     oaknut::Label m_load_context_pre{};
     PatchMode mode{PatchMode::None};
+    /// Pointer authentication is rewritten to the identity: Switch 2 programs only.
+    bool pac_identity{};
+    /// The host CPU has pointer authentication: XPACI/XPACD run natively.
+    bool host_has_pac{};
     size_t total_program_size{};
     size_t m_relocate_module_index{};
     std::vector<ModulePatch> modules;

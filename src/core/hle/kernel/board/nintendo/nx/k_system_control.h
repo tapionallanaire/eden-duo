@@ -21,6 +21,13 @@ public:
     // This can be overridden as needed.
     static constexpr size_t SecureAppletMemorySize = 4 * 1024 * 1024; // 4_MB
 
+    // Extra DRAM on the 12 GB layout for memory the Switch 2 graphics server keeps itself (nx2:gpu
+    // 214 GPU-only regions). It sits in the non-secure system pool, outside the application pool.
+    // GPU-only regions get memory only where guest memory is written and sparse regions take
+    // their tiles from the game's own memory (216), so much less of it is used (title 1: ~1.1 GiB,
+    // all of it at boot); all of it counts against the host's commit limit from boot.
+    static constexpr size_t Nx2GraphicsServerMemorySize = 2ULL * 1024 * 1024 * 1024; // 2_GiB
+
 public:
     class Init {
     public:

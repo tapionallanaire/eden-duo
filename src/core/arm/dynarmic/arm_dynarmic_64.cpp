@@ -4,6 +4,14 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
+#include "common/cpu_features.h"
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
@@ -12,6 +20,8 @@
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
+#include "dynarmic/interface/jit_stats.h"
+#include "video_core/nx2_spikes.h"
 
 namespace Core {
 
@@ -25,13 +35,24 @@ DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess
 
 u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
     CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read);
+    u64 value{};
     switch (size) {
-    case sizeof(u64): return m_memory.Read64(vaddr);
-    case sizeof(u32): return m_memory.Read32(vaddr);
-    case sizeof(u16): return m_memory.Read16(vaddr);
-    case sizeof(u8): return m_memory.Read8(vaddr);
+    case sizeof(u64): value = m_memory.Read64(vaddr); break;
+    case sizeof(u32): value = m_memory.Read32(vaddr); break;
+    case sizeof(u16): value = m_memory.Read16(vaddr); break;
+    case sizeof(u8): value = m_memory.Read8(vaddr); break;
     default: UNREACHABLE();
     }
+    // With memory aborts ignored the guest keeps running on zeros: say where it read from.
+    if (auto& unmapped = Core::Memory::UnmappedReadFlag(); unmapped != 0) {
+        unmapped = 0;
+        static std::atomic<u32> logged{};
+        if (logged.fetch_add(1) < 32) {
+            LOG_ERROR(Core_ARM, "Unmapped read {:#x} ({} bytes) at pc {:#x} lr {:#x} sp {:#x}", vaddr, size,
+                      m_parent.m_jit->GetPC(), m_parent.m_jit->GetRegister(30), m_parent.m_jit->GetSP());
+        }
+    }
+    return value;
 }
 Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
     CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Read);
@@ -157,7 +178,33 @@ u64 DynarmicCallbacks64::GetTicksRemaining() {
 }
 
 u64 DynarmicCallbacks64::GetCNTPCT() {
-    return m_parent.m_system.CoreTiming().GetClockTicks();
+    const u64 ticks = m_parent.m_system.CoreTiming().GetClockTicks();
+    // Guest code that waits by polling the counter (title 1's main thread reads it ~17 million
+    // times a second while waiting for the GPU) keeps a host core busy at full speed, and the
+    // GPU thread is often on the other half of that SMT core. Two reads within ~1.7 us of each
+    // other are such a loop: pause, which hands the core's resources to the sibling thread for a
+    // moment. The guest sees the same counter. EDEN_NX2_CNTPCT_PAUSE=0 turns it off.
+    static const bool pause_spins = [] {
+        if (const char* value = std::getenv("EDEN_NX2_CNTPCT_PAUSE")) {
+            return value[0] != '0';
+        }
+        if (const auto physical_cores = Common::GetProcessorCount();
+            physical_cores &&
+            static_cast<unsigned int>(*physical_cores) >= std::thread::hardware_concurrency()) {
+            return false;
+        }
+        return true;
+    }();
+    if (pause_spins && ticks - m_last_cntpct < m_spin_ticks) {
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+        _mm_pause();
+#elif defined(__aarch64__)
+        asm volatile("yield");
+#endif
+    }
+    m_last_cntpct = ticks;
+    return ticks;
 }
 
 bool DynarmicCallbacks64::CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWatchpointType type) {
@@ -237,7 +284,9 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     config.tpidr_el0 = &m_cb->m_tpidr_el0;
     config.dczid_el0 = 4;
     config.ctr_el0 = 0x8444c004;
-    config.cntfrq_el0 = Hardware::CNTFREQ;
+    // 31.25 MHz for Switch 2 titles (Common::WallClock::SetGuestCNTFRQ, set at boot).
+    config.cntfrq_el0 = static_cast<u32>(Common::g_wall_clock.GetGuestCNTFRQ());
+    m_cb->m_spin_ticks = config.cntfrq_el0 / 600'000;
 
     // Unpredictable instructions
     config.define_unpredictable_behaviour = true;
@@ -245,6 +294,21 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     // Timing
     config.wall_clock_cntpct = m_uses_wall_clock;
     config.enable_cycle_counting = !m_uses_wall_clock;
+#if defined(ARCHITECTURE_x86_64)
+    if (m_uses_wall_clock && Common::g_wall_clock.IsNative() &&
+        Settings::values.cpu_clock.GetValue() == Settings::CpuClock::Normal &&
+        !Settings::values.sync_core_speed.GetValue()) {
+        static const bool allow_inline = [] {
+            const char* value = std::getenv("EDEN_NX2_INLINE_CNTPCT");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (allow_inline) {
+            config.inline_cntpct_tsc_base = Common::g_wall_clock.base_rdtsc;
+            config.inline_cntpct_tsc_factor =
+                Common::g_wall_clock.cntpct_rdtsc_factor.load(std::memory_order_relaxed);
+        }
+    }
+#endif
 
     // Code cache size
 #if defined(ARCHITECTURE_arm64) || defined(__sun__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__OpenBSD__)
@@ -312,11 +376,18 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
             config.fastmem_pointer = std::nullopt;
             config.fastmem_exclusive_access = false;
         }
+#ifdef ARCHITECTURE_x86_64
+        if (Settings::values.cpuopt_unsafe_unfuse_fma && !Common::g_cpu_caps.fma) {
+            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
+        }
+#else
         if (Settings::values.cpuopt_unsafe_unfuse_fma) {
             config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
         }
+#endif
         if (Settings::values.cpuopt_unsafe_reduce_fp_error) {
-            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP;
+            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP |
+                                    Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue;
         }
         if (Settings::values.cpuopt_unsafe_inaccurate_nan) {
             config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN;
@@ -327,11 +398,19 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
         if (Settings::values.cpuopt_unsafe_ignore_global_monitor) {
             config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor;
         }
+        config.optimizations |= Dynarmic::OptimizationFlag::CodeSpeed |
+                                Dynarmic::OptimizationFlag::DisableVerification;
         break;
     // Safe optimisations
     case Settings::CpuAccuracy::Auto:
         config.unsafe_optimizations = true;
+#ifdef ARCHITECTURE_x86_64
+        if (!Common::g_cpu_caps.fma) {
+            config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
+        }
+#else
         config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
+#endif
         config.fastmem_address_space_bits = 64;
         config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_IgnoreGlobalMonitor;
         break;
@@ -393,6 +472,18 @@ ArmDynarmic64::ArmDynarmic64(System& system, bool uses_wall_clock, Kernel::KProc
     auto& page_table = process->GetPageTable().GetBasePageTable();
     auto& page_table_impl = page_table.GetImpl();
     MakeJit(&page_table_impl, page_table.GetAddressSpaceWidth());
+    static std::once_flag polled;
+    std::call_once(polled, [] {
+        using VideoCommon::Nx2Spikes::Event;
+        VideoCommon::Nx2Spikes::SetPolled(
+            Event::JitCompile,
+            [] { return u64{Dynarmic::g_jit_stats.blocks_compiled.load(std::memory_order_relaxed)}; },
+            [] { return u64{Dynarmic::g_jit_stats.compile_ns.load(std::memory_order_relaxed)}; });
+        VideoCommon::Nx2Spikes::SetPolled(
+            Event::JitFastmemRecompile,
+            [] { return u64{Dynarmic::g_jit_stats.fastmem_recompiles.load(std::memory_order_relaxed)}; },
+            nullptr);
+    });
 }
 
 ArmDynarmic64::~ArmDynarmic64() = default;
@@ -444,11 +535,13 @@ void ArmDynarmic64::SignalInterrupt(Kernel::KThread* thread) {
 void ArmDynarmic64::ClearInstructionCache() {
     m_cb->code_gen.fetch_add(1, std::memory_order_release); // Eden Duo: may be another thread
     m_jit->ClearCache();
+    VideoCommon::Nx2Spikes::Note(VideoCommon::Nx2Spikes::Event::JitClear);
 }
 
 void ArmDynarmic64::InvalidateCacheRange(u64 addr, std::size_t size) {
     m_cb->code_gen.fetch_add(1, std::memory_order_release); // Eden Duo: may be another thread
     m_jit->InvalidateCacheRange(addr, size);
+    VideoCommon::Nx2Spikes::Note(VideoCommon::Nx2Spikes::Event::JitInvalidate, {}, size);
 }
 
 } // namespace Core
