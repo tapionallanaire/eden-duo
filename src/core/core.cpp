@@ -78,6 +78,7 @@
 #include "core/memory/cheat_engine.h"
 #include "core/mods/mod_runtime.h"
 #include "common/atomic_ops.h"
+#include "common/host_memory.h"
 #include "core/perf_stats.h"
 #include "core/reporter.h"
 #include "core/tools/freezer.h"
@@ -609,6 +610,10 @@ struct System::Impl {
                              params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
+        if (switch2_program) {
+            // Before guest memory is taken: see the function (Android only).
+            Common::ReleaseReclaimableKernelMemory();
+        }
 
         // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
         // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.

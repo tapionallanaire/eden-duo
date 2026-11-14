@@ -40,6 +40,10 @@ void OverrideColdHintMode(Settings::ColdHintMode mode);
 /// available. Re-read at most once a second.
 [[nodiscard]] bool MemoryIsLow();
 
+/// Android: when the kernel holds over 1.5 GB in reclaimable pools, takes memory in 128 MiB steps and
+/// frees it, so the pools are given back before a game load needs them fast. Blocking (seconds).
+void ReleaseReclaimableKernelMemory();
+
 enum class ColdHintAction { None, MarkedCold, PagedOut };
 
 class HostMemory {
