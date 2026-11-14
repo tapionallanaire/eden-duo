@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <map>
+#include <tuple>
+#include <format>
+#include <thread>
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -100,6 +105,130 @@ std::atomic<u32> g_nx2_collect_set{};
 Nx2BarrierStats g_nx2_barrier_stats;
 
 namespace {
+/// EDEN_NX2_GUEST_SAMPLER=1: about every millisecond, reads each core's running guest thread and
+/// its PC (dynarmic: the current block) and every 10 s logs how often each core was idle and the
+/// busiest (thread, PC) pairs, so time spent in guest code can be found. Racy reads, diagnostics.
+void StartGuestSampler(System& system) {
+    static std::jthread sampler;
+    if (!std::getenv("EDEN_NX2_GUEST_SAMPLER") || sampler.joinable()) {
+        return;
+    }
+    sampler = std::jthread([&system](std::stop_token stop) {
+        std::map<std::pair<u64, u64>, u32> hits;
+        std::map<u64, u32> per_thread;
+        // Threads seen running (one reference each, kept: diagnostics) and, while they wait, the
+        // wait reason and the return address of the kernel call they wait in.
+        std::map<u64, Kernel::KThread*> known;
+        std::map<std::tuple<u64, u32, u64>, u32> waits;
+        std::map<u64, std::array<u32, 4>> states; // not running: runnable, waiting, other
+        std::array<u32, Hardware::NUM_CPU_CORES> busy{};
+        u32 rounds{};
+        auto last = std::chrono::steady_clock::now();
+        while (!stop.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            Kernel::KProcess* const process = system.ApplicationProcess();
+            if (!process) {
+                continue;
+            }
+            ++rounds;
+            std::array<Kernel::KThread*, Hardware::NUM_CPU_CORES> running{};
+            for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
+                Kernel::KScheduler& scheduler = system.Kernel().Scheduler(core);
+                Kernel::KThread* const thread = scheduler.GetSchedulerCurrentThread();
+                ArmInterface* const arm = process->GetArmInterface(core);
+                if (!thread || thread == scheduler.GetIdleThread() || !arm) {
+                    continue;
+                }
+                ++busy[core];
+                running[core] = thread;
+                if (known.emplace(thread->GetThreadId(), thread).second) {
+                    thread->Open(system.Kernel());
+                }
+                ++per_thread[thread->GetThreadId()];
+                ++hits[{thread->GetThreadId(), arm->PeekPC()}];
+            }
+            for (const auto& [id, thread] : known) {
+                if (std::ranges::find(running, thread) != running.end()) {
+                    continue;
+                }
+                const Kernel::ThreadState state{thread->GetState()};
+                ++states[id][state == Kernel::ThreadState::Runnable  ? 0
+                             : state == Kernel::ThreadState::Waiting ? 1
+                                                                     : 2];
+                if (state != Kernel::ThreadState::Waiting) {
+                    continue;
+                }
+                ++waits[{id, static_cast<u32>(thread->GetWaitReasonForDebugging()),
+                         thread->GetContext().lr}];
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last < std::chrono::seconds(10)) {
+                continue;
+            }
+            last = now;
+            std::string cores;
+            for (size_t core = 0; core < busy.size(); ++core) {
+                cores += std::format(" {}:{}%", core, busy[core] * 100 / std::max(rounds, 1U));
+            }
+            std::vector<std::pair<u32, u64>> threads;
+            for (const auto& [id, n] : per_thread) {
+                threads.emplace_back(n, id);
+            }
+            std::ranges::sort(threads, std::greater{});
+            std::string thread_list;
+            for (size_t i = 0; i < std::min<size_t>(threads.size(), 12); ++i) {
+                thread_list += std::format(" t{}:{}%", threads[i].second,
+                                           threads[i].first * 100 / std::max(rounds, 1U));
+            }
+            LOG_INFO(Core, "Guest sampler: {} rounds, code start 0x{:x}; busy per core{}; threads{}",
+                     rounds, GetInteger(process->GetEntryPoint()), cores, thread_list);
+            std::vector<std::pair<u32, std::pair<u64, u64>>> top;
+            for (const auto& [key, n] : hits) {
+                top.emplace_back(n, key);
+            }
+            std::ranges::sort(top, std::greater{});
+            std::string pcs;
+            for (size_t i = 0; i < std::min<size_t>(top.size(), 60); ++i) {
+                pcs += std::format(" t{}@{:x}={}", top[i].second.first, top[i].second.second,
+                                   top[i].first);
+            }
+            LOG_INFO(Core, "Guest sampler top:{}", pcs);
+            std::vector<std::pair<u32, std::tuple<u64, u32, u64>>> wait_top;
+            for (const auto& [key, n] : waits) {
+                // Only threads that also ran: the always-blocked ones say nothing.
+                if (!per_thread.contains(std::get<0>(key))) {
+                    continue;
+                }
+                wait_top.emplace_back(n, key);
+            }
+            std::ranges::sort(wait_top, std::greater{});
+            std::string wait_list;
+            for (size_t i = 0; i < std::min<size_t>(wait_top.size(), 50); ++i) {
+                const auto& [id, reason, lr] = wait_top[i].second;
+                wait_list += std::format(" t{}:r{}@{:x}={}", id, reason, lr, wait_top[i].first);
+            }
+            LOG_INFO(Core, "Guest sampler waits (r1 sleep, 3 sync, 4 condvar, 5 arbiter):{}",
+                     wait_list);
+            std::string state_list;
+            for (size_t i = 0; i < std::min<size_t>(threads.size(), 14); ++i) {
+                const u64 id{threads[i].second};
+                const auto& s{states[id]};
+                const u32 r{std::max(rounds, 1U)};
+                state_list += std::format(" t{}: run {}% ready {}% wait {}%", id,
+                                          threads[i].first * 100 / r, s[0] * 100 / r,
+                                          s[1] * 100 / r);
+            }
+            LOG_INFO(Core, "Guest sampler states:{}", state_list);
+            states.clear();
+            waits.clear();
+            hits.clear();
+            per_thread.clear();
+            busy = {};
+            rounds = 0;
+        }
+    });
+}
+
 std::mutex nx2_barrier_mutex;
 std::condition_variable nx2_barrier_cv;
 std::atomic<u64> nx2_gpu_thread_done{};
@@ -609,6 +738,7 @@ struct System::Impl {
             IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath), params.program_id,
                              params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
+        StartGuestSampler(system);
         Settings::SetAstcRecompressionOverride(std::nullopt);
         if (switch2_program) {
             // Before guest memory is taken: see the function (Android only).
