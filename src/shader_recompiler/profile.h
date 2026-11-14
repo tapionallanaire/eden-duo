@@ -91,6 +91,8 @@ struct Profile {
     bool has_broken_fp16_float_controls{};
     /// Declaring fp32 denorm flush to zero miscompiles on some drivers
     bool has_broken_fp32_denorm_flush{};
+    /// Non-inlined task and mesh global-memory loads may return incorrect values.
+    bool has_broken_mesh_global_memory_calls{};
     /// Dynamic vec4 indexing is broken on some OpenGL drivers
     bool has_gl_component_indexing_bug{};
     /// The precise type qualifier is broken in the fragment stage of some drivers
@@ -104,6 +106,9 @@ struct Profile {
     /// Some drivers have broken support for OpVectorExtractDynamic on subgroup mask inputs
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
+    /// The guest's HMMA.16816.F16 runs on a cooperative matrix, in compute shaders
+    bool support_cooperative_hmma{};
+    bool has_broken_spirv_fragment_shuffle{};
     u32 max_subgroup_size{};
 
     u32 gl_max_compute_smem_size{};

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
@@ -38,6 +38,9 @@ class MemoryManager;
 
 namespace Core::Memory {
 
+/// Counts unmapped reads on this host thread since the CPU callbacks last checked (debug aid).
+u32& UnmappedReadFlag();
+
 /**
  * Page size used by the ARM architecture. This is the smallest granularity with which memory can
  * be mapped.
@@ -45,6 +48,12 @@ namespace Core::Memory {
 constexpr std::size_t YUZU_PAGEBITS = 12;
 constexpr u64 YUZU_PAGESIZE = 1ULL << YUZU_PAGEBITS;
 constexpr u64 YUZU_PAGEMASK = YUZU_PAGESIZE - 1;
+
+enum class NCEAccessFaultAction {
+    Unmapped,
+    Retry,
+    Instruction,
+};
 
 /// Virtual user-space memory regions
 enum : u64 {
@@ -481,6 +490,12 @@ public:
     void RasterizerMarkRegionCached(Common::ProcessAddress vaddr, u64 size, bool cached);
 
     /**
+     * Makes the next guest read of each rasterizer cached page in the range take the slow path
+     * (fastmem only), so that the read reaches the GPU's reactive flush once.
+     */
+    void RasterizerArmReadTraps(Common::ProcessAddress vaddr, u64 size);
+
+    /**
      * Marks each page within the specified address range as debug or non-debug.
      * Debug addresses are not accessible from fastmem pointers.
      *
@@ -493,7 +508,8 @@ public:
 
     void SetGPUDirtyManagers(std::span<Core::GPUDirtyMemoryManager> managers);
 
-    bool InvalidateNCE(Common::ProcessAddress vaddr, size_t size);
+    NCEAccessFaultAction InvalidateNCE(Common::ProcessAddress vaddr, size_t size,
+                                       bool whole_page = false);
 
     bool InvalidateSeparateHeap(void* fault_address);
 

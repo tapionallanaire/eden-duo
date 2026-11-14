@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/algorithm.h"
 #include "common/assert.h"
 #include "common/logging.h"
@@ -42,7 +43,11 @@ void MaxwellDMA::ConsumeSinkImpl(Core::System& system) {
 }
 
 void MaxwellDMA::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
-    ASSERT_MSG(method < NUM_REGS, "Invalid MaxwellDMA register");
+    if (method >= NUM_REGS) {
+        // Ampere copy (Switch 2) can use methods past this register file; don't write past it.
+        LOG_DEBUG(HW_GPU, "Ignoring MaxwellDMA method {:#x} past the register file", method);
+        return;
+    }
 
     regs.reg_array[method] = method_argument;
 
@@ -59,6 +64,32 @@ void MaxwellDMA::CallMultiMethod(Core::System& system, u32 method, const u32* ba
 
 void MaxwellDMA::Launch() {
     LOG_TRACE(Render_OpenGL, "DMA copy {:#x} -> {:#x}", static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out));
+    // EDEN_NX2_TRACE_DST=<hex>: also log copies writing within 32 MiB above that GPU address.
+    static const u64 trace_destination = [] {
+        const char* value = std::getenv("EDEN_NX2_TRACE_DST");
+        return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
+    }();
+    if (trace_destination != 0 && GPUVAddr(regs.offset_out) >= trace_destination &&
+        GPUVAddr(regs.offset_out) < trace_destination + (32ULL << 20)) {
+        static u32 traced_destination{};
+        if (traced_destination++ < 40) {
+            LOG_INFO(HW_GPU,
+                     "nx2 DMA to traced dst: {:#x} -> {:#x} lines={} length={} pitch in={:#x} "
+                     "out={:#x} launch={:#x} src_layout={} dst_layout={}",
+                     static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out),
+                     regs.line_count, regs.line_length_in, regs.pitch_in, regs.pitch_out,
+                     regs.reg_array[0xc0], regs.launch_dma.src_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block",
+                     regs.launch_dma.dst_memory_layout.Value() == LaunchDMA::MemoryLayout::PITCH ? "pitch" : "block");
+        }
+    }
+    if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
+        static u32 traced{};
+        if (traced++ < 64) {
+            LOG_INFO(HW_GPU, "nx2 DMA {:#x} -> {:#x} lines={} length={} launch={:#x}",
+                     static_cast<GPUVAddr>(regs.offset_in), GPUVAddr(regs.offset_out),
+                     regs.line_count, regs.line_length_in, regs.reg_array[0xc0]);
+        }
+    }
 
     // TODO(Subv): Perform more research and implement all features of this engine.
     const LaunchDMA& launch = regs.launch_dma;
@@ -84,12 +115,21 @@ void MaxwellDMA::Launch() {
         }
 
         if (is_src_pitch && is_dst_pitch) {
-            for (u32 line = 0; line < regs.line_count; ++line) {
-                const GPUVAddr source_line =
-                    regs.offset_in + static_cast<size_t>(line) * regs.pitch_in;
-                const GPUVAddr dest_line =
-                    regs.offset_out + static_cast<size_t>(line) * regs.pitch_out;
-                memory_manager.CopyBlock(dest_line, source_line, regs.line_length_in);
+            if (regs.line_count == 1 ||
+                (regs.pitch_in >= 0 && regs.pitch_out >= 0 &&
+                 static_cast<u32>(regs.pitch_in) == regs.line_length_in &&
+                 static_cast<u32>(regs.pitch_out) == regs.line_length_in)) {
+                memory_manager.CopyBlock(
+                    regs.offset_out, regs.offset_in,
+                    static_cast<size_t>(regs.line_count) * regs.line_length_in);
+            } else {
+                for (u32 line = 0; line < regs.line_count; ++line) {
+                    const GPUVAddr source_line =
+                        regs.offset_in + static_cast<size_t>(line) * regs.pitch_in;
+                    const GPUVAddr dest_line =
+                        regs.offset_out + static_cast<size_t>(line) * regs.pitch_out;
+                    memory_manager.CopyBlock(dest_line, source_line, regs.line_length_in);
+                }
             }
         } else {
             if (!is_src_pitch && is_dst_pitch) {
@@ -230,7 +270,7 @@ void MaxwellDMA::CopyBlockLinearToPitch() {
 
     UnswizzleSubrect(tmp_write_buffer, tmp_read_buffer, bytes_per_pixel, width, height, depth,
                      x_offset, src_params.origin.y, x_elements, regs.line_count, block_height,
-                     block_depth, dst_operand.pitch);
+                     block_depth, dst_operand.pitch, memory_manager.UsesNativeTiling());
 }
 
 void MaxwellDMA::CopyPitchToBlockLinear() {
@@ -302,7 +342,7 @@ void MaxwellDMA::CopyPitchToBlockLinear() {
     //  If the input is linear and the output is tiled, swizzle the input and copy it over.
     SwizzleSubrect(tmp_write_buffer, tmp_read_buffer, bytes_per_pixel, width, height, depth,
                    x_offset, dst_params.origin.y, x_elements, regs.line_count, block_height,
-                   block_depth, regs.pitch_in);
+                   block_depth, regs.pitch_in, memory_manager.UsesNativeTiling());
 }
 
 void MaxwellDMA::CopyBlockLinearToBlockLinear() {
@@ -355,11 +395,11 @@ void MaxwellDMA::CopyBlockLinearToBlockLinear() {
 
     UnswizzleSubrect(intermediate_buffer, tmp_read_buffer, bytes_per_pixel, src_width, src.height,
                      src.depth, src_x_offset, src.origin.y, x_elements, regs.line_count,
-                     src.block_size.height, src.block_size.depth, pitch);
+                     src.block_size.height, src.block_size.depth, pitch, memory_manager.UsesNativeTiling());
 
     SwizzleSubrect(tmp_write_buffer, intermediate_buffer, bytes_per_pixel, dst_width, dst.height,
                    dst.depth, dst_x_offset, dst.origin.y, x_elements, regs.line_count,
-                   dst.block_size.height, dst.block_size.depth, pitch);
+                   dst.block_size.height, dst.block_size.depth, pitch, memory_manager.UsesNativeTiling());
 }
 
 void MaxwellDMA::ReleaseSemaphore() {

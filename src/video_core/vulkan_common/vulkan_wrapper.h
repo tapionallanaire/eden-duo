@@ -178,6 +178,8 @@ struct InstanceDispatch {
     PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties{};
     PFN_vkEnumeratePhysicalDevices vkEnumeratePhysicalDevices{};
     PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr{};
+    PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR
+        vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR{};
     PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2{};
     PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties{};
     PFN_vkGetPhysicalDeviceFormatProperties2 vkGetPhysicalDeviceFormatProperties2{};
@@ -233,6 +235,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdDrawIndirectCount vkCmdDrawIndirectCount{};
     PFN_vkCmdDrawIndexedIndirectCount vkCmdDrawIndexedIndirectCount{};
     PFN_vkCmdDrawIndirectByteCountEXT vkCmdDrawIndirectByteCountEXT{};
+    PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT{};
     PFN_vkCmdEndConditionalRenderingEXT vkCmdEndConditionalRenderingEXT{};
     PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXT{};
     PFN_vkCmdEndQuery vkCmdEndQuery{};
@@ -336,6 +339,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkGetEventStatus vkGetEventStatus{};
     PFN_vkGetFenceStatus vkGetFenceStatus{};
     PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements{};
+    PFN_vkGetImageSparseMemoryRequirements vkGetImageSparseMemoryRequirements{};
     PFN_vkGetPipelineCacheData vkGetPipelineCacheData{};
     PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR{};
 #ifdef _WIN32
@@ -356,6 +360,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkUnmapMemory vkUnmapMemory{};
     PFN_vkUpdateDescriptorSetWithTemplate vkUpdateDescriptorSetWithTemplate{};
     PFN_vkGetBufferDeviceAddress vkGetBufferDeviceAddress{};
+    PFN_vkGetMemoryHostPointerPropertiesEXT vkGetMemoryHostPointerPropertiesEXT{};
     PFN_vkGetDescriptorSetLayoutSizeEXT vkGetDescriptorSetLayoutSizeEXT{};
     PFN_vkGetDescriptorSetLayoutBindingOffsetEXT vkGetDescriptorSetLayoutBindingOffsetEXT{};
     PFN_vkGetDescriptorEXT vkGetDescriptorEXT{};
@@ -690,6 +695,11 @@ public:
           allocation{allocation_}, dld{&dld_} {}
     Image() = default;
 
+    /// True for an image created without memory (an unbacked sparse image).
+    bool IsUnbacked() const noexcept {
+        return handle != VK_NULL_HANDLE && allocation == VK_NULL_HANDLE;
+    }
+
     Image(const Image&) = delete;
     Image& operator=(const Image&) = delete;
 
@@ -730,6 +740,15 @@ public:
     [[nodiscard]] VkImageUsageFlags UsageFlags() const noexcept {
         return usage;
     }
+
+    /// Where the image's memory lies: the block (0 when the image has no memory or a block of
+    /// its own), the block's size and the image's part of it.
+    struct MemoryBlock {
+        u64 block;
+        u64 block_size;
+        u64 size;
+    };
+    [[nodiscard]] MemoryBlock GetMemoryBlock() const noexcept;
 
 private:
     void Release() const noexcept;
@@ -1110,6 +1129,9 @@ public:
 
     VkMemoryRequirements GetImageMemoryRequirements(VkImage image) const noexcept;
 
+    std::vector<VkSparseImageMemoryRequirements> GetImageSparseMemoryRequirements(
+        VkImage image) const;
+
     std::vector<VkPipelineExecutablePropertiesKHR> GetPipelineExecutablePropertiesKHR(
         VkPipeline pipeline) const;
 
@@ -1203,6 +1225,9 @@ public:
     std::vector<VkQueueFamilyProperties> GetQueueFamilyProperties() const;
 
     std::vector<VkPhysicalDeviceToolProperties> GetPhysicalDeviceToolProperties() const;
+
+    /// Matrix shapes and types of VK_KHR_cooperative_matrix; empty when the driver lacks it.
+    std::vector<VkCooperativeMatrixPropertiesKHR> GetCooperativeMatrixPropertiesKHR() const;
 
     bool GetSurfaceSupportKHR(u32 queue_family_index, VkSurfaceKHR) const;
 
@@ -1312,6 +1337,10 @@ public:
     void DrawIndexedIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                              u32 stride) const noexcept {
         dld->vkCmdDrawIndexedIndirect(handle, src_buffer, src_offset, draw_count, stride);
+    }
+
+    void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const noexcept {
+        dld->vkCmdDrawMeshTasksEXT(handle, group_count_x, group_count_y, group_count_z);
     }
 
     void DrawIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset, VkBuffer count_buffer,

@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <queue>
 #include "common/logging.h"
 #include "common/uuid.h"
@@ -14,6 +15,7 @@
 #include "core/hle/service/friend/friend_interface.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
+#include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/server_manager.h"
 
 namespace Service::Friend {
@@ -558,6 +560,124 @@ public:
     }
 };
 
+// Session returned by chat:u 0 and 1 (nn::chat::IUserShimScopedObject). Command 1 hands back a
+// handle the title waits on; 2-4 attach to the room info, local camera image processing mode and
+// local camera zoom change events (Switchbrew: no input, an event out). None of them fires outside
+// a GameChat room, so each gets the never-signalled stub event. The other named commands answer 0;
+// everything else falls through to the nx2 auto stub.
+class IChatSession final : public ServiceFramework<IChatSession> {
+public:
+    explicit IChatSession(Core::System& system_) : ServiceFramework{system_, "nx2:chat:u::0"} {
+        static const FunctionInfo functions[] = {
+            {1, &IChatSession::StubReplyEvent, "GetEvent (guessed)"},
+            {2, &IChatSession::StubReplyEvent, "AttachToRoomInfoChangedEvent"},
+            {3, &IChatSession::StubReplyEvent, "AttachToLocalCameraImageProcessingModeChangedEvent"},
+            {4, &IChatSession::StubReplyEvent, "AttachToLocalCameraZoomMagnificationChangedEvent"},
+            {10, &IChatSession::StubReplyZeroed, "StartLocalCameraStreaming"},
+            {11, &IChatSession::StubReplyZeroed, "StopLocalCameraStreaming"},
+            {20, &IChatSession::StubReplyZeroed, "StartRemoteCameraStreaming"},
+            {21, &IChatSession::StubReplyZeroed, "StopRemoteCameraStreaming"},
+            {30, &IChatSession::StubReplyZeroed, "CreateAudioStreamWorkBuffer"},
+            {31, &IChatSession::StubReplyZeroed, "DestroyAudioStreamWorkBuffer"},
+            {32, &IChatSession::StubReplyZeroed, "GetAudioStreamCapacityFrameCount"},
+            {33, &IChatSession::StubReplyZeroed, "StartAudioStreamRecording"},
+            {34, &IChatSession::StubReplyZeroed, "StopAudioStreamRecording"},
+            {35, &IChatSession::StubReplyZeroed, "GetAudioStreamFreeFrameCount"},
+            {36, &IChatSession::StubReplyZeroed, "GetAudioStreamFilledFrameCount"},
+            {37, &IChatSession::StubReplyZeroed, "ReadAudioStream"},
+        };
+        RegisterHandlers(functions);
+    }
+};
+
+// nn::chat::IUserLayoutCustomizationShimScopedObject, returned by chat:u 2. Per Switchbrew:
+// 0 Initialize(pid, u64), then 1 hands back an event official software takes right after it;
+// 10, 11 (u64 out), 13 (u8 and 16 bytes out) and 20 (u8 out) are unnamed, 12 ends the full-screen
+// section. Outside a GameChat room the layout never changes: the event never fires and the rest
+// answer 0.
+class IUserLayoutCustomizationShimScopedObject final
+    : public ServiceFramework<IUserLayoutCustomizationShimScopedObject> {
+public:
+    explicit IUserLayoutCustomizationShimScopedObject(Core::System& system_)
+        : ServiceFramework{system_, "nx2:chat:IUserLayoutCustomizationShimScopedObject"} {
+        static const FunctionInfo functions[] = {
+            {0, &IUserLayoutCustomizationShimScopedObject::StubReplyZeroed, "Initialize"},
+            {1, &IUserLayoutCustomizationShimScopedObject::StubReplyEvent, "GetEvent (guessed)"},
+            {12, &IUserLayoutCustomizationShimScopedObject::StubReplyZeroed, "EndFullScreenWithLocalCameraAvailableSection"},
+        };
+        RegisterHandlers(functions);
+    }
+};
+
+// Switch 2 GameChat (chat:u, nn::chat::IUserService). 0 and 1 open the session the title keeps
+// using, 2 the layout customization object. 3 and 4 return objects nothing here implements yet
+// (virtual camera, selective talk), so each gets an nx2 stub whose commands all succeed empty; MKW
+// calls 3 at boot. Switchbrew leaves 0-4 unnamed: 2-4 are named after what they return. The named
+// settings commands answer 0, which is what a console outside a GameChat room reports; everything
+// else falls through to the nx2 auto stub.
+class IChatService final : public ServiceFramework<IChatService> {
+public:
+    explicit IChatService(Core::System& system_) : ServiceFramework{system_, "nx2:chat:u"} {
+        static const FunctionInfo functions[] = {
+            {0, &IChatService::OpenSession, "OpenSession"},
+            {1, &IChatService::OpenSession, "OpenSession (u32)"},
+            {2, &IChatService::OpenUserLayoutCustomizationShimScopedObject, "OpenUserLayoutCustomizationShimScopedObject"},
+            {3, &IChatService::OpenStubObject, "OpenVirtualCameraShimScopedObject"},
+            {4, &IChatService::OpenStubObject, "OpenUserSelectiveTalkShimScopedObject"},
+            {11, &IChatService::GetRoomInfo, "GetRoomInfo"},
+            {14, &IChatService::StubReplyZeroed, "GetLocalCameraImageProcessingMode"},
+            {15, &IChatService::StubReplyZeroed, "SetLocalCameraZoomMagnification"},
+            {16, &IChatService::StubReplyZeroed, "GetLocalCameraZoomMagnification"},
+            {21, &IChatService::StubReplyZeroed, "SetScreenSharingDisallowList"},
+            {22, &IChatService::StubReplyZeroed, "ClearScreenSharingDisallowList"},
+            {23, &IChatService::StubReplyZeroed, "SetScreenSharingMode"},
+            {40, &IChatService::StubReplyZeroed, "GetRealtimeAudioLevels"},
+            {51, &IChatService::StubReplyZeroed, "CalculateRequiredAudioStreamWorkBufferSize"},
+            {60, &IChatService::StubReplyZeroed, "SetSharingKey"},
+            {61, &IChatService::StubReplyZeroed, "ClearSharingKey"},
+        };
+        RegisterHandlers(functions);
+    }
+
+private:
+    void OpenSession(HLERequestContext& ctx) {
+        LOG_WARNING(Service_Friend, "(STUBBED) chat:u {}, returning a chat session", ctx.GetCommand());
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IChatSession>(ctx, system);
+    }
+
+    void OpenUserLayoutCustomizationShimScopedObject(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_Friend, "called");
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IUserLayoutCustomizationShimScopedObject>(ctx, system);
+    }
+
+    // 11: the nn::chat::RoomInfo (0xF0 bytes) of the room the user chats in. Nobody is ever in a
+    // room here, so it is all zeroes, ChattingUid (0x18) included. The auto stub left the title's
+    // buffer as it was.
+    void GetRoomInfo(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_Friend, "called");
+        constexpr std::array<u8, 0xF0> room_info{};
+        ctx.WriteBuffer(room_info);
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void OpenStubObject(HLERequestContext& ctx) {
+        static constexpr std::array<const char*, 2> names{
+            "nx2:chat:IVirtualCameraShimScopedObject",
+            "nx2:chat:IUserSelectiveTalkShimScopedObject",
+        };
+        const char* name = names[ctx.GetCommand() - 3];
+        LOG_WARNING(Service_Friend, "(STUBBED) chat:u {}, returning {}", ctx.GetCommand(), name);
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<INx2StubInterface>(ctx, system, name);
+    }
+};
+
 void LoopProcess(Core::System& system) {
     auto server_manager = std::make_unique<ServerManager>(system);
     auto module = std::make_shared<Module>();
@@ -570,6 +690,9 @@ void LoopProcess(Core::System& system) {
     server_manager->RegisterNamedService("friend:s", std::make_shared<Friend>(module, system, "friend:s"));
     server_manager->RegisterNamedService("friend:u", std::make_shared<Friend>(module, system, "friend:u"));
     server_manager->RegisterNamedService("friend:v", std::make_shared<Friend>(module, system, "friend:v"));
+
+    // Switch 2 GameChat. Titles block in sm until it exists, so register a stub for now.
+    server_manager->RegisterNamedService("chat:u", std::make_shared<IChatService>(system));
 
     ServerManager::RunServer(std::move(server_manager));
 }

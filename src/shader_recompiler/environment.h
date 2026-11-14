@@ -8,6 +8,8 @@
 
 #include <array>
 #include <string>
+#include <utility>
+#include <vector>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -41,9 +43,10 @@ struct HandleKey {
     u32 sec_index, sec_offset, sec_shift_left;
     u32 count;
     bool has_secondary;
+    u32 mask, sec_mask;
     constexpr bool operator==(const HandleKey& o) const noexcept {
-        return std::tie(index, offset, shift_left, sec_index, sec_offset, sec_shift_left, count, has_secondary)
-            == std::tie(o.index, o.offset, o.shift_left, o.sec_index, o.sec_offset, o.sec_shift_left, o.count, o.has_secondary);
+        return std::tie(index, offset, shift_left, sec_index, sec_offset, sec_shift_left, count, has_secondary, mask, sec_mask)
+            == std::tie(o.index, o.offset, o.shift_left, o.sec_index, o.sec_offset, o.sec_shift_left, o.count, o.has_secondary, o.mask, o.sec_mask);
     }
 };
 struct HandleKeyHash {
@@ -53,6 +56,7 @@ struct HandleKeyHash {
         h ^= (size_t(k.sec_index) << 33) ^ (size_t(k.sec_offset) << 2);
         h ^= (size_t(k.sec_shift_left) << 3);
         h ^= (size_t(k.count) << 7);
+        h ^= (size_t(k.mask) << 11) ^ (size_t(k.sec_mask) << 13);
         return h ^ (k.has_secondary ? 0x9e3779b97f4a7c15ULL : 0ULL);
     }
 };
@@ -74,6 +78,15 @@ struct ConstBufferAddr {
     /// is the load's byte offset into it), ORed with the secondary word.
     bool storage_table{};
     u32 storage_index{};
+    /// The dynamic offset is a constant buffer value shifted left, the same for the whole draw
+    bool has_index_cbuf{};
+    u32 index_cbuf_index{};
+    u32 index_cbuf_offset{};
+    u32 index_shift{};
+    /// Applied after the shifts
+    u32 mask = 0xffffffff;
+    u32 secondary_mask = 0xffffffff;
+    u32 handle_program{~0U}; ///< index in Info::handle_programs for a handle computed per draw
 };
 
 class Environment {
@@ -81,6 +94,33 @@ public:
     virtual ~Environment() = default;
 
     [[nodiscard]] virtual u64 ReadInstruction(u32 address) = 0;
+
+    [[nodiscard]] virtual u32 TranslateProgramAddress(u32 address) const { return address; }
+
+    /// A Switch 2 native program lowered to Maxwell instructions. Its storage buffer pointers are
+    /// raw 8-byte arguments in constant buffers, without the NVN descriptor layout.
+    [[nodiscard]] virtual bool IsNativeProgram() const { return false; }
+
+    /// Native programs: whether the 8-byte constant at (index, offset) is a mapped GPU address.
+    /// Native argument tables mix pointers with scalars (sizes, strides).
+    [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
+
+    /// Native programs: whether the 8 bytes at `indirect` past the pointer at (index, offset) are
+    /// a mapped GPU address (a pointer table the program loads its buffer pointer from).
+    [[nodiscard]] virtual bool IsCbufIndirectStorageBufferPointer(u32, u32, u32) {
+        return true;
+    }
+
+    /// Native programs: (index, offset) slots classified as non-pointers because they were null.
+    [[nodiscard]] virtual std::vector<std::pair<u32, u32>> NullStoragePointerSlots() const {
+        return {};
+    }
+
+    /// Native programs: the classified slots bound as storage buffer pointers, as the sorted keys
+    /// of their classification (direct and pointer-table slots).
+    [[nodiscard]] virtual std::vector<u64> MappedStoragePointerKeys() const {
+        return {};
+    }
 
     [[nodiscard]] virtual u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) = 0;
 
@@ -127,9 +167,22 @@ public:
         return is_proprietary_driver;
     }
 
+    /// Task and mesh programs: SET_MESH_SHADER_A, SET_MESH_SHADER_B and SET_MESH_INIT_SHADER.
+    [[nodiscard]] const std::array<u32, 3>& MeshRegisters() const noexcept {
+        return mesh_registers;
+    }
+
+    /// Mesh programs: the header of the pass-through geometry program bound with them, whose
+    /// output map lists the per-primitive outputs.
+    [[nodiscard]] const ProgramHeader& MeshPrimitiveHeader() const noexcept {
+        return mesh_primitive_header;
+    }
+
 protected:
     ProgramHeader sph{};
     std::array<u32, 8> gp_passthrough_mask{};
+    std::array<u32, 3> mesh_registers{};
+    ProgramHeader mesh_primitive_header{};
     Stage stage{};
     u32 start_address{};
     bool is_proprietary_driver{};

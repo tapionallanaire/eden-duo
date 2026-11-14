@@ -11,11 +11,11 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>yuzu</string>
+  <string>Eglantine</string>
   </property>
   <property name="windowIcon">
    <iconset resource="yuzu.qrc">
-    <normaloff>:/img/eden.ico</normaloff>:/img/eden.ico</iconset>
+    <normaloff>:/img/eglantine.ico</normaloff>:/img/eglantine.ico</iconset>
   </property>
   <property name="tabShape">
    <enum>QTabWidget::TabShape::Rounded</enum>
@@ -59,7 +59,7 @@
     </widget>
     <widget class="QMenu" name="menuOpen_Eden_Folders">
      <property name="title">
-      <string>Open &amp;Eden Folders</string>
+      <string>Open &amp;Eglantine Folders</string>
      </property>
      <addaction name="action_Root_Data_Folder"/>
      <addaction name="action_NAND_Folder"/>
@@ -91,6 +91,14 @@
     <addaction name="action_Configure"/>
     <addaction name="action_Configure_Current_Game"/>
    </widget>
+    <widget class="QMenu" name="menu_Cheats">
+     <property name="visible">
+      <bool>false</bool>
+     </property>
+     <property name="title">
+      <string>&amp;Cheats</string>
+     </property>
+    </widget>
    <widget class="QMenu" name="menu_View">
     <property name="title">
      <string>&amp;View</string>
@@ -148,6 +156,8 @@
     <addaction name="action_Show_Filter_Bar"/>
     <addaction name="action_Show_Status_Bar"/>
     <addaction name="action_Show_Performance_Overlay"/>
+    <addaction name="action_Show_Controller_Overlay"/>
+    <addaction name="action_Show_Controller_Hints"/>
     <addaction name="action_Post_Processing_Shaders"/>
     <addaction name="separator"/>
     <addaction name="menu_Reset_Window_Size"/>
@@ -241,6 +251,7 @@
    </widget>
    <addaction name="menu_File"/>
    <addaction name="menu_Emulation"/>
+   <addaction name="menu_Cheats"/>
    <addaction name="menu_View"/>
    <addaction name="menu_Tools"/>
    <addaction name="menu_Multiplayer"/>
@@ -292,7 +303,7 @@
   </action>
   <action name="action_About">
    <property name="text">
-    <string>&amp;About Eden</string>
+    <string>&amp;About Eglantine</string>
    </property>
   </action>
   <action name="action_Single_Window_Mode">
@@ -555,7 +566,7 @@
   </action>
   <action name="action_Eden_Dependencies">
    <property name="text">
-    <string>&amp;Eden Dependencies</string>
+    <string>&amp;Eglantine Dependencies</string>
    </property>
   </action>
   <action name="action_Data_Manager">
@@ -603,6 +614,22 @@
    </property>
    <property name="text">
     <string>Show &amp;Performance Overlay</string>
+   </property>
+  </action>
+  <action name="action_Show_Controller_Overlay">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show &amp;Controller Overlay</string>
+   </property>
+  </action>
+  <action name="action_Show_Controller_Hints">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Controller &amp;Hints</string>
    </property>
   </action>
   <action name="action_Post_Processing_Shaders">

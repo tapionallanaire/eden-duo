@@ -126,20 +126,25 @@ void EmitPrologue(EmitContext& ctx) {
 
         if (Sirit::ValidId(ctx.clip_distances)) {
             for (u32 i = 0; i < ctx.profile.max_user_clip_distances; ++i) {
-                if (!clip_distance_written.test(i)) {
-                    const Id idx = ctx.Const(i);
-                    const Id element = ctx.OpAccessChain(ctx.output_f32, ctx.clip_distances, idx);
-                    ctx.OpStore(element, ctx.Const(0.0f));
-                }
+                const Id idx = ctx.Const(i);
+                const Id element = ctx.OpAccessChain(ctx.output_f32, ctx.clip_distances, idx);
+                ctx.OpStore(element, ctx.Const(0.0f));
             }
         }
     }
     if (ctx.stage == Stage::VertexB || ctx.stage == Stage::Geometry) {
         SetFixedPipelinePointSize(ctx);
     }
+    if (ctx.stage == Stage::Task || ctx.stage == Stage::Mesh) {
+        EmitMeshPrologue(ctx);
+    }
 }
 
 void EmitEpilogue(EmitContext& ctx) {
+    if (ctx.stage == Stage::Task || ctx.stage == Stage::Mesh) {
+        EmitMeshEpilogue(ctx);
+        return;
+    }
     if (ctx.stage == Stage::VertexB && ctx.runtime_info.convert_depth_mode &&
         !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
@@ -153,7 +158,10 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
-    if (!ctx.profile.support_geometry_streams) {
+    // Stream 0 is the plain EmitVertex, which needs no GeometryStreams capability.
+    if (stream.IsImmediate() && stream.U32() == 0) {
+        ctx.OpEmitVertex();
+    } else if (!ctx.profile.support_geometry_streams) {
         throw NotImplementedException("Geometry streams");
     } else if (stream.IsImmediate()) {
         ctx.OpEmitStreamVertex(ctx.Def(stream));
@@ -166,7 +174,10 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
 }
 
 void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {
-    if (!ctx.profile.support_geometry_streams) {
+    // Stream 0 is the plain EndPrimitive, which needs no GeometryStreams capability.
+    if (stream.IsImmediate() && stream.U32() == 0) {
+        ctx.OpEndPrimitive();
+    } else if (!ctx.profile.support_geometry_streams) {
         throw NotImplementedException("Geometry streams");
     } else if (stream.IsImmediate()) {
         ctx.OpEndStreamPrimitive(ctx.Def(stream));

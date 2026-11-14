@@ -22,6 +22,7 @@ enum class VideoCodec : u64 {
     VP8 = 0x5,
     H265 = 0x7,
     VP9 = 0x9,
+    AV1 = 0xA,
 };
 
 struct Offset {
@@ -32,7 +33,7 @@ struct Offset {
 private:
     u64 offset;
 };
-static_assert(std::is_trivial_v<Offset>, "Offset must be trivial");
+static_assert(std::is_trivially_default_constructible_v<Offset> && std::is_trivially_copyable_v<Offset>, "Offset must be trivial");
 static_assert(sizeof(Offset) == 0x8, "Offset has the wrong size!");
 
 // NVDEC should use a 32-bit address space, but is mapped to 64-bit,

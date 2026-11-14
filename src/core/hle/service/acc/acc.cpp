@@ -36,7 +36,7 @@ constexpr std::size_t THUMBNAIL_SIZE = 0x24000;
 
 static std::filesystem::path GetImagePath(const Common::UUID& uuid) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
-           fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
+           std::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
 }
 
 static void JPGToMemory(void* context, void* data, int len) {
@@ -696,9 +696,9 @@ public:
             {4, &IManagerForApplication::LoadIdTokenCache, "LoadIdTokenCache"},
             {130, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCacheForApplication"},
             {136, &IManagerForApplication::GetNintendoAccountUserResourceCacheForApplication, "GetNintendoAccountUserResourceCache"}, // 19.0.0+
-            {150, nullptr, "CreateAuthorizationRequest"},
+            {150, &IManagerForApplication::StubReplyInterface, "CreateAuthorizationRequest"},
             {160, &IManagerForApplication::StoreOpenContext, "StoreOpenContext"},
-            {170, nullptr, "LoadNetworkServiceLicenseKindAsync"},
+            {170, &IManagerForApplication::StubReplyInterface, "LoadNetworkServiceLicenseKindAsync"},
         };
         // clang-format on
 

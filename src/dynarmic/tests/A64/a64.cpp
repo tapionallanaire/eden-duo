@@ -415,6 +415,230 @@ TEST_CASE("A64: URSHL", "[a64]") {
     CHECK(jit.GetVector(9) == Vector{0x0000000000000002, 0x12db8b8280e0ba});
 }
 
+TEST_CASE("A64: SQRSHL, UQRSHL", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQRSHL(V8.B16(), V0.B16(), V1.B16());
+    code.UQRSHL(V9.B16(), V0.B16(), V1.B16());
+    code.SQRSHL(V10.H8(), V2.H8(), V3.H8());
+    code.UQRSHL(V11.S4(), V2.S4(), V3.S4());
+    code.SQRSHL(V12.D2(), V4.D2(), V5.D2());
+    code.UQRSHL(V13.D2(), V4.D2(), V5.D2());
+    code.SQRSHL(D14, D4, D5);
+    code.UQRSHL(B15, B0, B1);
+
+    jit.SetPC(0);
+    jit.SetVector(0, Vector{0x7f800102fe01c040, 0x0110ff7f80812233});
+    jit.SetVector(1, Vector{0x01fffefd0807f8f9, 0x7f8002fe04fc0100});
+    jit.SetVector(2, Vector{0x7fff8000fffe0003, 0x123480017ffffff1});
+    jit.SetVector(3, Vector{0x00f10012fff00001, 0x000f00100000ffe1});
+    jit.SetVector(4, Vector{0x8000000000000001, 0x7fffffffffffffff});
+    jit.SetVector(5, Vector{0x00000000000000c0, 0xffffffffffffffc1});
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(8) == Vector{0x7fc00000807f0001, 0x7f00fc2080f84433});
+    CHECK(jit.GetVector(9) == Vector{0xfe400000ff800101, 0xff00ff20ff084433});
+    CHECK(jit.GetVector(10) == Vector{0x0001800000000006, 0x7fff80007fff0000});
+    CHECK(jit.GetVector(11) == Vector{0xffffffffffffffff, 0xffffffff00000001});
+    CHECK(jit.GetVector(12) == Vector{0x0000000000000000, 0x0000000000000001});
+    CHECK(jit.GetVector(13) == Vector{0x0000000000000001, 0x0000000000000001});
+    CHECK(jit.GetVector(14) == Vector{0x0000000000000000, 0x0000000000000000});
+    CHECK(jit.GetVector(15) == Vector{0x0000000000000001, 0x0000000000000000});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == true);
+}
+
+TEST_CASE("A64: SQRSHL rounding right shift does not set QC", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQRSHL(V16.H8(), V2.H8(), V17.H8());
+
+    jit.SetPC(0);
+    jit.SetVector(2, Vector{0x7fff8000fffe0003, 0x123480017ffffff1});
+    jit.SetVector(17, Vector{0xffffffffffffffff, 0xffffffffffffffff});
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(16) == Vector{0x4000c000ffff0002, 0x091ac0014000fff9});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == false);
+}
+
+TEST_CASE("A64: SQRSHRN, SQRSHRUN, UQRSHRN (scalar)", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQRSHRN(B8, H0, 1);
+    code.SQRSHRN(H9, S1, 16);
+    code.SQRSHRN(S10, D2, 32);
+    code.SQRSHRUN(B11, H0, 8);
+    code.SQRSHRUN(H12, S1, 1);
+    code.UQRSHRN(B13, H0, 8);
+    code.UQRSHRN(S14, D1, 1);
+
+    jit.SetPC(0);
+    jit.SetVector(0, Vector{0x0000000000008180, 0xffffffffffffffff});
+    jit.SetVector(1, Vector{0x000000007fff8001, 0x0123456789abcdef});
+    jit.SetVector(2, Vector{0xffffffff80000001, 0x0000000000000000});
+    for (size_t i = 8; i <= 14; i++) {
+        jit.SetVector(i, Vector{0xffffffffffffffff, 0xffffffffffffffff});
+    }
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(8) == Vector{0x80, 0});
+    CHECK(jit.GetVector(9) == Vector{0x7fff, 0});
+    CHECK(jit.GetVector(10) == Vector{0, 0});
+    CHECK(jit.GetVector(11) == Vector{0, 0});
+    CHECK(jit.GetVector(12) == Vector{0xffff, 0});
+    CHECK(jit.GetVector(13) == Vector{0x82, 0});
+    CHECK(jit.GetVector(14) == Vector{0x3fffc001, 0});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == true);
+}
+
+TEST_CASE("A64: SQRSHRN (scalar) in range does not set QC", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQRSHRN(H15, S2, 16);
+
+    jit.SetPC(0);
+    jit.SetVector(2, Vector{0xffffffff80000001, 0x0000000000000000});
+    jit.SetVector(15, Vector{0xffffffffffffffff, 0xffffffffffffffff});
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(15) == Vector{0x8000, 0});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == false);
+}
+
+TEST_CASE("A64: SQDMLAL, SQDMLSL", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQDMLAL(V4.S4(), V2.H4(), V1.H()[0]);
+    code.SQDMLAL2(V5.S4(), V0.H8(), V1.H()[4]);
+    code.SQDMLSL(V6.D2(), V2.S2(), V2.S()[1]);
+    code.SQDMLAL(V7.S4(), V0.H4(), V0.H4());
+    code.SQDMLSL(S8, H0, V1.H()[3]);
+
+    jit.SetPC(0);
+    jit.SetVector(0, Vector{0x7fff800000020003, 0xffff000180007fff});
+    jit.SetVector(1, Vector{0x8000000500010004, 0x0000000700008000});
+    jit.SetVector(2, Vector{0x8000000000010002, 0x7fffffff80000000});
+    for (size_t i = 4; i <= 8; i++) {
+        jit.SetVector(i, Vector{0x0000000100000002, 0x7fffffffffffffff});
+    }
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(4) == Vector{0x0000000900000012, 0x7ffbffffffffffff});
+    CHECK(jit.GetVector(5) == Vector{0x7fffffff80010002, 0x7ffffffffffeffff});
+    CHECK(jit.GetVector(6) == Vector{0x0001000300000002, 0x0000000000000000});
+    CHECK(jit.GetVector(7) == Vector{0x0000000900000014, 0x7fffffff7ffffffe});
+    CHECK(jit.GetVector(8) == Vector{0x0000000000030002, 0x0000000000000000});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == true);
+}
+
+TEST_CASE("A64: SQDMLAL (scalar) in range does not set QC", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQDMLAL(D9, S1, V1.S()[0]);
+
+    jit.SetPC(0);
+    jit.SetVector(1, Vector{0x8000000500010004, 0x0000000700008000});
+    jit.SetVector(9, Vector{0x0000000100000002, 0x7fffffffffffffff});
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(9) == Vector{0x0000000300100022, 0});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == false);
+}
+
+TEST_CASE("A64: SQDMLAL, SQDMLSL, SQDMULL (scalar)", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQDMULL(S4, H0, H0);
+    code.SQDMLAL(S5, H2, H0);
+    code.SQDMLSL(D6, S1, S1);
+    code.SQDMLAL(D7, S1, S1);
+
+    jit.SetPC(0);
+    jit.SetVector(0, Vector{0x0000000000008000, 0x1111111111111111});
+    jit.SetVector(1, Vector{0x0000000080000000, 0x2222222222222222});
+    jit.SetVector(2, Vector{0x0000000000003000, 0x3333333333333333});
+    for (size_t i = 4; i <= 7; i++) {
+        jit.SetVector(i, Vector{0x7fffffff00000005, 0x4444444444444444});
+    }
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(4) == Vector{0x000000007fffffff, 0});
+    CHECK(jit.GetVector(5) == Vector{0x00000000d0000005, 0});
+    CHECK(jit.GetVector(6) == Vector{0xffffffff00000006, 0});
+    CHECK(jit.GetVector(7) == Vector{0x7fffffffffffffff, 0});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == true);
+}
+
+TEST_CASE("A64: SQDMLSL (scalar) in range does not set QC", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+    code.SQDMLSL(S8, H2, H2);
+
+    jit.SetPC(0);
+    jit.SetVector(2, Vector{0x0000000000003000, 0x3333333333333333});
+    jit.SetVector(8, Vector{0x7fffffff00000005, 0x4444444444444444});
+    jit.SetFpsr(0);
+
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(8) == Vector{0x00000000ee000005, 0});
+    CHECK(FP::FPSR{jit.GetFpsr()}.QC() == false);
+}
+
 TEST_CASE("A64: SQSHLU", "[a64]") {
     A64TestEnv env;
     A64::UserConfig jit_user_config{};
@@ -1795,7 +2019,7 @@ TEST_CASE("A64: rand3", "[a64]") {
     jit.SetPstate(0xb0000000);
     jit.SetFpcr(0x01000000);
     env.ticks_left = 110;
-    //fmt::print("{}", jit.Disassemble());
+    //std::print("{}", jit.Disassemble());
     CheckedRun([&]() { jit.Run(); });
 }
 
@@ -2631,4 +2855,190 @@ TEST_CASE("A64: Rounding", "[a64]") {
     CHECK(jit.GetVector(4) == Vector{0x4000000040000000, 0x4000000040000000});
     CHECK(jit.GetVector(5) == Vector{0x4000000040000000, 0x4000000040000000});
     CHECK(jit.GetVector(6) == Vector{0x4000000040000000, 0x4000000040000000});
+}
+
+TEST_CASE("A64: SM4", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+
+    code.SM4EKEY(V4.S4(), V0.S4(), V1.S4());
+    code.MOV(V5.B16(), V0.B16());
+    code.SM4E(V5.S4(), V1.S4());
+
+    jit.SetPC(0);
+    jit.SetVector(0, {0xefcdab8967452301, 0x1032547698badcfe});
+    jit.SetVector(1, {0xefcdab8967452301, 0x1032547698badcfe});
+    env.ticks_left = env.code_mem.size();
+    CheckedRun([&]() { jit.Run(); });
+
+    CHECK(jit.GetVector(4) == Vector{0x486a0c2e00224466, 0x5c7e183a62402604});
+    CHECK(jit.GetVector(5) == Vector{0xc2e086a43c1e785a, 0xd7f593b104264062});
+}
+
+TEST_CASE("A64: SM3", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    SECTION("SM3SS1") {
+        A64::Jit jit{jit_user_config};
+        oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+        code.SM3SS1(V0.S4(), V0.S4(), V1.S4(), V2.S4());
+        jit.SetPC(0);
+        jit.SetVector(0, {0xec4aff517369c667, 0x46e3fbf2abbacd29});
+        jit.SetVector(1, {0x8de7e81bf854c27c, 0x9ac99f33632e5a76});
+        jit.SetVector(2, {0x5aa35831b70d3266, 0xd45ee95817055d25});
+        env.ticks_left = env.code_mem.size();
+        CheckedRun([&]() { jit.Run(); });
+        CHECK(jit.GetVector(0) == Vector{0x0000000000000000, 0x73d67cd700000000});
+    }
+    SECTION("SM3PARTW1") {
+        A64::Jit jit{jit_user_config};
+        oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+        code.SM3PARTW1(V0.S4(), V1.S4(), V2.S4());
+        jit.SetPC(0);
+        jit.SetVector(0, {0xec4aff517369c667, 0x46e3fbf2abbacd29});
+        jit.SetVector(1, {0x8de7e81bf854c27c, 0x9ac99f33632e5a76});
+        jit.SetVector(2, {0x5aa35831b70d3266, 0xd45ee95817055d25});
+        env.ticks_left = env.code_mem.size();
+        CheckedRun([&]() { jit.Run(); });
+        CHECK(jit.GetVector(0) == Vector{0x653c64995693280c, 0xabcc7db97adebf12});
+    }
+    SECTION("SM3PARTW2") {
+        A64::Jit jit{jit_user_config};
+        oaknut::VectorCodeGenerator code{env.code_mem, nullptr};
+        code.SM3PARTW2(V0.S4(), V1.S4(), V2.S4());
+        jit.SetPC(0);
+        jit.SetVector(0, {0xec4aff517369c667, 0x46e3fbf2abbacd29});
+        jit.SetVector(1, {0x8de7e81bf854c27c, 0x9ac99f33632e5a76});
+        jit.SetVector(2, {0x5aa35831b70d3266, 0xd45ee95817055d25});
+        env.ticks_left = env.code_mem.size();
+        CheckedRun([&]() { jit.Run(); });
+        CHECK(jit.GetVector(0) == Vector{0x30010fe70da43740, 0x6702425b4a3a05d4});
+    }
+}
+
+TEST_CASE("A64: SDIV and UDIV by zero", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    env.code_mem.emplace_back(0x1ac20c20);  // SDIV W0, W1, W2
+    env.code_mem.emplace_back(0x9ac20c23);  // SDIV X3, X1, X2
+    env.code_mem.emplace_back(0x1ac20824);  // UDIV W4, W1, W2
+    env.code_mem.emplace_back(0x14000000);  // B .
+
+    jit.SetRegister(0, 0xdeadbeef);
+    jit.SetRegister(1, 0x12345678);
+    jit.SetRegister(2, 0);
+    jit.SetRegister(3, 0xdeadbeef);
+    jit.SetRegister(4, 0xdeadbeef);
+    jit.SetPC(0);
+
+    env.ticks_left = 4;
+    CheckedRun([&]() { jit.Run(); });
+
+    // Division by zero gives zero, whatever the dividend.
+    REQUIRE(jit.GetRegister(0) == 0);
+    REQUIRE(jit.GetRegister(3) == 0);
+    REQUIRE(jit.GetRegister(4) == 0);
+}
+
+TEST_CASE("A64: FRINT through the soft-float fallback", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    // FRINTX, FRINTA and every half-precision FRINT skip ROUNDSD/ROUNDSS on any host.
+    env.code_mem.emplace_back(0x1e674020);  // FRINTX D0, D1
+    env.code_mem.emplace_back(0x1e664062);  // FRINTA D2, D3
+    env.code_mem.emplace_back(0x1e2640a4);  // FRINTA S4, S5
+    env.code_mem.emplace_back(0x1ee4c0e6);  // FRINTP H6, H7
+    env.code_mem.emplace_back(0x1ee54128);  // FRINTM H8, H9
+    env.code_mem.emplace_back(0x1ee7416a);  // FRINTX H10, H11
+    env.code_mem.emplace_back(0x14000000);  // B .
+
+    jit.SetVector(1, {0x3fd3333333333333, 0});  // 0.3
+    jit.SetVector(3, {0x4004000000000000, 0});  // 2.5
+    jit.SetVector(5, {0xbf000000, 0});          // -0.5f
+    jit.SetVector(7, {0x0478, 0});              // 6.8e-5 (half)
+    jit.SetVector(9, {0xa75c, 0});              // -0.0287 (half)
+    jit.SetVector(11, {0x3421, 0});             // 0.258 (half)
+    jit.SetFpcr(0);                             // round to nearest
+    jit.SetFpsr(0);
+    jit.SetPC(0);
+
+    env.ticks_left = 7;
+    CheckedRun([&]() { jit.Run(); });
+
+    REQUIRE(jit.GetVector(0) == Vector{0, 0});                   // 0.0, from FPCR's rounding
+    REQUIRE(jit.GetVector(2) == Vector{0x4008000000000000, 0});  // 3.0, ties away from zero
+    REQUIRE(jit.GetVector(4) == Vector{0xbf800000, 0});          // -1.0f
+    REQUIRE(jit.GetVector(6) == Vector{0x3c00, 0});              // 1.0
+    REQUIRE(jit.GetVector(8) == Vector{0xbc00, 0});              // -1.0
+    REQUIRE(jit.GetVector(10) == Vector{0, 0});                  // 0.0
+    REQUIRE((jit.GetFpsr() & 0x10) != 0);                        // FRINTX raised Inexact
+}
+
+TEST_CASE("A64: SQSHLU saturates 8/16/64-bit lanes", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    env.code_mem.emplace_back(0x2f0b6420);  // SQSHLU V0.8B, V1.8B, #3
+    env.code_mem.emplace_back(0x2f146462);  // SQSHLU V2.4H, V3.4H, #4
+    env.code_mem.emplace_back(0x6f4064a4);  // SQSHLU V4.2D, V5.2D, #0
+    env.code_mem.emplace_back(0x7f5864e6);  // SQSHLU D6, D7, #24
+    env.code_mem.emplace_back(0x14000000);  // B .
+
+    jit.SetVector(1, {0x8ecb02792c32fe49, 0});
+    jit.SetVector(3, {0x80007fff10000fff, 0});
+    jit.SetVector(5, {0xef319b929116dc5a, 0x362758dfbfb5c4db});
+    jit.SetVector(7, {0x00000000bf800000, 0});
+    jit.SetFpsr(0);
+    jit.SetPC(0);
+
+    env.ticks_left = 5;
+    CheckedRun([&]() { jit.Run(); });
+
+    // Positive lanes that overflow saturate to all ones, negative lanes become zero.
+    REQUIRE(jit.GetVector(0) == Vector{0x000010ffffff00ff, 0});
+    REQUIRE(jit.GetVector(2) == Vector{0x0000fffffffffff0, 0});
+    REQUIRE(jit.GetVector(4) == Vector{0, 0x362758dfbfb5c4db});
+    REQUIRE(jit.GetVector(6) == Vector{0x00bf800000000000, 0});
+    REQUIRE(FP::FPSR{jit.GetFpsr()}.QC());
+}
+
+TEST_CASE("A64: FCVTZS and FCVTZU (vector) with 64 fraction bits", "[a64]") {
+    A64TestEnv env;
+    A64::UserConfig jit_user_config{};
+    jit_user_config.callbacks = &env;
+    A64::Jit jit{jit_user_config};
+
+    // Without SSE4.1 these go through the soft-float fallback (DYNARMIC_HOST_FEATURES=0).
+    env.code_mem.emplace_back(0x4f40fc20);  // FCVTZS V0.2D, V1.2D, #64
+    env.code_mem.emplace_back(0x6f40fc62);  // FCVTZU V2.2D, V3.2D, #64
+    env.code_mem.emplace_back(0x4f40fca4);  // FCVTZS V4.2D, V5.2D, #64
+    env.code_mem.emplace_back(0x6f40fca6);  // FCVTZU V6.2D, V5.2D, #64
+    env.code_mem.emplace_back(0x14000000);  // B .
+
+    jit.SetVector(1, {0x3fd0000000000000, 0xbfe0000000000000});  // 0.25, -0.5
+    jit.SetVector(3, {0x3fe8000000000000, 0x3c00000000000000});  // 0.75, 2^-63
+    jit.SetVector(5, {0x3ff0000000000000, 0xbff0000000000000});  // 1.0, -1.0
+    jit.SetPC(0);
+
+    env.ticks_left = 5;
+    CheckedRun([&]() { jit.Run(); });
+
+    // Each lane times 2^64, toward zero; 1.0 and -1.0 saturate.
+    REQUIRE(jit.GetVector(0) == Vector{0x4000000000000000, 0x8000000000000000});
+    REQUIRE(jit.GetVector(2) == Vector{0xc000000000000000, 0x0000000000000002});
+    REQUIRE(jit.GetVector(4) == Vector{0x7fffffffffffffff, 0x8000000000000000});
+    REQUIRE(jit.GetVector(6) == Vector{0xffffffffffffffff, 0});
 }

@@ -9,7 +9,7 @@
 #include <memory>
 #include <string>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/logging.h"
 #include "common/scm_rev.h"
@@ -55,7 +55,8 @@ bool FillWindowSystemInfoFromSDL(SDL_Window* window,
     } else if (SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,
                                       nullptr) != nullptr) {
         info.type = Core::Frontend::WindowSystemType::Cocoa;
-        info.render_surface = SDL_Metal_CreateView(window);
+        // MoltenVK takes the view's CAMetalLayer, not the view
+        info.render_surface = SDL_Metal_GetLayer(SDL_Metal_CreateView(window));
     } else if (void* android_window =
                    SDL_GetPointerProperty(window_props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER,
                                           nullptr);
@@ -73,15 +74,14 @@ bool FillWindowSystemInfoFromSDL(SDL_Window* window,
 EmuWindow_SDL3_VK::EmuWindow_SDL3_VK(InputCommon::InputSubsystem* input_subsystem_,
                                      Core::System& system_, bool fullscreen)
     : EmuWindow_SDL3{input_subsystem_, system_} {
-    const std::string window_title = fmt::format("Eden {} | {}-{} (Vulkan)",
-                                                 Common::g_build_name,
-                                                 Common::g_scm_branch,
-                                                 Common::g_scm_desc);
+    const std::string window_title = std::format("Eden {} | {}-{} (Vulkan)",
+                                                 std::string_view{Common::g_build_name},
+                                                 std::string_view{Common::g_scm_branch},
+                                                 std::string_view{Common::g_scm_desc});
     render_window =
         SDL_CreateWindow(window_title.c_str(), Layout::ScreenUndocked::Width,
                          Layout::ScreenUndocked::Height,
-                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
-
+                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | Nx2HiddenWindowFlags());
 
     SetWindowIcon();
 
@@ -97,8 +97,8 @@ EmuWindow_SDL3_VK::EmuWindow_SDL3_VK(InputCommon::InputSubsystem* input_subsyste
     OnResize();
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
     SDL_PumpEvents();
-    LOG_INFO(Frontend, "Eden Version: {} | {}-{} (Vulkan)", Common::g_build_name,
-             Common::g_scm_branch, Common::g_scm_desc);
+    LOG_INFO(Frontend, "Eden Version: {} | {}-{} (Vulkan)", std::string_view{Common::g_build_name},
+             std::string_view{Common::g_scm_branch}, std::string_view{Common::g_scm_desc});
 }
 
 EmuWindow_SDL3_VK::~EmuWindow_SDL3_VK() = default;

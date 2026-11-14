@@ -14,18 +14,18 @@
 namespace Common::FS {
 
 enum class EdenPath {
-    EdenDir,        // Where yuzu stores its data.
-    AmiiboDir,      // Where Amiibo backups are stored.
-    CacheDir,       // Where cached filesystem data is stored.
-    ConfigDir,      // Where config files are stored.
-    CrashDumpsDir,  // Where crash dumps are stored.
-    DumpDir,        // Where dumped data is stored.
-    KeysDir,        // Where key files are stored.
-    LoadDir,        // Where cheat/mod files are stored.
-    LogDir,         // Where log files are stored.
-    LosslessDir,    // Where the user-supplied Lossless Scaling library is stored.
-    NANDDir,        // Where the emulated NAND is stored.
-    PlayTimeDir,    // Where play time data is stored.
+    EdenDir,       // Where yuzu stores its data.
+    AmiiboDir,     // Where Amiibo backups are stored.
+    CacheDir,      // Where cached filesystem data is stored.
+    ConfigDir,     // Where config files are stored.
+    CrashDumpsDir, // Where crash dumps are stored.
+    DumpDir,       // Where dumped data is stored.
+    KeysDir,       // Where key files are stored.
+    LoadDir,       // Where cheat/mod files are stored.
+    LogDir,        // Where log files are stored.
+    LosslessDir,   // Where the user-supplied Lossless Scaling library is stored.
+    NANDDir,       // Where the emulated NAND is stored.
+    PlayTimeDir,   // Where play time data is stored.
     PostPresetDir,
     PostShaderDir,  // Where user post-processing shaders are stored.
     SaveDir,        // Where save data is stored.
@@ -34,10 +34,15 @@ enum class EdenPath {
     ShaderDir,      // Where shaders are stored.
     TASDir,         // Where TAS scripts are stored.
     IconsDir,       // Where Icons for Windows shortcuts are stored.
+    StreamlineDir,  // Where the user-supplied NVIDIA Streamline loader is stored.
 };
 
 // migration/compat dirs
 enum EmuPath {
+    LegacyEdenDir,
+    LegacyEdenConfigDir,
+    LegacyEdenCacheDir,
+
     CitronDir,
     CitronConfigDir,
     CitronCacheDir,
@@ -258,6 +263,18 @@ void SetAppDirectory(const std::string& app_directory);
 [[nodiscard]] std::string GetLegacyPathString(EmuPath legacy_path);
 
 /**
+ * Gets the directory that holds a title's Vulkan pipeline cache files.
+ * Mario Kart World keeps them in a subdirectory of its shader cache directory.
+ *
+ * @param shader_dir Shader cache directory
+ * @param title_id Title ID
+ *
+ * @returns The Vulkan pipeline cache directory of the title.
+ */
+[[nodiscard]] std::filesystem::path GetVulkanPipelineCacheDir(
+    const std::filesystem::path& shader_dir, u64 title_id);
+
+/**
  * Sets a new filesystem path associated with the EdenPath enum.
  * If the filesystem object at new_path is not a directory, this function will not do anything.
  *
@@ -283,6 +300,13 @@ void SetEdenPath(EdenPath eden_path, const Path& new_path) {
 #endif
 
 #ifdef _WIN32
+
+/**
+ * Gets the path to the executable of the current process.
+ *
+ * @returns The path to the executable of the current process.
+ */
+[[nodiscard]] std::filesystem::path GetExePath();
 
 /**
  * Gets the path of the directory containing the executable of the current process.
@@ -368,7 +392,8 @@ enum class DirectorySeparator {
 }
 
 // Gets the extension of the filename
-[[nodiscard]] inline std::string_view GetExtensionFromFilename(const std::string_view name) noexcept {
+[[nodiscard]] inline std::string_view GetExtensionFromFilename(
+    const std::string_view name) noexcept {
     if (auto const index = name.rfind('.'); index != std::string_view::npos)
         return name.substr(index + 1);
     return {};

@@ -170,8 +170,6 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::Mailbox);
             DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::High);
             DefaultForTitle(Settings::values.dma_accuracy, Settings::DmaAccuracy::Safe);
-            // Its fence values must wait for the GPU, or the HUD still blinks.
-            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
             DefaultForTitle(Settings::values.sync_memory_operations, true);
             DefaultForTitle(Settings::values.use_disk_shader_cache, true);
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
@@ -184,15 +182,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vertex_input_dynamic_state, true);
             // FXAA smears its character faces; native resolution keeps them sharp without it.
             DefaultForTitle(Settings::values.anti_aliasing, Settings::AntiAliasing::None);
-            LOG_INFO(Core, "Title defaults: GPU {}, DMA {}, async GPU {}, reactive flushing {}, "
-                           "EDS {}, vertex input {}, docked {}",
-                     Settings::CanonicalizeEnum(Settings::values.gpu_accuracy.GetValue()),
-                     Settings::CanonicalizeEnum(Settings::values.dma_accuracy.GetValue()),
+            DefaultForTitle(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
+            LOG_INFO(Core, "Title defaults: async GPU {}, vertex input dynamic state {}, fence {}",
                      Settings::values.use_asynchronous_gpu_emulation.GetValue(),
-                     Settings::values.use_reactive_flushing.GetValue(),
-                     Settings::CanonicalizeEnum(Settings::values.dyna_state.GetValue()),
                      Settings::values.vertex_input_dynamic_state.GetValue(),
-                     Settings::CanonicalizeEnum(Settings::values.use_docked_mode.GetValue()));
+                     Settings::CanonicalizeEnum(Settings::values.gpu_fence_behavior.GetValue()));
             return true;
         case TitleID::PokemonScarlet:
         case TitleID::PokemonViolet:
@@ -269,6 +263,19 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
         case TitleID::XenobladeChronicles3:
             // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
             // (OptimalDriver), which owns driver_path.
+            return true;
+        case TitleID::OcarinaOfTimeNx2:
+            // From Eglantine's desktop preset (Settings::SetOcarinaOfTimeRecommendedSettings):
+            // reactive flushing and FifoRelaxed. Not its docked mode or async shaders: handheld
+            // keeps the render targets and the upscale output small on a phone, and with async
+            // shaders the draws skipped while pipelines build left a GPU channel waiting on a
+            // semaphore, then garbage commands and a crash 25 s into the first 3D scene (Galaxy
+            // S24 Ultra, Turnip; one run each way).
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Handheld);
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, false);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
             return true;
         default:
             return false;

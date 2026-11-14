@@ -25,6 +25,11 @@
     <string name="companion_app_choose">Choose an app</string>
     <string name="companion_app_missing">%1$s (not installed)</string>
     <string name="companion_app_search">Search apps</string>
+    <string name="second_screen_brightness">Second screen follows main brightness</string>
+    <string name="second_screen_brightness_description">On copies the main screen\'s brightness onto the second screen while a game runs. Auto does too, except on devices that light the second screen from their own slider (AYN Thor and other AYN dual-screen devices). Off leaves it to the device. Applies when a game starts.</string>
+    <string name="second_screen_brightness_auto">Auto</string>
+    <string name="second_screen_brightness_on">On</string>
+    <string name="second_screen_brightness_off">Off</string>
     <!-- Eden Duo: in-game companion toggle -->
     <string name="companion_toggle_gesture">Companion toggle gesture</string>
     <string name="companion_toggle_gesture_description">Hides or shows the companion during a game, so the second screen can be used for another app. Also in the in-game menu and the Companion Quick Settings tile.</string>
@@ -107,4 +112,31 @@
     <string name="duo_save_import_error_description">The zip could not be read, so your current saves were kept.\n\nDetails: %1$s</string>
     <string name="duo_save_import_failed_description">The saves in the zip could not be copied to %1$s.</string>
     <string name="duo_save_import_profile">Saves are imported into the profile %1$s.</string>
+    <!-- Eden Duo: in-app update (App Settings) -->
+    <string name="duo_update_checks">Check for Eden Duo updates</string>
+    <string name="duo_update_checks_description">Once a day at start, looks for a new Eden Duo release on GitHub and offers to install it. Games, settings and companions are kept.</string>
+    <string name="duo_update_check_now">Check now</string>
+    <string name="duo_update_check_now_description">Installed: Eden Duo %1$s</string>
+    <string name="duo_update_up_to_date">Eden Duo is up to date</string>
+    <string name="duo_update_check_failed">Could not check for Eden Duo updates</string>
+    <string name="duo_update_check_busy">GitHub is busy. Try again later.</string>
+    <string name="duo_update_available">Eden Duo %1$s is available</string>
+    <string name="duo_update_available_no_notes">It installs over your current Eden Duo (%1$s). Games, settings and companions are kept.</string>
+    <string name="duo_update_install">Update</string>
+    <string name="duo_update_view">View release</string>
+    <string name="duo_update_later">Later</string>
+    <string name="duo_update_skip">Skip this version</string>
+    <string name="duo_update_downloading">Downloading Eden Duo %1$s</string>
+    <string name="duo_update_failed">The Eden Duo update could not be downloaded</string>
+    <string name="duo_update_unknown_sources">To update, allow Eden Duo to install unknown apps, then tap Update again.</string>
+    <string name="duo_update_install_not_started">The update was downloaded, but the Android installer could not start. Try again later.</string>
+    <string name="duo_update_installed">Eden Duo was updated</string>
+    <string name="duo_update_install_cancelled">Update cancelled</string>
+    <string name="duo_update_install_downgrade">Not installed: the Eden Duo on this device is newer than this update.</string>
+    <string name="duo_update_install_conflict">Not installed: this update does not match the installed Eden Duo (different signature).</string>
+    <string name="duo_update_install_invalid">Not installed: Android could not read the downloaded update.</string>
+    <string name="duo_update_install_incompatible">Not installed: this update is not compatible with this device.</string>
+    <string name="duo_update_install_storage">Not installed: there is not enough free storage.</string>
+    <string name="duo_update_install_blocked">Not installed: Android blocked the update.</string>
+    <string name="duo_update_install_failed">The update was downloaded, but Android did not install it.</string>
 </resources>

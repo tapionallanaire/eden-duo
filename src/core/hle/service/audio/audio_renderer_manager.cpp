@@ -20,14 +20,14 @@ using namespace AudioCore::Renderer;
 
 IAudioRendererManager::IAudioRendererManager(Core::System& system_)
     : ServiceFramework{system_, "audren:u"}
-    , impl(system_)
+    , impl(std::make_shared<AudioCore::Renderer::Manager>(system_))
 {
     // clang-format off
     static const FunctionInfo functions[] = {
         {0, D<&IAudioRendererManager::OpenAudioRenderer>, "OpenAudioRenderer"},
         {1, D<&IAudioRendererManager::GetWorkBufferSize>, "GetWorkBufferSize"},
         {2, D<&IAudioRendererManager::GetAudioDeviceService>, "GetAudioDeviceService"},
-        {3, nullptr, "OpenAudioRendererForManualExecution"},
+        {3, &IAudioRendererManager::StubReplyInterface, "OpenAudioRendererForManualExecution"},
         {4, D<&IAudioRendererManager::GetAudioDeviceServiceWithRevisionInfo>, "GetAudioDeviceServiceWithRevisionInfo"},
     };
     // clang-format on
@@ -64,7 +64,7 @@ Result IAudioRendererManager::OpenAudioRenderer(
               impl->GetSessionCount());
 
     *out_audio_renderer =
-        std::make_shared<IAudioRenderer>(system, *impl, parameter, tmem_handle.Get(), tmem_size,
+        std::make_shared<IAudioRenderer>(system, impl, parameter, tmem_handle.Get(), tmem_size,
                                          process_handle.Get(), aruid.pid, session_id);
     R_SUCCEED();
 }
@@ -76,12 +76,12 @@ Result IAudioRendererManager::GetWorkBufferSize(Out<u64> out_size,
     R_TRY(impl->GetWorkBufferSize(params, *out_size))
 
     std::string output_info{};
-    output_info += fmt::format("\tRevision {}", AudioCore::GetRevisionNum(params.revision));
+    output_info += std::format("\tRevision {}", AudioCore::GetRevisionNum(params.revision));
     output_info +=
-        fmt::format("\n\tSample Rate {}, Sample Count {}", params.sample_rate, params.sample_count);
-    output_info += fmt::format("\n\tExecution Mode {}, Voice Drop Enabled {}",
+        std::format("\n\tSample Rate {}, Sample Count {}", params.sample_rate, params.sample_count);
+    output_info += std::format("\n\tExecution Mode {}, Voice Drop Enabled {}",
                                static_cast<u32>(params.execution_mode), params.voice_drop_enabled);
-    output_info += fmt::format(
+    output_info += std::format(
         "\n\tSizes: Effects {:04X}, Mixes {:04X}, Sinks {:04X}, Submixes {:04X}, Splitter Infos "
         "{:04X}, Splitter Destinations {:04X}, Voices {:04X}, Performance Frames {:04X} External "
         "Context {:04X}",

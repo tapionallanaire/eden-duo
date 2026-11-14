@@ -39,8 +39,14 @@ Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window)
 
 void Init(QWidget* root);
 
+// Destroys the global core state. Must be called before static destructors run.
+void Shutdown();
+
 void SetupContentProviders();
 void SetupHID();
+
+// setup env vars, scaling, and app attributes
+void SetupApplication();
 
 const QString tr(const char* str);
 const QString tr(const std::string& str);

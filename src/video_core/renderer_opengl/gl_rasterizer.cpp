@@ -511,12 +511,17 @@ bool RasterizerOpenGL::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheT
 }
 
 VideoCore::RasterizerDownloadArea RasterizerOpenGL::GetFlushArea(DAddr addr, u64 size) {
+    std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     {
         std::scoped_lock lock{texture_cache.mutex};
-        auto area = texture_cache.GetFlushArea(addr, size);
-        if (area) {
-            return *area;
-        }
+        texture_area = texture_cache.GetFlushArea(addr, size);
+    }
+    if (texture_area) {
+        // The core disarmed the read's pages before asking: the buffer cache arms only pages it
+        // doesn't count as armed, so it must forget these.
+        std::scoped_lock lock{buffer_cache.mutex};
+        buffer_cache.ForgetReadTraps(addr, size);
+        return *texture_area;
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -595,7 +600,7 @@ void RasterizerOpenGL::UnmapMemory(DAddr addr, u64 size) {
     }
     {
         std::scoped_lock lock{buffer_cache.mutex};
-        buffer_cache.WriteMemory(addr, size);
+        buffer_cache.WriteMemory(addr, size, false);
     }
     shader_cache.OnCacheInvalidation(addr, size);
 }
@@ -607,8 +612,8 @@ void RasterizerOpenGL::ModifyGPUMemory(size_t as_id, GPUVAddr addr, u64 size) {
     }
 }
 
-void RasterizerOpenGL::SignalFence(std::function<void()>&& func) {
-    fence_manager.SignalFence(std::move(func));
+void RasterizerOpenGL::SignalFence(std::function<void()>&& func, bool force_completion) {
+    fence_manager.SignalFence(std::move(func), force_completion);
 }
 
 void RasterizerOpenGL::SyncOperation(std::function<void()>&& func) {
@@ -716,7 +721,7 @@ void RasterizerOpenGL::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     }
     gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
     {
-        std::unique_lock<std::recursive_mutex> lock{buffer_cache.mutex};
+        std::unique_lock lock{buffer_cache.mutex};
         if (!buffer_cache.InlineMemory(*cpu_addr, copy_size, memory)) {
             buffer_cache.WriteMemory(*cpu_addr, copy_size);
         }

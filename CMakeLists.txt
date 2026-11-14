@@ -10,9 +10,17 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules/find")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/externals/cmake-modules")
 
+# run compiler checks before everything else
+include(CompilerChecks)
+
 set(CPM_SOURCE_CACHE ${CMAKE_SOURCE_DIR}/.cache/cpm)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_SCAN_FOR_MODULES 0)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+# force cmdlines to use rsp files to avoid 8191 char limit on winblows
+if (CMAKE_GENERATOR MATCHES "Ninja" AND WIN32)
+    set(CMAKE_NINJA_FORCE_RESPONSE_FILE ON)
+endif()
 
 include(DetectPlatform)
 include(DetectArchitecture)
@@ -67,12 +75,11 @@ if (YUZU_STATIC_ROOM)
     set(OpenSSL_FORCE_SYSTEM ON)
 
     set(zstd_FORCE_BUNDLED ON)
-    set(fmt_FORCE_BUNDLED ON)
 endif()
 
 # qt stuff
 option(ENABLE_QT "Enable the Qt frontend" ON)
-option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" OFF)
+option(ENABLE_QT_TRANSLATION "Enable translations for the Qt frontend" ON)
 option(ENABLE_UPDATE_CHECKER "Enable update checker (for Qt and Android)" OFF)
 cmake_dependent_option(YUZU_USE_QT_MULTIMEDIA "Use QtMultimedia for Camera"  OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
 cmake_dependent_option(YUZU_USE_QT_WEB_ENGINE "Use QtWebEngine for web applet implementation" OFF "NOT YUZU_USE_BUNDLED_QT" OFF)
@@ -83,8 +90,28 @@ option(EDEN_DSMOD_BUILD_DEV_TOOLS "Build the DSMod RE/heap-analysis developer to
 option(ENABLE_DEBUG_TOOLS "Enable debugging tools (maxwell disassembler, SPIRV translator, etc)" OFF)
 option(ENABLE_WERROR "Enable -Werror diagnostics" ON)
 
+# Handle specific -Werror downgrades safely across platforms
+if(ENABLE_WERROR)
+    if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(CMAKE_C_FLAGS MATCHES "-Werror=unused")
+            string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+        endif()
+        if(CMAKE_CXX_FLAGS MATCHES "-Werror=unused")
+            string(REPLACE "-Werror=unused" "-Wno-error=unused" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+        endif()
+
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error=unused -Wno-error=unused-function")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error=unused -Wno-error=unused-function")
+    elseif(MSVC)
+        # Windows Specifically
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /wd4100 /wd4101")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4100 /wd4101")
+    endif()
+endif()
+
+
 # Lossless Scaling frame generation. Only Android.
-cmake_dependent_option(ENABLE_LSFG "Enable Lossless Scaling frame generation" ON "ANDROID" OFF)
+option(ENABLE_LSFG "Enable frame generation (LSFG and FSR 3 Fluid Motion)" ON)
 
 option(ENABLE_RESHADE "Enable ReShade FX post-processing effects" ON)
 
@@ -134,17 +161,17 @@ if (YUZU_STATIC_BUILD)
         set(YUZU_USE_BUNDLED_FFMPEG ON)
         set(YUZU_USE_BUNDLED_SDL3 ON)
         set(YUZU_USE_BUNDLED_OPENSSL ON)
-
-        set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF)
     elseif(APPLE)
         set(YUZU_USE_BUNDLED_FFMPEG ON)
         set(YUZU_USE_BUNDLED_SDL3 ON)
         set(YUZU_USE_BUNDLED_OPENSSL ON)
 
         # these libs do not properly provide static libs/let you do it with cmake
-        set(fmt_FORCE_BUNDLED ON)
         set(SPIRV-Headers_FORCE_BUNDLED ON)
         set(zstd_FORCE_BUNDLED ON)
+
+        # broken, idk why
+        set(lz4_FORCE_BUNDLED ON)
     endif()
 endif()
 
@@ -246,6 +273,7 @@ cmake_dependent_option(ENABLE_OPENGL "Enable OpenGL" ON "NOT (WIN32 AND ARCHITEC
 mark_as_advanced(FORCE ENABLE_OPENGL)
 
 option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
+option(ENABLE_MCP_SERVER "Build the built-in MCP server for AI agents (off at runtime by default)" ON)
 option(ENABLE_WIFI_SCAN "Enable WiFi scanning" OFF)
 
 cmake_dependent_option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence" OFF "ENABLE_QT" OFF)
@@ -294,7 +322,7 @@ if (ANDROID AND YUZU_DOWNLOAD_ANDROID_VVL)
 endif()
 
 if(EXISTS ${PROJECT_SOURCE_DIR}/hooks/pre-commit AND NOT EXISTS ${PROJECT_SOURCE_DIR}/.git/hooks/pre-commit)
-    if (EXISTS ${PROJECT_SOURCE_DIR}/.git/)
+    if (IS_DIRECTORY ${PROJECT_SOURCE_DIR}/.git)
         message(STATUS "Copying pre-commit hook")
         file(COPY hooks/pre-commit DESTINATION ${PROJECT_SOURCE_DIR}/.git/hooks)
     endif()
@@ -369,7 +397,7 @@ endif()
 # Configure C++ standard
 # ===========================
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Output binaries to bin/
@@ -402,14 +430,13 @@ if (OpenSSL_ADDED)
     add_compile_definitions(YUZU_BUNDLED_OPENSSL)
 endif()
 
-message(STATUS "Fetching needed dependencies with CPM")
-
 set(BUILD_SHARED_LIBS OFF)
 set(BUILD_TESTING OFF)
 set(ENABLE_TESTING OFF)
 
 # boost
-set(BOOST_INCLUDE_LIBRARIES algorithm icl pool container heap asio headers process filesystem crc variant)
+set(BOOST_INCLUDE_LIBRARIES algorithm icl pool container heap asio headers
+    process filesystem crc variant pfr)
 
 AddJsonPackage(boost)
 
@@ -433,9 +460,6 @@ if (Boost_ADDED)
     endif()
 endif()
 
-# fmt
-AddJsonPackage(fmt)
-
 # lz4
 AddJsonPackage(lz4)
 
@@ -444,15 +468,15 @@ if (lz4_ADDED)
 endif()
 
 # zstd
+# Always bundled: NUP archives are only byte-identical across platforms when every build
+# compresses with the same zstd version.
+set(zstd_FORCE_BUNDLED ON)
 AddJsonPackage(zstd)
 
 if (zstd_ADDED)
     add_library(zstd::zstd ALIAS libzstd_static)
     add_library(zstd::libzstd ALIAS libzstd_static)
 endif()
-
-# nlohmann
-AddJsonPackage(nlohmann)
 
 if (NOT YUZU_STATIC_ROOM)
     # zlib
@@ -522,7 +546,8 @@ elseif (WIN32)
     set(PLATFORM_LIBRARIES ${PLATFORM_LIBRARIES} winmm iphlpapi ws2_32 wlanapi)
     if (MINGW)
         # PSAPI is the Process Status API
-        set(PLATFORM_LIBRARIES ${PLATFORM_LIBRARIES} psapi imm32 version crypt32 rpcrt4 gdi32 wldap32 mswsock)
+        set(PLATFORM_LIBRARIES ${PLATFORM_LIBRARIES} psapi imm32 version
+            crypt32 rpcrt4 gdi32 wldap32 mswsock bcrypt)
     endif()
 elseif (MANAGARM)
     set(PLATFORM_LIBRARIES iconv intl)
@@ -595,7 +620,7 @@ if (ENABLE_QT)
         list(APPEND CMAKE_PREFIX_PATH "${Qt6_DIR}")
     endif()
 
-    find_package(Qt6 REQUIRED COMPONENTS Core)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Core)
 
     if (NOT DEFINED QT_TARGET_PATH)
         get_target_property(qtcore_path Qt6::Core LOCATION_Release)
@@ -635,10 +660,15 @@ if (ENABLE_QT)
     endif()
 
     if (ENABLE_QT_TRANSLATION)
-        list(APPEND YUZU_QT_COMPONENTS LinguistTools)
+        list(APPEND YUZU_QT_OPTIONAL LinguistTools)
     endif()
 
     find_package(Qt6 REQUIRED COMPONENTS ${YUZU_QT_COMPONENTS} OPTIONAL_COMPONENTS ${YUZU_QT_OPTIONAL})
+
+    if (ENABLE_QT_TRANSLATION AND NOT Qt6LinguistTools_FOUND)
+        message(STATUS "Qt6 LinguistTools not found; disabling Qt translations")
+        set(ENABLE_QT_TRANSLATION OFF)
+    endif()
     set(QT_MAJOR_VERSION 6)
     # Qt6 sets cxx_std_17 and we need to undo that
     set_target_properties(Qt6::Platform PROPERTIES INTERFACE_COMPILE_FEATURES "")
@@ -730,21 +760,22 @@ endif()
 
 # TODO: Icon/install handling n such should be put into dist/CMakeLists.txt
 if(ENABLE_QT AND UNIX AND NOT APPLE)
-    install(FILES "dist/dev.eden_emu.eden.desktop"
+    install(FILES "dist/dev.eglantine.eglantine.desktop"
         DESTINATION "share/applications")
     install(FILES "dist/dev.eden_emu.eden.svg"
-        DESTINATION "share/icons/hicolor/scalable/apps")
+        DESTINATION "share/icons/hicolor/scalable/apps"
+        RENAME "dev.eglantine.eglantine.svg")
 
     # TODO: these files need to be updated.
-    install(FILES "dist/dev.eden_emu.eden.xml"
+    install(FILES "dist/dev.eglantine.eglantine.xml"
         DESTINATION "share/mime/packages")
-    install(FILES "dist/dev.eden_emu.eden.metainfo.xml"
+    install(FILES "dist/dev.eglantine.eglantine.metainfo.xml"
         DESTINATION "share/metainfo")
 endif()
 
 if (YUZU_INSTALL_UDEV_RULES)
     include(GNUInstallDirs)
 
-    install(FILES "dist/72-eden-input.rules"
+    install(FILES "dist/72-eglantine-input.rules"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/udev/rules.d")
 endif()

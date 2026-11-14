@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <functional>
 #include <list>
+#include <optional>
 #include <mutex>
 
 #include "common/common_types.h"
@@ -19,6 +20,8 @@ namespace Host1x {
 
 class SyncpointManager {
 public:
+    static constexpr size_t NUM_MAX_SYNCPOINTS = 192;
+
     u32 GetGuestSyncpointValue(u32 id) const {
         return syncpoints_guest[id].load(std::memory_order_acquire);
     }
@@ -53,6 +56,20 @@ public:
 
     void IncrementGuest(u32 syncpoint_id);
 
+    /// Called with a syncpoint's new guest value on every guest increment, before the value is
+    /// published and the actions it meets run (empty to stop). Switch 2 clients read syncpoint values from a page the
+    /// gsv service fills, and an action may wake a client that reads it right away.
+    using GuestMirror = std::function<void(u32 syncpoint_id, u32 value)>;
+    void SetGuestMirror(GuestMirror mirror);
+
+    /// Runs func with guest increments held off, so a copy of the guest values it makes can't
+    /// overwrite a newer value the mirror wrote.
+    template <typename Func>
+    void WithGuestValuesStable(Func&& func) {
+        std::scoped_lock lk(guard);
+        func();
+    }
+
     void IncrementHost(u32 syncpoint_id);
 
     void WaitGuest(u32 syncpoint_id, u32 expected_value);
@@ -73,7 +90,8 @@ public:
 
 private:
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
-                   std::list<RegisteredAction>& action_storage, std::mutex& action_mutex);
+                   std::list<RegisteredAction>& action_storage, std::mutex& action_mutex,
+                   std::optional<u32> mirrored_id = std::nullopt);
 
     ActionHandle RegisterAction(std::atomic<u32>& syncpoint,
                                 std::list<RegisteredAction>& action_storage, u32 expected_value,
@@ -83,8 +101,6 @@ private:
                           std::mutex& action_mutex);
 
     void Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv, u32 expected_value);
-
-    static constexpr size_t NUM_MAX_SYNCPOINTS = 192;
 
     std::array<std::atomic<u32>, NUM_MAX_SYNCPOINTS> syncpoints_guest{};
     std::array<std::atomic<u32>, NUM_MAX_SYNCPOINTS> syncpoints_host{};
@@ -96,6 +112,7 @@ private:
     /// Held while due actions run, outside guard: a guest action composites a whole frame.
     std::mutex guest_action_mutex;
     std::mutex host_action_mutex;
+    GuestMirror guest_mirror; ///< Guarded by `guard`.
     std::condition_variable wait_guest_cv;
     std::condition_variable wait_host_cv;
 };

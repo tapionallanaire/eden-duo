@@ -30,6 +30,7 @@ public:
     ~ISelfController() override;
 
 private:
+    void GetGraphicsSupervisor(HLERequestContext& ctx);
     Result Exit();
     Result LockExit();
     Result UnlockExit();

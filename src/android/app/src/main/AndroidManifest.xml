@@ -47,6 +47,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- Eden Duo: AYN's dual-screen assistant lights the second panel itself
+             (SecondScreenBrightness). -->
+        <package android:name="com.odin.dualscreen.assistant" />
     </queries>
 
     <application
@@ -147,6 +150,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Eden Duo: the in-app update's PackageInstaller session status (DuoUpdater). -->
+        <receiver
+            android:name="org.yuzu.yuzu_emu.duo.DuoInstallReceiver"
+            android:exported="false" />
 
         <service android:name="org.yuzu.yuzu_emu.utils.ForegroundService" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keep emulation running in background"/>

@@ -92,6 +92,11 @@ bool AssetSources::IsDirectorySource(std::string_view src) const {
     return slot != nullptr && !slot->def.read_bytes && slot->def.open_dir;
 }
 
+bool AssetSources::IsModuleReadableByteSource(std::string_view src) const {
+    const Slot* const slot = Find(PrefixOf(src));
+    return slot != nullptr && slot->def.read_bytes && slot->def.module_readable;
+}
+
 bool AssetSources::Available(std::string_view src) {
     const std::string_view prefix = src.find(':') == std::string_view::npos ? src : PrefixOf(src);
     Slot* const slot = Find(prefix);
@@ -139,6 +144,22 @@ std::vector<u8> AssetSources::ReadAll(const std::string& src) {
 }
 
 size_t AssetSources::ReadRange(std::string_view src, u64 offset, void* out, size_t size) {
+    if (Slot* const slot = Find(PrefixOf(src)); slot != nullptr && slot->def.read_bytes) {
+        const std::string whole{src};
+        if (slot->def.read_range) {
+            return slot->def.read_range(whole, offset, out, size);
+        }
+        const auto bytes = slot->def.read_bytes(whole);
+        if (out == nullptr) {
+            return bytes.size();
+        }
+        if (offset >= bytes.size()) {
+            return 0;
+        }
+        const size_t count = std::min<size_t>(size, bytes.size() - offset);
+        std::memcpy(out, bytes.data() + offset, count);
+        return count;
+    }
     const auto file = Open(src);
     if (!file) {
         return 0;

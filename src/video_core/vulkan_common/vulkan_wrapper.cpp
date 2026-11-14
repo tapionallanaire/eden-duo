@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -19,6 +20,52 @@
 namespace Vulkan::vk {
 
 namespace {
+
+/// The driver's shader compiler must not run with a game's floating-point mode: under NCE a
+/// host thread can carry the guest's FPCR (flush-to-zero), and pipelines compiled that way
+/// give different results (an over-bright picture).
+struct HostFpEnv {
+#if defined(__aarch64__)
+    HostFpEnv() {
+        __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
+        if (saved != 0) {
+            static std::atomic_flag logged;
+            if (!logged.test_and_set()) {
+                LOG_WARNING(Render_Vulkan, "Pipeline compile entered with FPCR {:#x}; host value used", saved);
+            }
+            const u64 zero = 0;
+            __asm__ volatile("msr fpcr, %0" : : "r"(zero));
+        }
+    }
+    ~HostFpEnv() {
+        if (saved != 0) {
+            __asm__ volatile("msr fpcr, %0" : : "r"(saved));
+        }
+    }
+    u64 saved{};
+#endif
+};
+
+/// Runs a Vulkan "count, then fetch" enumeration. The count can change between the two calls
+/// (a surface or swapchain being resized, for one): the driver then returns VK_INCOMPLETE, which
+/// is a success code, and the query has to be repeated.
+template <typename T, typename Query>
+std::vector<T> Enumerate(Query&& query) {
+    static constexpr int MAX_ATTEMPTS = 8;
+    std::vector<T> out;
+    VkResult result = VK_INCOMPLETE;
+    for (int attempt = 0; attempt < MAX_ATTEMPTS && result == VK_INCOMPLETE; ++attempt) {
+        u32 num{};
+        result = query(&num, nullptr);
+        if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
+            out.resize(num);
+            result = query(&num, out.data());
+            out.resize(num);
+        }
+    }
+    Check(result);
+    return out;
+}
 
 template <typename Func>
 void SortPhysicalDevices(std::vector<VkPhysicalDevice>& devices, const InstanceDispatch& dld,
@@ -117,6 +164,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkCmdDrawIndirectCount);
     X(vkCmdDrawIndexedIndirectCount);
     X(vkCmdDrawIndirectByteCountEXT);
+    X(vkCmdDrawMeshTasksEXT);
     X(vkCmdEndConditionalRenderingEXT);
     X(vkCmdEndQuery);
     X(vkCmdEndRenderPass);
@@ -220,6 +268,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkGetEventStatus);
     X(vkGetFenceStatus);
     X(vkGetImageMemoryRequirements);
+    X(vkGetImageSparseMemoryRequirements);
     X(vkGetPipelineCacheData);
     X(vkGetMemoryFdKHR);
 #ifdef _WIN32
@@ -241,6 +290,7 @@ void Load(VkDevice device, DeviceDispatch& dld) noexcept {
     X(vkUpdateDescriptorSetWithTemplate);
     X(vkUpdateDescriptorSets);
     X(vkGetBufferDeviceAddress);
+    X(vkGetMemoryHostPointerPropertiesEXT);
     X(vkGetDescriptorSetLayoutSizeEXT);
     X(vkGetDescriptorSetLayoutBindingOffsetEXT);
     X(vkGetDescriptorEXT);
@@ -313,6 +363,7 @@ bool Load(VkInstance instance, InstanceDispatch& dld) noexcept {
     X(vkDestroyDebugUtilsMessengerEXT);
     X(vkDestroyDebugReportCallbackEXT);
     X(vkDestroySurfaceKHR);
+    X(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR);
     X(vkGetPhysicalDeviceFeatures2);
     X(vkGetPhysicalDeviceFormatProperties2);
     X(vkGetPhysicalDeviceProperties2);
@@ -525,6 +576,19 @@ void Image::Release() const noexcept {
     }
 }
 
+Image::MemoryBlock Image::GetMemoryBlock() const noexcept {
+    if (allocation == nullptr) {
+        return {};
+    }
+    VmaAllocationInfo2 info{};
+    vmaGetAllocationInfo2(allocator, allocation, &info);
+    if (info.dedicatedMemory) {
+        return {0, info.blockSize, info.allocationInfo.size};
+    }
+    return {reinterpret_cast<u64>(info.allocationInfo.deviceMemory), info.blockSize,
+            info.allocationInfo.size};
+}
+
 void Buffer::Flush() const {
     if (!is_coherent) {
         vmaFlushAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
@@ -637,11 +701,9 @@ void CommandPool::SetObjectNameEXT(const char* name) const {
 }
 
 std::vector<VkImage> SwapchainKHR::GetImages() const {
-    u32 num;
-    Check(dld->vkGetSwapchainImagesKHR(owner, handle, &num, nullptr));
-    std::vector<VkImage> images(num);
-    Check(dld->vkGetSwapchainImagesKHR(owner, handle, &num, images.data()));
-    return images;
+    return Enumerate<VkImage>([this](u32* num, VkImage* images) {
+        return dld->vkGetSwapchainImagesKHR(owner, handle, num, images);
+    });
 }
 
 std::vector<VkPastPresentationTimingGOOGLE> SwapchainKHR::GetPastPresentationTiming() const {
@@ -776,6 +838,7 @@ PipelineLayout Device::CreatePipelineLayout(const VkPipelineLayoutCreateInfo& ci
 
 Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, VkPipelineCache cache) const {
     VkPipeline object = VK_NULL_HANDLE;
+    const HostFpEnv fp_env;
     auto const result = dld->vkCreateGraphicsPipelines(handle, cache, 1, &ci, nullptr, &object);
     // Adreno 5xx drivers do not properly return when a graphics pipeline fails to be created
     // Some (unkown) Mali drivers also do not properly return
@@ -789,6 +852,7 @@ Pipeline Device::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci, 
 Pipeline Device::CreateComputePipeline(const VkComputePipelineCreateInfo& ci,
                                        VkPipelineCache cache) const {
     VkPipeline object;
+    const HostFpEnv fp_env;
     Check(dld->vkCreateComputePipelines(handle, cache, 1, &ci, nullptr, &object));
     return Pipeline(object, handle, *dld);
 }
@@ -826,6 +890,7 @@ QueryPool Device::CreateQueryPool(const VkQueryPoolCreateInfo& ci) const {
 
 ShaderModule Device::CreateShaderModule(const VkShaderModuleCreateInfo& ci) const {
     VkShaderModule object;
+    const HostFpEnv fp_env;
     Check(dld->vkCreateShaderModule(handle, &ci, nullptr, &object));
     return ShaderModule(object, handle, *dld);
 }
@@ -881,6 +946,16 @@ VkMemoryRequirements Device::GetBufferMemoryRequirements(VkBuffer buffer,
 VkMemoryRequirements Device::GetImageMemoryRequirements(VkImage image) const noexcept {
     VkMemoryRequirements requirements;
     dld->vkGetImageMemoryRequirements(handle, image, &requirements);
+    return requirements;
+}
+
+std::vector<VkSparseImageMemoryRequirements> Device::GetImageSparseMemoryRequirements(
+    VkImage image) const {
+    u32 count = 0;
+    dld->vkGetImageSparseMemoryRequirements(handle, image, &count, nullptr);
+    std::vector<VkSparseImageMemoryRequirements> requirements(count);
+    dld->vkGetImageSparseMemoryRequirements(handle, image, &count, requirements.data());
+    requirements.resize(count);
     return requirements;
 }
 
@@ -998,6 +1073,29 @@ std::vector<VkPhysicalDeviceToolProperties> PhysicalDevice::GetPhysicalDeviceToo
     return properties;
 }
 
+std::vector<VkCooperativeMatrixPropertiesKHR> PhysicalDevice::GetCooperativeMatrixPropertiesKHR()
+    const {
+    if (!dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR) {
+        return {};
+    }
+    u32 num = 0;
+    if (dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physical_device, &num, nullptr) !=
+        VK_SUCCESS) {
+        return {};
+    }
+    std::vector<VkCooperativeMatrixPropertiesKHR> properties(
+        num, VkCooperativeMatrixPropertiesKHR{
+                 .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+                 .pNext = nullptr,
+             });
+    if (dld->vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physical_device, &num,
+                                                               properties.data()) != VK_SUCCESS) {
+        return {};
+    }
+    properties.resize(num);
+    return properties;
+}
+
 bool PhysicalDevice::GetSurfaceSupportKHR(u32 queue_family_index, VkSurfaceKHR surface) const {
     VkBool32 supported;
     Check(dld->vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, queue_family_index, surface,
@@ -1012,22 +1110,17 @@ VkSurfaceCapabilitiesKHR PhysicalDevice::GetSurfaceCapabilitiesKHR(VkSurfaceKHR 
 }
 
 std::vector<VkSurfaceFormatKHR> PhysicalDevice::GetSurfaceFormatsKHR(VkSurfaceKHR surface) const {
-    u32 num;
-    Check(dld->vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &num, nullptr));
-    std::vector<VkSurfaceFormatKHR> formats(num);
-    Check(
-        dld->vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &num, formats.data()));
-    return formats;
+    return Enumerate<VkSurfaceFormatKHR>([&](u32* num, VkSurfaceFormatKHR* formats) {
+        return dld->vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, num, formats);
+    });
 }
 
 std::vector<VkPresentModeKHR> PhysicalDevice::GetSurfacePresentModesKHR(
     VkSurfaceKHR surface) const {
-    u32 num;
-    Check(dld->vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &num, nullptr));
-    std::vector<VkPresentModeKHR> modes(num);
-    Check(dld->vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &num,
-                                                         modes.data()));
-    return modes;
+    return Enumerate<VkPresentModeKHR>([&](u32* num, VkPresentModeKHR* modes) {
+        return dld->vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, num,
+                                                              modes);
+    });
 }
 
 VkPhysicalDeviceMemoryProperties2 PhysicalDevice::GetMemoryProperties(

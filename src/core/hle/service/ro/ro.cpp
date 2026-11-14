@@ -356,6 +356,22 @@ public:
         // Read NRR.
         NrrHeader header{};
         process->GetMemory().ReadBlock(nrr_address, std::addressof(header), sizeof(header));
+        size_t hashes_offset = header.GetHashesOffset();
+        u32 num_hashes = header.GetNumHashes();
+        if (process->IsSwitch2()) {
+            // Switch 2 NRRs carry 3072-bit keys and signatures: the fields after them (program
+            // id, size, kind, hash list offset and count) sit 0x180 bytes later, the hash list
+            // offset and count at 0x4c0.
+            std::array<u32, 2> fields{};
+            process->GetMemory().ReadBlock(nrr_address + 0x4c0, fields.data(), sizeof(fields));
+            hashes_offset = fields[0];
+            num_hashes = fields[1];
+        }
+        // The hash list lies inside the NRR (read as a Switch 1 header, a Switch 2 one asked for
+        // 51 GB of hashes).
+        R_UNLESS(hashes_offset <= nrr_size &&
+                     num_hashes <= (nrr_size - hashes_offset) / sizeof(Sha256Hash),
+                 RO::ResultInvalidNrr);
 
         // Set NRR info.
         context->SetNrrInfoInUse(nrr_info, true);
@@ -363,10 +379,9 @@ public:
         nrr_info->nrr_heap_size = nrr_size;
 
         // Read NRR hash list.
-        nrr_info->hashes.resize(header.GetNumHashes());
-        process->GetMemory().ReadBlock(nrr_address + header.GetHashesOffset(),
-                                       nrr_info->hashes.data(),
-                                       sizeof(Sha256Hash) * header.GetNumHashes());
+        nrr_info->hashes.resize(num_hashes);
+        process->GetMemory().ReadBlock(nrr_address + hashes_offset, nrr_info->hashes.data(),
+                                       sizeof(Sha256Hash) * num_hashes);
 
         R_SUCCEED();
     }
@@ -468,6 +483,23 @@ public:
                     ptr = reinterpret_cast<char*>(address);
                     __builtin___clear_cache(ptr, ptr + sizeof(u32));
                 }
+            }
+            // Pointer authentication as the identity, as in the modules loaded at boot (Switch 2
+            // programs; none for a Switch 1 program). After the block above: a module that needs
+            // a trampoline it could not map is not left half rewritten.
+            for (const auto& instruction : patch.RuntimeReplacements()) {
+                const u64 address = nro_info->base_address + instruction.offset;
+                memory.Write32(address, instruction.replacement);
+                auto* ptr = reinterpret_cast<char*>(address);
+                __builtin___clear_cache(ptr, ptr + sizeof(u32));
+            }
+            if (Settings::CurrentProgramIsSwitch2()) {
+                memory.ReadBlock(nro_info->base_address, text.data(), text.size());
+                Core::NCE::Patcher::VerifyPacIdentity(
+                    std::span<const u32>{reinterpret_cast<const u32*>(text.data()),
+                                         text.size() / sizeof(u32)},
+                    std::format("run-time module at {:#x} (text {:#x} bytes)",
+                                nro_info->base_address, text.size()));
             }
         }
 #endif
