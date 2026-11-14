@@ -1917,7 +1917,13 @@ private:
             // menu, a loading hitch) goes back to the wait for the frame.
             const u64 present = Core::g_nx2_present_count.load(std::memory_order_relaxed);
             const auto note_lag = [this](s64 lag_us) {
-                m_barrier_steady = lag_us >= 6000 && lag_us <= 250000 ? m_barrier_steady + 1 : 0;
+                // Engaged, one slow frame (a shader compile) keeps it; three in a row (a load, a
+                // menu) drop it. Odin 2: the single hitches cost 300 frames at ~64 ms instead of ~56.
+                const bool in_window = lag_us >= 6000 && lag_us <= 250000;
+                m_barrier_off_run = in_window ? 0 : m_barrier_off_run + 1;
+                m_barrier_steady = in_window || (m_barrier_steady >= 300 && m_barrier_off_run < 3)
+                                       ? m_barrier_steady + 1
+                                       : 0;
             };
             if (ocarina_back_wait && barrier != 0 && m_barrier_steady >= 300) {
                 if (Core::g_nx2_barrier.exchange(barrier, std::memory_order_relaxed) == 0) {
@@ -2225,6 +2231,7 @@ private:
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     VideoCommon::Nx2Timeline::FrameStats m_timeline;
+    u32 m_barrier_off_run{}; ///< Presents in a row outside the steady window
     u32 m_barrier_steady{}; ///< Presents in a row whose frame took the GPU thread 6-80 ms
     s64 m_barrier_copy_us{}; ///< Time spent in Nx2PageStore::Snapshot since the last report
     u64 m_present_cpu{};     ///< The presenting thread's CPU time at the last present
