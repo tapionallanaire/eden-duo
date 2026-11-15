@@ -274,12 +274,12 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     }
 }
 
-size_t FrameGen::WantedGenerations(size_t capacity) {
+size_t FrameGen::WantedGenerations(size_t capacity, f32 panel_refresh_hz) {
     if (unavailable) {
         plan = {};
         return 0;
     }
-    plan = pacer.Plan(capacity);
+    plan = pacer.Plan(capacity, panel_refresh_hz);
     return plan.generations;
 }
 

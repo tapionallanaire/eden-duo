@@ -17,7 +17,8 @@ struct FrameGenPlan {
 
 class FrameGenPacer {
 public:
-    [[nodiscard]] FrameGenPlan Plan(size_t capacity);
+    /// `panel_refresh_hz`: the display's measured refresh, 0 when unknown.
+    [[nodiscard]] FrameGenPlan Plan(size_t capacity, f32 panel_refresh_hz);
 
     void Reset();
 
@@ -37,6 +38,7 @@ private:
     f32 output_credit{};
     f32 probe_base_rate{};
     f32 unloaded_base_rate{};
+    f32 base_retention{};
     size_t issued_generations{};
     size_t probe_previous_limit{};
     size_t limit{};
