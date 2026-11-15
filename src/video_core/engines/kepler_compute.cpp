@@ -670,12 +670,13 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     }
     const GPUVAddr program = regs.code_loc.Address();
     if (dlss_chain.active) {
-        // While the network can't be shown (it failed its checks, or it is off) the passes of
-        // earlier evaluations stop running, and the replacement upscale draws the output at the
-        // output pass.
-        if ((dlss_chain.failure != VideoCore::GameDlssReason::None ||
-             GameDlssBlocker() != VideoCore::GameDlssReason::None) &&
-            dlss_chain.programs.contains(program)) {
+        // While the network can't be shown the replacement upscale draws the output at the output
+        // pass. Off for this session (blocked), none of its passes run, from the first evaluation
+        // on: its passes are 1-2.6 MB of SPIR-V each and an Adreno driver runs out of memory
+        // compiling them. Failed its checks, the passes of earlier evaluations stop running.
+        const bool blocked = GameDlssBlocker() != VideoCore::GameDlssReason::None;
+        if (blocked || (dlss_chain.failure != VideoCore::GameDlssReason::None &&
+                        dlss_chain.programs.contains(program))) {
             return output_pass ? FinishDlssEvaluation() : true;
         }
         dlss_chain.pending.insert(program);
@@ -920,7 +921,9 @@ VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
     if (scale.up_scale != 1 || scale.down_shift != 0) {
         return GameDlssReason::ResolutionScaling;
     }
-    if (!rasterizer->SupportsGameDlssNetwork()) {
+    // Partitioned out of a wider subgroup (Adreno), the network's passes are 1-2.6 MB of SPIR-V
+    // each and the driver runs out of memory compiling them.
+    if (!rasterizer->CreatesGuestWidthComputeShaders()) {
         return GameDlssReason::Unsupported;
     }
     return GameDlssReason::None;
