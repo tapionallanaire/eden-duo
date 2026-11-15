@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -113,6 +114,12 @@ public:
         return extent;
     }
 
+    /// The panel's real refresh rate in Hz, measured from the times presents were shown; 0 until
+    /// the driver reports them (Android main screen with VK_GOOGLE_display_timing).
+    f32 PanelRefreshHz() const {
+        return panel_refresh_hz.load(std::memory_order_relaxed);
+    }
+
 private:
     void CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
 
@@ -126,6 +133,7 @@ private:
     size_t call_interval_index{};
     /// The panel's real refresh, measured from the driver's reported present times.
     double refresh_ms{1000.0 / 120.0};
+    std::atomic<f32> panel_refresh_hz{};
     /// Where on the vsync grid presents are aimed, in refreshes after a vsync.
     double grid_phase{0.25};
     double shown_min_ms{1e9};

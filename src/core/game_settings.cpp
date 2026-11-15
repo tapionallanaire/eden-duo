@@ -259,6 +259,28 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // default yields to a value set for the game; applied, the fix is the game's own value.
             DefaultForTitle(Settings::values.fix_fp16_denormals, true);
             return true;
+        case TitleID::FireEmblemThreeHouses:
+#ifdef __ANDROID__
+            // Docked at 1x it renders 1080p, and an Adreno 7xx can't hold the 60 fps patch there
+            // (AYN Thor, Adreno 740: 40-43 FPS on the Practice Battle map and in combat, GPU
+            // 93-99 % busy; the game's clock follows its frames, so it ran at 70 % speed). At 0.75x
+            // (810p) docked holds 58-60 on the map and in Auto-Battle combat, still sharper than
+            // handheld's 720p, which holds 60 at 1x. Unpatched, the game runs at 30 either way.
+            // Applying the optimal settings in handheld puts 1x back.
+            if (AdrenoFamily() == '7') {
+                if (Settings::values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked) {
+                    DefaultForTitle(Settings::values.resolution_setup,
+                                    Settings::ResolutionSetup::Res3_4X);
+                } else if (force) {
+                    DefaultForTitle(Settings::values.resolution_setup,
+                                    Settings::ResolutionSetup::Res1X);
+                }
+                LOG_INFO(Core, "Title defaults: resolution {}",
+                         Settings::CanonicalizeEnum(Settings::values.resolution_setup.GetValue()));
+                return true;
+            }
+#endif
+            return false;
         case TitleID::XenobladeChronicles2:
         case TitleID::XenobladeChronicles3:
             // Their optimal GPU driver (Turnip v27.0.0-R1) is set by the Android frontend
@@ -338,6 +360,10 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::XenobladeChronicles3:
         case TitleID::HogwartsLegacy:
             return true;
+#ifdef __ANDROID__
+        case TitleID::FireEmblemThreeHouses:
+            return AdrenoFamily() == '7';
+#endif
         default:
             return false;
     }
