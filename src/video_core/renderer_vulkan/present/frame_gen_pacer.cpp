@@ -23,6 +23,10 @@ constexpr f32 PROBE_BASE_COLLAPSE_RATIO = 0.70f;
 constexpr f32 PROBE_MARGINAL_GAIN = 1.15f;
 constexpr f32 TARGET_SATISFIED_RATIO = 0.95f;
 constexpr f32 UNLOADED_BASE_RETENTION = 0.75f;
+// With a fixed multiplier, generated frames must not slow the game: most Switch games tie their
+// clock to the frame rate (Fire Emblem: Three Houses at 60 fps in handheld on the AYN Thor: 60
+// without generation, 52-57 with 3x, the GPU at 95-98 %), so a slower game is slow motion.
+constexpr f32 FIXED_UNLOADED_BASE_RETENTION = 0.95f;
 constexpr f32 CREDIT_EPSILON = 1.0e-4f;
 constexpr u32 MAX_PROBE_FAILURES = 4;
 
@@ -46,7 +50,7 @@ constexpr auto PROBE_STEP_DELAY = std::chrono::milliseconds(250);
 
 } // Anonymous namespace
 
-FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
+FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 panel_refresh_hz) {
     const size_t ceiling = std::min(capacity, Settings::FrameGenMaxGenerations());
     if (ceiling == 0) {
         Reset();
@@ -69,7 +73,16 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
         return {};
     }
 
-    const f32 target_rate = static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue());
+    // A fixed multiplier presents multiplier x the game's frames; past the panel's refresh, FIFO
+    // presentation holds the game back (a 60 fps game at 3x on a 118 Hz panel). When the refresh
+    // is known, the multiplier is a ceiling and the panel's refresh the target: a 30 fps game
+    // still gets 3x, a 60 fps one at most 2x, and none while generating slows the game.
+    f32 target_rate = static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue());
+    base_retention = UNLOADED_BASE_RETENTION;
+    if (target_rate == 0.0f) {
+        target_rate = panel_refresh_hz;
+        base_retention = FIXED_UNLOADED_BASE_RETENTION;
+    }
 
     if (smoothed_interval > 0.0f) {
         f32 burst_threshold = BURST_CADENCE_RATIO / smoothed_interval;
@@ -162,7 +175,7 @@ void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target
             base_rate < probe_base_rate * PROBE_BASE_COLLAPSE_RATIO &&
             current_output < previous_output * PROBE_MARGINAL_GAIN;
         const bool emulation_slowed = unloaded_base_rate > 0.0f &&
-                                      base_rate < unloaded_base_rate * UNLOADED_BASE_RETENTION;
+                                      base_rate < unloaded_base_rate * base_retention;
 
         if (throughput_regressed || collapsed_for_marginal_gain || emulation_slowed) {
             limit = probe_previous_limit;

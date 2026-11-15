@@ -390,6 +390,9 @@ void Swapchain::UpdateRefreshEstimate() {
             }
         }
     }
+    if (last_actual_present != 0) {
+        panel_refresh_hz.store(static_cast<f32>(1000.0 / refresh_ms), std::memory_order_relaxed);
+    }
     // The guest vblank (1/60 s) becomes the nearest whole number of real refreshes, unless that
     // is more than 3 % off: a 144 Hz panel must not speed games up.
     constexpr double guest_vblank_ms = 1000.0 / 60.0;
