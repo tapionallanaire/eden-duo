@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion_pass.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
+#include "video_core/renderer_vulkan/vk_sgsr2_upscaler.h"
 #ifndef __ANDROID__ // the DLSS network probe is desktop only
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
 #endif
@@ -237,6 +238,10 @@ public:
                          std::array<f32, 2> motion_scale);
     /// The FSR 3.1 upscaler, created on first use; null when it can't run (fsr3_failed).
     Fsr3Upscaler* Fsr3();
+    /// The SGSR 2 upscaler (setting dlss_replacement), created on first use; null when it can't run.
+    Sgsr2Upscaler* Sgsr2();
+    std::unique_ptr<Sgsr2Upscaler> sgsr2_upscaler;
+    bool sgsr2_failed{};
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_failed{};
 #ifdef __ANDROID__

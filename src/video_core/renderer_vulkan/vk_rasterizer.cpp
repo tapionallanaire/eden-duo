@@ -2967,7 +2967,7 @@ void RasterizerVulkan::NoteCameraMotionDraw() {
     if (!motion.armed) {
         return;
     }
-    if (!UsesNvidiaDlss() && !Ocarina::Fsr3Requested()) {
+    if (!UsesNvidiaDlss() && !Ocarina::CameraMotionUpscaleRequested()) {
         motion.armed = false;
         motion.jitter_active = false;
         motion.jitter_ready = false;

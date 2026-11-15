@@ -1145,7 +1145,7 @@ bool KeplerCompute::ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 sh
     }();
     // NVIDIA DLSS, or FSR 3.1 when asked for (Fsr3Requested), from the camera's motion; a frame
     // either can't take falls back to the copy when that is on.
-    const bool camera_motion = rasterizer->UsesNvidiaDlss() || Fsr3Requested();
+    const bool camera_motion = rasterizer->UsesNvidiaDlss() || CameraMotionUpscaleRequested();
     if (program_id != ProgramId || (!input_pass && !output_pass) ||
         (!camera_motion && !simple_copy)) {
         return false;
