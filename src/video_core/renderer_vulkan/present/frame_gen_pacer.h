@@ -34,6 +34,7 @@ private:
     std::optional<Clock::time_point> probe_until;
     std::optional<Clock::time_point> next_probe;
     std::optional<Clock::time_point> deficit_since;
+    std::optional<Clock::time_point> slowed_since;
     f32 smoothed_interval{};
     f32 output_credit{};
     f32 probe_base_rate{};
