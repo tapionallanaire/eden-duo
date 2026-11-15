@@ -24,8 +24,10 @@ object PathUtil {
 
     /** True while the save folder is outside app storage and the grant to reach it is missing. */
     fun needsAllFilesAccess(): Boolean =
-        NativeConfig.getSaveDir().startsWith("content://") &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()
+        NativeConfig.getSaveDir().startsWith("content://") && !hasAllFilesAccess()
+
+    fun hasAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
 
     /**
      * Converts a content:// URI from the Storage Access Framework to a real filesystem path.
