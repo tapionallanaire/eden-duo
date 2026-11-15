@@ -10,7 +10,7 @@ import kotlinx.serialization.json.Json
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.GameHelper
-import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.PathUtil
 
 /**
  * Duet Plus syncs Switch saves only: the `switch/` part of the "calamansi-saves" folder that Calamansi (the main
@@ -42,7 +42,7 @@ object DuetSaveSync {
                         // to the save dir as in Save transfer.
                         val root = runCatching {
                             NativeLibrary.getDefaultProfileSaveDataRoot(false).takeIf { r -> r.isNotEmpty() }
-                                ?.let { r -> File(NativeConfig.getSaveDir() + r) }
+                                ?.let { r -> File(PathUtil.saveDir() + r) }
                         }.getOrNull()
                         savesUnder(root, 1)(it)
                     },
