@@ -34,6 +34,7 @@
 #include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "core/arm/debug.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "video_core/nx2_diag.h"
@@ -1822,6 +1823,21 @@ private:
                 std::filesystem::remove(trigger, ec);
                 system.GetRenderdocAPI().TriggerCapture(2);
                 LOG_INFO(Service, "nx2:vi2 present #{}: RenderDoc capture requested", m_presents);
+            }
+        }
+        // Diagnostic: EDEN_NX2_THREAD_DUMP=<seconds> logs every guest thread and where it waits,
+        // at most that often (from a present, so a game that slows to a crawl still logs).
+        if (static const int dump_seconds = [] {
+                const char* value = std::getenv("EDEN_NX2_THREAD_DUMP");
+                return value != nullptr ? std::atoi(value) : 0;
+            }();
+            dump_seconds > 0) {
+            static auto last_dump = std::chrono::steady_clock::time_point{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_dump >= std::chrono::seconds{dump_seconds}) {
+                last_dump = now;
+                LOG_INFO(Service, "nx2:vi2 present #{}: guest threads", m_presents);
+                Core::LogGuestThreads(system.ApplicationProcess());
             }
         }
         if (m_presents <= 4 || (m_presents % 600) == 0) {

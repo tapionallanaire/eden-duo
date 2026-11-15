@@ -266,6 +266,8 @@ void LogKernelStats(u64 presents) {
 /// busiest (thread, PC) pairs, so time spent in guest code can be found. Racy reads, diagnostics.
 void StartGuestSampler(System& system) {
     static std::jthread sampler;
+    Kernel::Nx2KStats::g_enabled = std::getenv("EDEN_NX2_KSTATS") != nullptr;
+    Kernel::Nx2KStats::g_callers_enabled = std::getenv("EDEN_NX2_SVC_CALLERS") != nullptr;
     const bool sample = std::getenv("EDEN_NX2_GUEST_SAMPLER") != nullptr;
     if ((!sample && !Kernel::Nx2KStats::g_enabled && !Kernel::Nx2KStats::g_callers_enabled) ||
         sampler.joinable()) {
@@ -387,7 +389,16 @@ void StartGuestSampler(System& system) {
                 const u64 id{threads[i].second};
                 const auto& s{states[id]};
                 const u32 r{std::max(rounds, 1U)};
-                state_list += std::format(" t{}: run {}% ready {}% wait {}%", id,
+                // Name, owning process and priority: threads of other processes share the cores.
+                std::string who;
+                if (const auto it = known.find(id); it != known.end() && it->second != nullptr) {
+                    const Kernel::KThread* const t{it->second};
+                    const Kernel::KProcess* const owner{t->GetOwnerProcess()};
+                    who = std::format("'{}'/{} p{} c{}", GetThreadName(t).value_or(""),
+                                      owner != nullptr ? owner->GetName() : "-", t->GetPriority(),
+                                      t->GetActiveCore());
+                }
+                state_list += std::format(" t{}{}: run {}% ready {}% wait {}%", id, who,
                                           threads[i].first * 100 / r, s[0] * 100 / r,
                                           s[1] * 100 / r);
             }

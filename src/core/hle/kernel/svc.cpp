@@ -2619,7 +2619,7 @@ void Call(Core::System& system, u32 imm) {
         if (Nx2KStats::g_callers_enabled) {
             static thread_local u32 sample{};
             switch (imm) {
-            case 0x0B: case 0x18: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x34: case 0x35:
+            case 0x0B: case 0x18: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x21: case 0x34: case 0x35:
                 if (++sample % 4 == 0) {
                     caller = CallerOf(kernel, process, imm);
                 }
