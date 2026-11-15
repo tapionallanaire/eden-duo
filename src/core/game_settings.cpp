@@ -287,7 +287,17 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.use_asynchronous_shaders, false);
             DefaultForTitle(Settings::values.use_reactive_flushing, true);
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+#ifdef __ANDROID__
+            // NCE: from the world map on its job workers sleep in the host kernel while counted as
+            // running, 1-2 fps at the character creator (Odin 2); Dynarmic holds 30 there. SGSR 2
+            // (Qualcomm's upscaler for Adreno) draws the DLSS output the network can't run here.
+            DefaultForTitle(Settings::values.cpu_backend, Settings::CpuBackend::Dynarmic);
+            DefaultForTitle(Settings::values.dlss_replacement, Settings::DlssReplacement::Sgsr2);
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, "
+                           "FifoRelaxed, Dynarmic, SGSR 2");
+#else
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
+#endif
             return true;
         default:
             return false;
