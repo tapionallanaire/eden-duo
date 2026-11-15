@@ -391,12 +391,18 @@ void StartGuestSampler(System& system) {
                 const u32 r{std::max(rounds, 1U)};
                 // Name, owning process and priority: threads of other processes share the cores.
                 std::string who;
-                if (const auto it = known.find(id); it != known.end() && it->second != nullptr) {
-                    const Kernel::KThread* const t{it->second};
-                    const Kernel::KProcess* const owner{t->GetOwnerProcess()};
-                    who = std::format("'{}'/{} p{} c{}", GetThreadName(t).value_or(""),
-                                      owner != nullptr ? owner->GetName() : "-", t->GetPriority(),
-                                      t->GetActiveCore());
+                {
+                    Kernel::KScopedLightLock list_lock{process->GetListLock()};
+                    for (const auto& t : process->GetThreadList()) {
+                        if (t.GetThreadId() == id) {
+                            who = std::format("'{}' p{} c{}", GetThreadName(&t).value_or(""),
+                                              t.GetPriority(), t.GetActiveCore());
+                            break;
+                        }
+                    }
+                }
+                if (who.empty()) {
+                    who = "(other process)";
                 }
                 state_list += std::format(" t{}{}: run {}% ready {}% wait {}%", id, who,
                                           threads[i].first * 100 / r, s[0] * 100 / r,
