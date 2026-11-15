@@ -5,6 +5,7 @@
 #include <cmath>
 #include <utility>
 
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen_pacer.h"
 
@@ -23,6 +24,10 @@ constexpr f32 PROBE_BASE_COLLAPSE_RATIO = 0.70f;
 constexpr f32 PROBE_MARGINAL_GAIN = 1.15f;
 constexpr f32 TARGET_SATISFIED_RATIO = 0.95f;
 constexpr f32 UNLOADED_BASE_RETENTION = 0.75f;
+// With a fixed multiplier, generated frames must not slow the game: most Switch games tie their
+// clock to the frame rate (Fire Emblem: Three Houses at 60 fps in handheld on the AYN Thor: 60
+// without generation, 52-57 with 3x, the GPU at 95-98 %), so a slower game is slow motion.
+constexpr f32 FIXED_UNLOADED_BASE_RETENTION = 0.95f;
 constexpr f32 CREDIT_EPSILON = 1.0e-4f;
 constexpr u32 MAX_PROBE_FAILURES = 4;
 
@@ -46,7 +51,7 @@ constexpr auto PROBE_STEP_DELAY = std::chrono::milliseconds(250);
 
 } // Anonymous namespace
 
-FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
+FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 panel_refresh_hz) {
     const size_t ceiling = std::min(capacity, Settings::FrameGenMaxGenerations());
     if (ceiling == 0) {
         Reset();
@@ -69,7 +74,16 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
         return {};
     }
 
-    const f32 target_rate = static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue());
+    // A fixed multiplier presents multiplier x the game's frames; past the panel's refresh, FIFO
+    // presentation holds the game back (a 60 fps game at 3x on a 118 Hz panel). When the refresh
+    // is known, the multiplier is a ceiling and the panel's refresh the target: a 30 fps game
+    // still gets 3x, a 60 fps one at most 2x, and none while generating slows the game.
+    f32 target_rate = static_cast<f32>(Settings::values.frame_gen_target_rate.GetValue());
+    base_retention = UNLOADED_BASE_RETENTION;
+    if (target_rate == 0.0f) {
+        target_rate = panel_refresh_hz;
+        base_retention = FIXED_UNLOADED_BASE_RETENTION;
+    }
 
     if (smoothed_interval > 0.0f) {
         f32 burst_threshold = BURST_CADENCE_RATIO / smoothed_interval;
@@ -161,10 +175,17 @@ void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target
         const bool collapsed_for_marginal_gain =
             base_rate < probe_base_rate * PROBE_BASE_COLLAPSE_RATIO &&
             current_output < previous_output * PROBE_MARGINAL_GAIN;
-        const bool emulation_slowed = unloaded_base_rate > 0.0f &&
-                                      base_rate < unloaded_base_rate * UNLOADED_BASE_RETENTION;
+        // The rate without generation is learned while none runs, so shader-build stalls pull it
+        // down; the rate right before the probe is the fair comparison.
+        const bool emulation_slowed =
+            (unloaded_base_rate > 0.0f && base_rate < unloaded_base_rate * base_retention) ||
+            (base_retention > UNLOADED_BASE_RETENTION &&
+             base_rate < probe_base_rate * base_retention);
 
         if (throughput_regressed || collapsed_for_marginal_gain || emulation_slowed) {
+            LOG_INFO(Render_Vulkan,
+                     "Frame gen: probe {} -> {} failed (game {:.1f} fps, {:.1f} without generation)",
+                     probe_previous_limit, limit, base_rate, unloaded_base_rate);
             limit = probe_previous_limit;
             probe_failures = std::min(probe_failures + 1, MAX_PROBE_FAILURES);
             next_probe = now + ProbeBackoff(probe_failures);
@@ -174,7 +195,30 @@ void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target
 
         probe_failures = 0;
         next_probe = now + PROBE_STEP_DELAY;
+        LOG_INFO(Render_Vulkan, "Frame gen: {} generated per frame (game {:.1f} fps)", limit,
+                 base_rate);
     }
+
+    // A probe that passed in a light scene keeps no promise for a heavier one: generation that
+    // has slowed the game for a second gives up a frame, and comes back only through a probe.
+    if (limit > 0 && unloaded_base_rate > 0.0f &&
+        base_rate < unloaded_base_rate * base_retention) {
+        if (!slowed_since) {
+            slowed_since = now;
+        } else if (now - *slowed_since >= DEFICIT_DURATION) {
+            LOG_INFO(Render_Vulkan,
+                     "Frame gen: {} -> {} generated per frame (game {:.1f} fps, {:.1f} without)",
+                     limit, limit - 1, base_rate, unloaded_base_rate);
+            --limit;
+            probe_failures = std::min(probe_failures + 1, MAX_PROBE_FAILURES);
+            next_probe = now + ProbeBackoff(probe_failures);
+            slowed_since.reset();
+            deficit_since.reset();
+            output_credit = 0.0f;
+        }
+        return;
+    }
+    slowed_since.reset();
 
     if (base_rate * static_cast<f32>(limit + 1) >= target_rate * TARGET_SATISFIED_RATIO ||
         limit >= ceiling) {
@@ -211,12 +255,14 @@ void FrameGenPacer::DeferEvaluations(Clock::duration amount) {
     defer(probe_until);
     defer(next_probe);
     deficit_since.reset();
+    slowed_since.reset();
 }
 
 void FrameGenPacer::Stabilize(Clock::time_point now) {
     stable_until = now + STABILIZATION_DURATION;
     probe_until.reset();
     deficit_since.reset();
+    slowed_since.reset();
     smoothed_interval = 0.0f;
     output_credit = 0.0f;
 }
@@ -227,6 +273,7 @@ void FrameGenPacer::Reset() {
     probe_until.reset();
     next_probe.reset();
     deficit_since.reset();
+    slowed_since.reset();
     smoothed_interval = 0.0f;
     output_credit = 0.0f;
     probe_base_rate = 0.0f;
