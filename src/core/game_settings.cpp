@@ -277,6 +277,18 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
             return true;
+        case TitleID::FireEmblemFortunesWeaveNx2:
+            // As Ocarina of Time: handheld keeps its render targets small on a phone, and draws
+            // skipped while pipelines build can leave a channel waiting on its own semaphores
+            // (this game already stalls on those mid-list; see DmaPusher::keep_submit_copies).
+            // Reactive flushing: its CPU reads back counters the GPU writes (auto-exposure; the
+            // buffer cache copies them back for this title, AsyncBufferDownloads).
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Handheld);
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, false);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
+            return true;
         default:
             return false;
     }
@@ -337,6 +349,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::XenobladeChronicles2:
         case TitleID::XenobladeChronicles3:
         case TitleID::HogwartsLegacy:
+        case TitleID::FireEmblemFortunesWeaveNx2:
             return true;
         default:
             return false;

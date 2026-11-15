@@ -57,7 +57,10 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
     , channel_state{channel_state_}
     , signal_sync{false}
     , synced{false}
-{}
+{
+    constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+    keep_submit_copies = system.GetApplicationProcessProgramID() == FortunesWeaveProgramId;
+}
 
 DmaPusher::~DmaPusher() = default;
 
@@ -239,17 +242,21 @@ bool DmaPusher::Step() {
         // safe read below would flush (with the split, the front can't tell: it reads memory
         // unflushed anyway). Entries on pages the GPU writes (culling) always take the flushing
         // read: their words at submit time are an older frame's.
+        // keep_submit_copies: the copy holds the words as submitted whatever waited since (the
+        // title rewrites its command ring early; see dma_pusher.h).
         const bool submitted = command_resume_offset < header.size &&
                                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
-                               (command_list.snapshot_suspensions & 1) == 0 &&
-                               command_list.snapshot_suspensions ==
-                                   suspensions.load(std::memory_order_acquire) &&
+                               (keep_submit_copies ||
+                                ((command_list.snapshot_suspensions & 1) == 0 &&
+                                 command_list.snapshot_suspensions ==
+                                     suspensions.load(std::memory_order_acquire))) &&
                                !std::ranges::binary_search(
                                    command_list.deferred_entries,
                                    static_cast<u32>(dma_pushbuffer_subindex)) &&
                                !gpu_written && !cache_written &&
-                               !(use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
-                                                                          header.size * sizeof(u32)));
+                               (keep_submit_copies ||
+                                !(use_safe && memory_manager.IsMemoryDirty(
+                                                  dma_state.dma_get, header.size * sizeof(u32))));
         // Off by default: the check below reads memory and allocates for each entry it checks.
         // EDEN_NX2_PERF_VERIFY=1 turns it on.
         static const bool check_parsed_entries = VideoCommon::Nx2Perf::Verify();

@@ -2125,12 +2125,18 @@ private:
 
     /// Returns presentation fences instead of blocking the present thread until the next flip.
     /// This keeps the display wait out of Wonder's CPU frame measurement.
-    /// EDEN_NX2_PRESENT_QUEUE=0 restores blocking presentation pacing.
+    /// EDEN_NX2_PRESENT_QUEUE=0 restores blocking presentation pacing, =1 forces the queue.
     static bool PresentQueue() {
-        static const bool enabled = [] {
+        static const char setting = [] {
             const char* value = std::getenv("EDEN_NX2_PRESENT_QUEUE");
-            return value == nullptr || value[0] != '0';
+            return value == nullptr ? '\0' : value[0];
         }();
+        // Fire Emblem: Fortune's Weave draws its 3D layers black (dialogue backgrounds, the
+        // character creator's models; the HUD stays) when its release fences come back early.
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+        const bool enabled = setting == '\0'
+                                 ? Settings::GetCurrentProgramID() != FortunesWeaveProgramId
+                                 : setting != '0';
         // Single core: CoreTiming counts guest ticks, not wall time, so the release timer would
         // not pace in real time, and DoSpeedLimiting (skipped with the queue) is the only limiter.
         return enabled && Settings::values.use_multi_core.GetValue();

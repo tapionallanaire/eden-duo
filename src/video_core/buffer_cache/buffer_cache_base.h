@@ -903,6 +903,13 @@ private:
         if (forced >= 0) {
             return forced == 1;
         }
+        // Fire Emblem: Fortune's Weave reads its luminance counters (written by compute atomics)
+        // back on the CPU for its auto-exposure: without the copies it read zeros, set the
+        // darkest exposure and its scenes came out white.
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+        if (Settings::GetCurrentProgramID() == FortunesWeaveProgramId) {
+            return true;
+        }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }
 

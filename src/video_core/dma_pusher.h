@@ -225,13 +225,13 @@ public:
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
     void RefreshDeferredEntries(CommandList& list);
 
-    /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
-    static bool ResnapshotEnabled() {
-        static const bool enabled = [] {
+    /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off, =1 on for every title.
+    bool ResnapshotEnabled() const {
+        static const char setting = [] {
             const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
-            return value == nullptr || value[0] != '0';
+            return value == nullptr ? '\0' : value[0];
         }();
-        return enabled;
+        return setting == '\0' ? !keep_submit_copies : setting != '0';
     }
     /// Reads a command list on pages the GPU wrote into command_headers, from the copies the
     /// buffer cache made after the work that wrote them or from guest memory for pages flushed
@@ -261,6 +261,13 @@ public:
     };
 
     Core::System& system;
+    /// Fire Emblem: Fortune's Weave runs its submit-time copies only (ResnapshotEnabled). It waits
+    /// on its own compute dispatches mid-list (semaphores the GPU releases) while it already
+    /// refills the small command ring the rest of the list calls into, for a later frame; copied
+    /// again at the resume, the list ran those words (a macro's arguments spilling into the next
+    /// entry, then QMD words parsed as methods: a channel bound to class 0xff30, a Fermi2D register
+    /// flood and a GPU waiting forever on semaphore 0).
+    bool keep_submit_copies = false;
     MemoryManager& memory_manager;
     Control::ChannelState& channel_state;
 
