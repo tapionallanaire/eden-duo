@@ -107,7 +107,11 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 panel_refresh_hz) {
                                   (interval_seconds - smoothed_interval) * INTERVAL_SMOOTHING
                             : interval_seconds;
 
-    if (previous_generations == 0) {
+    // Learned only while generation is off: a frame that generated nothing in the middle of a
+    // run (a burst, a skipped output) still runs at the slowed rate, and learning from it walked
+    // this down to that rate, so the slowdown checks below stopped seeing the slowdown
+    // (Fire Emblem: Three Houses on the AYN Thor: 1x generation kept the game at 53-55, 60 without).
+    if (previous_generations == 0 && limit == 0) {
         const f32 measured = 1.0f / smoothed_interval;
         unloaded_base_rate =
             unloaded_base_rate > 0.0f
@@ -157,6 +161,11 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity, f32 panel_refresh_hz) {
 void FrameGenPacer::UpdateLimit(Clock::time_point now, f32 base_rate, f32 target_rate,
                                 size_t ceiling) {
     limit = std::min(limit, ceiling);
+    if (now - last_log >= std::chrono::seconds(5)) {
+        last_log = now;
+        LOG_INFO(Render_Vulkan, "Frame gen: {} generated per frame, game {:.1f} fps, {:.1f} without",
+                 limit, base_rate, unloaded_base_rate);
+    }
 
     if (probe_until) {
         if (now < *probe_until) {
