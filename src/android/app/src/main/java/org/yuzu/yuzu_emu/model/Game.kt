@@ -18,7 +18,7 @@ import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.activities.EmulationActivity
 import org.yuzu.yuzu_emu.utils.DirectoryInitialization
 import org.yuzu.yuzu_emu.utils.FileUtil
-import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.PathUtil
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -64,7 +64,7 @@ class Game(
         }.zip"
 
     val saveDir: String
-        get() = NativeConfig.getSaveDir() + NativeLibrary.getSavePath(programId)
+        get() = PathUtil.saveDir() + NativeLibrary.getSavePath(programId)
 
     /**
      * Where add-ons for this game are installed: the directory the native scanner (the Add-ons

@@ -6,6 +6,7 @@ package org.yuzu.yuzu_emu.duo.savetransfer
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -34,7 +35,7 @@ import org.yuzu.yuzu_emu.databinding.FragmentSaveTransferBinding
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.GameHelper
 import org.yuzu.yuzu_emu.utils.Log
-import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.PathUtil
 
 /**
  * PS2 memory-card style save transfer: the installed Eden apps' saves on the left, this app's on
@@ -151,7 +152,7 @@ class SaveTransferFragment : Fragment() {
         withContext(Dispatchers.IO) {
             games = cachedGames()
             destination = DestinationSaves(
-                File(NativeConfig.getSaveDir() + NativeLibrary.getDefaultProfileSaveDataRoot(false))
+                File(PathUtil.saveDir() + NativeLibrary.getDefaultProfileSaveDataRoot(false))
             )
             destinationEntries = destination!!.list()
             sources = SaveSources.available(context, includeDuetPlus)
@@ -306,6 +307,22 @@ class SaveTransferFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (NativeLibrary.isRunning()) {
                 Toast.makeText(requireContext(), R.string.save_transfer_running, Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            if (PathUtil.needsAllFilesAccess()) {
+                // The save folder is a linked one outside app storage. onResume reloads after the grant.
+                MaterialAlertDialogBuilder(requireContext())
+                    .setMessage(R.string.all_files_permission_required)
+                    .setPositiveButton(R.string.grant_permission) { _, _ ->
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:${requireContext().packageName}")
+                            )
+                        )
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
                 return@launch
             }
             val confirmed = entries.filter { entry ->

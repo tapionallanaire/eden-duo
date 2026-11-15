@@ -4,10 +4,28 @@
 package org.yuzu.yuzu_emu.utils
 
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
 import java.io.File
 
 object PathUtil {
+
+    /**
+     * The save folder as a file path. A folder linked in the Eden import is stored as a content://
+     * tree URI, which native code opens through SAF but java.io.File can't; it maps to its mount
+     * here, which takes All files access ([needsAllFilesAccess]) to read and write.
+     */
+    fun saveDir(): String {
+        val dir = NativeConfig.getSaveDir()
+        if (!dir.startsWith("content://")) return dir
+        return getPathFromUri(Uri.parse(dir)) ?: dir
+    }
+
+    /** True while the save folder is outside app storage and the grant to reach it is missing. */
+    fun needsAllFilesAccess(): Boolean =
+        NativeConfig.getSaveDir().startsWith("content://") &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()
 
     /**
      * Converts a content:// URI from the Storage Access Framework to a real filesystem path.
