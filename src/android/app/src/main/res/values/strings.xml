@@ -1922,6 +1922,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="save_transfer_wrong_folder">That isn\'t %1$s\'s folder. Pick %1$s on the next screen.</string>
     <string name="save_transfer_no_sources">No other Eden apps are installed</string>
     <string name="save_transfer_empty">No saves in %1$s</string>
+    <string name="save_transfer_shared">%1$s and this app use the same save folder, so their saves are already shared. Nothing to copy.</string>
+    <string name="save_transfer_needs_files_access">%1$s keeps its saves in %2$s. Give this app All files access to read them.</string>
     <string name="save_transfer_no_saves_here">No saves yet</string>
     <string name="save_transfer_state_new">Not here yet</string>
     <string name="save_transfer_state_newer">Newer</string>
