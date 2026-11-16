@@ -398,6 +398,10 @@ public:
     Id frag_depth{};
 
     std::array<Id, 2> software_matrix_functions{};
+    /// Workgroup memory per-lane-index shuffles go through (DefineShuffleScratch), or 0
+    Id shuffle_scratch{};
+    Id shuffle_scratch_pointer{};
+    Id shuffle_local_invocation_index{};
     std::optional<CooperativeHmmaTypes> cooperative_hmma; ///< Set when a program lowers HMMA to it
     std::vector<Id> interfaces;
 

@@ -351,6 +351,37 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
     }
 }
 
+// Per-lane-index shuffles of a compute shader through workgroup memory, one word an invocation at
+// [LocalInvocationIndex]; a subgroup's lane L is at its first invocation's index + L, as for the HMMA
+// scratch. BananaNative's shuffle_lds: Donkey Kong Bananza's upscaler network on Turnip, 16-23 ms of
+// its 29 ms were the shuffles' rotate loops. Only where it fits with the guest's shared memory and
+// the HMMA scratch, and not beside the explicit workgroup layout (Block variables alias from 0).
+void DefineShuffleScratch(EmitContext& ctx, const IR::Program& program) {
+    if (!ctx.profile.shuffle_through_workgroup_memory || program.stage != Stage::Compute ||
+        !program.info.uses_subgroup_shuffles || !ctx.SupportsSubgroups() ||
+        (ctx.uses_explicit_workgroup_layout && program.shared_memory_size != 0)) {
+        return;
+    }
+    const u32 slots = HmmaScratchSlots(program);
+    const u32 limit = ctx.profile.max_compute_shared_memory_size;
+    const u32 needed = Common::AlignUp(program.shared_memory_size, 16U) +
+                       (UsesHmmaScratch(ctx, program) ? slots * HMMA_LANE_WORDS * 4 : 0) +
+                       slots * 4;
+    if (slots == 0 || (limit != 0 && needed > limit)) {
+        return;
+    }
+    const Id array_type = ctx.TypeArray(ctx.U32[1], ctx.Const(slots));
+    ctx.shuffle_scratch = ctx.AddGlobalVariable(
+        ctx.TypePointer(spv::StorageClass::Workgroup, array_type), spv::StorageClass::Workgroup);
+    ctx.interfaces.push_back(ctx.shuffle_scratch);
+    ctx.shuffle_scratch_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[1]);
+    ctx.shuffle_local_invocation_index = ctx.AddGlobalVariable(
+        ctx.TypePointer(spv::StorageClass::Input, ctx.U32[1]), spv::StorageClass::Input);
+    ctx.Decorate(ctx.shuffle_local_invocation_index, spv::Decoration::BuiltIn,
+                 spv::BuiltIn::LocalInvocationIndex);
+    ctx.interfaces.push_back(ctx.shuffle_local_invocation_index);
+}
+
 Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
     const u32 depth = inst->Flags<u32>();
     if (depth != 8 && depth != 16) {
