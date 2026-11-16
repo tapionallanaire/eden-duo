@@ -100,6 +100,13 @@ void main()
 
     ////////////compute luma
     vec3 Colorrgb = texelFetch(sampler2D(InputColor, PointSampler), ivec2(InputPos), 0).xyz;
+    // A pixel the game left infinite or NaN (Fortune's Weave's first unit selection effect) would
+    // pack to garbage and, through the inverse tonemap and history, flash white for several frames.
+    // Checked on the bits: drivers may fold isnan/isinf away.
+    if (any(equal(floatBitsToUint(Colorrgb) & uvec3(0x7f800000u), uvec3(0x7f800000u)))) {
+        Colorrgb = vec3(0.0);
+    }
+    Colorrgb = max(Colorrgb, vec3(0.0));
 
     ///simple tonemap
     float ColorMax = max(max(Colorrgb.x, Colorrgb.y), Colorrgb.z) + Exposure_co_rcp;

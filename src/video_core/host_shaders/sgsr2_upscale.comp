@@ -286,7 +286,11 @@ void main()
     rectboxvar *= rectboxweight;
     rectboxvar = sqrt(abs(rectboxvar - rectboxcenter * rectboxcenter));
 
-    Upsampledcw.xyz =  clamp(Upsampledcw.xyz / Upsampledcw.w, rectboxmin-vec3(0.05), rectboxmax+vec3(0.05));
+    // The sharpening kernel may overshoot the neighbourhood by 0.05. Near white that margin is
+    // worth up to ~100x in linear light after the inverse tonemap (Fortune's Weave's unit selection
+    // burst: light streaks for several frames), so the luma margin shrinks with the headroom left.
+    vec3 overshoot = vec3(0.05 * (1.0 - rectboxmax.x), 0.05, 0.05);
+    Upsampledcw.xyz =  clamp(Upsampledcw.xyz / Upsampledcw.w, rectboxmin-vec3(0.05), rectboxmax+overshoot);
     Upsampledcw.w = Upsampledcw.w * (1.0f / 3.0f) ;
 
 	float OneMinusWfactor = 1.0f - Wfactor;
