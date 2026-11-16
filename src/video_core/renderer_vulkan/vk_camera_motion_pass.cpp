@@ -20,7 +20,7 @@ struct PushConstants {
     std::array<s32, 2> size;
 };
 
-constexpr std::array<VkDescriptorSetLayoutBinding, 2> BINDINGS{{
+constexpr std::array<VkDescriptorSetLayoutBinding, 3> BINDINGS{{
     {
         .binding = 0,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -35,9 +35,16 @@ constexpr std::array<VkDescriptorSetLayoutBinding, 2> BINDINGS{{
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         .pImmutableSamplers = nullptr,
     },
+    {
+        .binding = 2,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .pImmutableSamplers = nullptr,
+    },
 }};
 
-constexpr std::array<VkDescriptorUpdateTemplateEntry, 2> TEMPLATES{{
+constexpr std::array<VkDescriptorUpdateTemplateEntry, 3> TEMPLATES{{
     {
         .dstBinding = 0,
         .dstArrayElement = 0,
@@ -54,6 +61,14 @@ constexpr std::array<VkDescriptorUpdateTemplateEntry, 2> TEMPLATES{{
         .offset = sizeof(DescriptorUpdateEntry),
         .stride = sizeof(DescriptorUpdateEntry),
     },
+    {
+        .dstBinding = 2,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .offset = 2 * sizeof(DescriptorUpdateEntry),
+        .stride = sizeof(DescriptorUpdateEntry),
+    },
 }};
 
 constexpr DescriptorBankInfo BANK_INFO{
@@ -62,8 +77,8 @@ constexpr DescriptorBankInfo BANK_INFO{
     .texture_buffers = 0,
     .image_buffers = 0,
     .textures = 1,
-    .images = 1,
-    .score = 2,
+    .images = 2,
+    .score = 3,
 };
 
 constexpr VkPushConstantRange PUSH_CONSTANT_RANGE{
@@ -118,51 +133,55 @@ void CameraMotionPass::CreateImage(VkExtent2D size) {
     if (image) {
         scheduler.Finish(); // the old image may still be in use
     }
-    image = memory_allocator.CreateImage(VkImageCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .imageType = VK_IMAGE_TYPE_2D,
-        .format = FORMAT,
-        .extent = {size.width, size.height, 1},
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    });
-    view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .image = *image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = FORMAT,
-        .components{},
-        .subresourceRange = COLOR_RANGE,
-    });
+    const auto create = [&](VkFormat format, vk::Image& target, vk::ImageView& target_view) {
+        target = memory_allocator.CreateImage(VkImageCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {size.width, size.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        target_view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *target,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .components{},
+            .subresourceRange = COLOR_RANGE,
+        });
+        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.Record([handle = *target](vk::CommandBuffer cmdbuf) {
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                   VkImageMemoryBarrier{
+                                       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                       .pNext = nullptr,
+                                       .srcAccessMask = 0,
+                                       .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                                       .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                       .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                       .image = handle,
+                                       .subresourceRange = COLOR_RANGE,
+                                   });
+        });
+    };
+    create(FORMAT, image, view);
+    create(REVERSED_DEPTH_FORMAT, reversed_depth_image, reversed_depth_view);
     extent = size;
-    scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([handle = *image](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                               VkImageMemoryBarrier{
-                                   .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                                   .pNext = nullptr,
-                                   .srcAccessMask = 0,
-                                   .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-                                   .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                                   .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                                   .image = handle,
-                                   .subresourceRange = COLOR_RANGE,
-                               });
-    });
 }
 
 void CameraMotionPass::Record(VkImageView depth, VkExtent2D size,
@@ -171,9 +190,10 @@ void CameraMotionPass::Record(VkImageView depth, VkExtent2D size,
         CreateImage(size);
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    descriptor_queue.Acquire(scheduler, 2);
+    descriptor_queue.Acquire(scheduler, 3);
     descriptor_queue.AddSampledImage(depth, *sampler);
     descriptor_queue.AddImage(*view);
+    descriptor_queue.AddImage(*reversed_depth_view);
     const void* const descriptor_data{descriptor_queue.UpdateData()};
     const PushConstants constants{
         .reprojection = reprojection,

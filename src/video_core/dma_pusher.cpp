@@ -57,7 +57,10 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
     , channel_state{channel_state_}
     , signal_sync{false}
     , synced{false}
-{}
+{
+    constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+    keep_submit_copies = system.GetApplicationProcessProgramID() == FortunesWeaveProgramId;
+}
 
 DmaPusher::~DmaPusher() = default;
 
@@ -225,6 +228,7 @@ bool DmaPusher::Step() {
         bool gpu_written =
             IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+            MayBeGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32)) &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -239,17 +243,21 @@ bool DmaPusher::Step() {
         // safe read below would flush (with the split, the front can't tell: it reads memory
         // unflushed anyway). Entries on pages the GPU writes (culling) always take the flushing
         // read: their words at submit time are an older frame's.
+        // keep_submit_copies: the copy holds the words as submitted whatever waited since (the
+        // title rewrites its command ring early; see dma_pusher.h).
         const bool submitted = command_resume_offset < header.size &&
                                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
-                               (command_list.snapshot_suspensions & 1) == 0 &&
-                               command_list.snapshot_suspensions ==
-                                   suspensions.load(std::memory_order_acquire) &&
+                               (keep_submit_copies ||
+                                ((command_list.snapshot_suspensions & 1) == 0 &&
+                                 command_list.snapshot_suspensions ==
+                                     suspensions.load(std::memory_order_acquire))) &&
                                !std::ranges::binary_search(
                                    command_list.deferred_entries,
                                    static_cast<u32>(dma_pushbuffer_subindex)) &&
                                !gpu_written && !cache_written &&
-                               !(use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
-                                                                          header.size * sizeof(u32)));
+                               (keep_submit_copies ||
+                                !(use_safe && memory_manager.IsMemoryDirty(
+                                                  dma_state.dma_get, header.size * sizeof(u32))));
         // Off by default: the check below reads memory and allocates for each entry it checks.
         // EDEN_NX2_PERF_VERIFY=1 turns it on.
         static const bool check_parsed_entries = VideoCommon::Nx2Perf::Verify();
@@ -923,6 +931,35 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
             rasterizer->NoteGpuWrittenCommandListSynced(*device);
         }
     }
+}
+
+// Whether the queued compute and copy work may have written these commands. Fortune's Weave reads
+// ~11,000 command list entries a second on its battle map; waiting for every queued writer before
+// each one ran the split's front and back one after the other (43 ms frames on an Odin 2). It
+// writes its GPU-built lists into the same pages every frame: only pages that have held
+// GPU-written commands before wait (g_nx2_command_list_pages, sticky). A page whose first such
+// list is still queued reads stale once. Other titles keep the wait for every entry
+// (EDEN_NX2_WRITER_WAIT=all|known overrides).
+bool DmaPusher::MayBeGpuWrittenCommands(GPUVAddr address, size_t size) const {
+    static const char setting = [] {
+        const char* value = std::getenv("EDEN_NX2_WRITER_WAIT");
+        return value == nullptr ? '\0' : value[0];
+    }();
+    const bool known_only = setting == '\0' ? keep_submit_copies : setting == 'k';
+    if (!known_only) {
+        return true;
+    }
+    if (!Tegra::g_nx2_has_command_list_pages.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    const GPUVAddr end = address + size;
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < end; page += 0x1000) {
+        if (const auto device = memory_manager.GpuToCpuAddress(page);
+            device && Tegra::Nx2IsCommandListPage(*device)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void DmaPusher::ReportUnboundSubchannel() {

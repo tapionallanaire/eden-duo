@@ -299,6 +299,29 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
             return true;
+        case TitleID::FireEmblemFortunesWeaveNx2:
+            // As Ocarina of Time: handheld keeps its render targets small on a phone, and draws
+            // skipped while pipelines build can leave a channel waiting on its own semaphores
+            // (this game already stalls on those mid-list; see DmaPusher::keep_submit_copies).
+            // Reactive flushing: its CPU reads back counters the GPU writes (auto-exposure; the
+            // buffer cache copies them back for this title, AsyncBufferDownloads).
+            DefaultForTitle(Settings::values.use_docked_mode, Settings::ConsoleMode::Handheld);
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, false);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+            DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
+#ifdef __ANDROID__
+            // SGSR 2 (Qualcomm's upscaler for Adreno) draws the DLSS output the network can't run
+            // here.
+            DefaultForTitle(Settings::values.dlss_replacement, Settings::DlssReplacement::Sgsr2);
+            // 0.75x: with the game a frame ahead (nx2_gsv.h) the battle map is GPU-bound at 1x
+            // (Odin 2, moving units: 23-25 fps); 0.75x holds 30.
+            DefaultForTitle(Settings::values.resolution_setup, Settings::ResolutionSetup::Res3_4X);
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, "
+                           "FifoRelaxed, SGSR 2, 0.75x");
+#else
+            LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
+#endif
+            return true;
         default:
             return false;
     }
@@ -359,6 +382,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::XenobladeChronicles2:
         case TitleID::XenobladeChronicles3:
         case TitleID::HogwartsLegacy:
+        case TitleID::FireEmblemFortunesWeaveNx2:
             return true;
 #ifdef __ANDROID__
         case TitleID::FireEmblemThreeHouses:

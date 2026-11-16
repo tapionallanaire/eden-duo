@@ -71,8 +71,8 @@ if (YUZU_STATIC_ROOM)
     return()
 endif()
 
-# Oaknut
-if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS)
+# Oaknut (YUZU_TESTS: the ARM64 macro JIT's test)
+if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS OR YUZU_TESTS)
     AddJsonPackage(oaknut)
 endif()
 

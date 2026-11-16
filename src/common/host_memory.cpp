@@ -1300,6 +1300,82 @@ bool MemoryIsLow() {
     return low.load(std::memory_order_relaxed);
 }
 
+void ReleaseReclaimableKernelMemory() {
+#ifdef __ANDROID__
+    // The kernel keeps the pages of earlier GPU allocations in reclaimable pools (KReclaimable:
+    // ~4.4 GB on an Odin 2 after a few runs of Ocarina of Time). They count as available, but a
+    // Switch 2 title's 3D-scene load takes ~2.5 GB in ~3 s, the kernel stalls reclaiming them
+    // and lmkd kills the game ("device is not responding"; 3 of 3 loads). Taking memory in steps
+    // first, then freeing it, makes the kernel give the pools back while nothing waits on it.
+    // EDEN_NX2_PREWARM=0 skips it.
+    if (const char* value = std::getenv("EDEN_NX2_PREWARM"); value != nullptr && value[0] == '0') {
+        return;
+    }
+    const auto read_kib = [](std::string_view field) -> u64 {
+        std::FILE* const file = std::fopen("/proc/meminfo", "r");
+        if (file == nullptr) {
+            return 0;
+        }
+        char line[160];
+        u64 kib = 0;
+        while (std::fgets(line, sizeof(line), file) != nullptr) {
+            if (std::string_view{line}.starts_with(field)) {
+                kib = std::strtoull(line + field.size(), nullptr, 10);
+                break;
+            }
+        }
+        std::fclose(file);
+        return kib;
+    };
+    constexpr u64 MiB = 1024;
+    const u64 pools = read_kib("KReclaimable:");
+    const u64 available = read_kib("MemAvailable:");
+    if (pools < 1536 * MiB || available < 4096 * MiB) {
+        return;
+    }
+    // Enough to drain the pools, never past 2.5 GB left.
+    const u64 target_kib = (std::min)(pools + 1024 * MiB, available - 2560 * MiB);
+    const int fd = memfd_create("PrewarmPools", 0);
+    if (fd < 0) {
+        return;
+    }
+    SCOPE_EXIT {
+        close(fd);
+    };
+    const size_t size = static_cast<size_t>(target_kib) * 1024;
+    if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
+        return;
+    }
+    u8* const base = static_cast<u8*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
+    if (base == MAP_FAILED) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    constexpr size_t Step = size_t{128} << 20;
+    size_t taken = 0;
+    while (taken < size) {
+        const size_t piece = (std::min)(Step, size - taken);
+        for (size_t offset = 0; offset < piece; offset += 4096) {
+            base[taken + offset] = 1;
+        }
+        taken += piece;
+        if (read_kib("MemAvailable:") < 2560 * MiB || read_kib("KReclaimable:") < 512 * MiB) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{60});
+    }
+    munmap(base, size);
+    LOG_INFO(Common_Memory,
+             "Kernel pools released before the game: {} MiB taken in steps, reclaimable {} -> {} "
+             "MiB, available {} -> {} MiB, {} ms",
+             taken >> 20, pools / MiB, read_kib("KReclaimable:") / MiB, available / MiB,
+             read_kib("MemAvailable:") / MiB,
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - start)
+                 .count());
+#endif
+}
+
 ColdHintAction HostMemory::HintCold(size_t physical_offset, size_t length,
                                     std::optional<size_t> virtual_offset) const {
     if (length == 0 || backing_base == nullptr) {

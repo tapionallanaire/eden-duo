@@ -930,6 +930,14 @@ private:
     StackParameters m_stack_parameters{};
     std::mutex m_context_guard{};
 
+public:
+    // EDEN_NX2_KSTATS: when this thread was made runnable from a wait and switched in (host ns),
+    // and how it was woken (Nx2KStats::WakeKind).
+    u64 m_nx2_ready_ns{};
+    u64 m_nx2_switch_ns{};
+    u32 m_nx2_wake_kind{};
+
+private:
     // For emulation
     std::shared_ptr<Common::Fiber> m_host_context{};
     ThreadType m_thread_type{};

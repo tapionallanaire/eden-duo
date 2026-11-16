@@ -32,4 +32,8 @@ std::vector<BacktraceEntry> GetBacktraceFromContext(Kernel::KProcess* process,
                                                     const Kernel::Svc::ThreadContext& ctx);
 std::vector<BacktraceEntry> GetBacktrace(const Kernel::KThread* thread);
 
+/// Diagnostic: logs every guest thread of the process (state, wait reason, condition variable
+/// and arbiter keys) with the first frames of its backtrace. Contexts of running threads are stale.
+void LogGuestThreads(Kernel::KProcess* process);
+
 } // namespace Core

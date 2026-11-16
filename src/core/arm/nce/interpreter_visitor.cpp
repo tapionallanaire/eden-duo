@@ -5,7 +5,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 merryhime <https://mary.rs>
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <numeric>
+#include <optional>
 #include "core/arm/nce/interpreter_visitor.h"
 
 namespace Core {
@@ -527,6 +529,69 @@ bool InterpreterVisitor::SIMDImmediate(bool wback, bool postindex, size_t scale,
             this->SetReg(Rn, address);
     }
     return true;
+}
+
+// ST1 (single structure): one lane of Vt to [Rn]. Games store vector lanes into buffers the GPU
+// also writes (Fortune's Weave's job workers: st1 {v16.s}[n]); left to the page-wide path, each
+// such store waited up to 200 ms for the page's GPU-written bytes.
+bool InterpreterVisitor::StoreSingleLane(bool wback, bool Q, std::optional<Reg> Rm,
+                                         Imm<2> upper_opcode, bool S, Imm<2> size, Reg Rn, Vec Vt) {
+    size_t scale = upper_opcode.ZeroExtend<size_t>();
+    size_t index = 0;
+    switch (scale) {
+    case 0:
+        index = (static_cast<size_t>(Q) << 3) | (static_cast<size_t>(S) << 2) |
+                size.ZeroExtend<size_t>();
+        break;
+    case 1:
+        if (size.Bit<0>()) {
+            return false;
+        }
+        index = (static_cast<size_t>(Q) << 2) | (static_cast<size_t>(S) << 1) |
+                static_cast<size_t>(size.Bit<1>());
+        break;
+    case 2:
+        if (size.Bit<1>()) {
+            return false;
+        }
+        if (!size.Bit<0>()) {
+            index = (static_cast<size_t>(Q) << 1) | static_cast<size_t>(S);
+        } else {
+            if (S) {
+                return false;
+            }
+            index = static_cast<size_t>(Q);
+            scale = 3;
+        }
+        break;
+    default:
+        return false; // replicate forms are loads only
+    }
+    const size_t ebytes = size_t{1} << scale;
+    const u64 address = (Rn == Reg::SP) ? this->GetSp() : this->GetReg(Rn);
+    const u128 vector = this->GetVec(Vt);
+    u8 bytes[16];
+    std::memcpy(bytes, vector.data(), sizeof(bytes));
+    m_memory.WriteBlock(address, bytes + index * ebytes, ebytes);
+    if (wback) {
+        const u64 offset = (Rm && *Rm != Reg::R31) ? this->GetReg(*Rm) : u64{ebytes};
+        if (Rn == Reg::SP) {
+            this->SetSp(address + offset);
+        } else {
+            this->SetReg(Rn, address + offset);
+        }
+    }
+    return true;
+}
+
+bool InterpreterVisitor::ST1_sngl_1(bool Q, Imm<2> upper_opcode, bool S, Imm<2> size, Reg Rn,
+                                    Vec Vt) {
+    return StoreSingleLane(false, Q, std::nullopt, upper_opcode, S, size, Rn, Vt);
+}
+
+bool InterpreterVisitor::ST1_sngl_2(bool Q, Reg Rm, Imm<2> upper_opcode, bool S, Imm<2> size,
+                                    Reg Rn, Vec Vt) {
+    return StoreSingleLane(true, Q, Rm, upper_opcode, S, size, Rn, Vt);
 }
 
 bool InterpreterVisitor::STR_imm_fpsimd_1(Imm<2> size, Imm<1> opc_1, Imm<9> imm9,

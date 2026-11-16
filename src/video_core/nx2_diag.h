@@ -280,6 +280,14 @@ public:
         program_hashes[address] = hash;
     }
 
+    /// The key of the program at this address, under the lock RegisterProgram takes (callers
+    /// off the diagnostics' own paths); 0 when unknown.
+    u64 KeyOfLocked(u64 address) {
+        std::scoped_lock lock{mutex};
+        const auto it = program_keys.find(address);
+        return it == program_keys.end() ? 0 : it->second;
+    }
+
     // The running program id, written to diag-state.json as "title".
     void SetTitle(u64 program_id) {
         std::scoped_lock lock{mutex};
@@ -671,6 +679,7 @@ private:
         const auto it = program_keys.find(address);
         return it == program_keys.end() ? 0 : it->second;
     }
+
 
     u64 HashOf(u64 address) const {
         const auto it = program_hashes.find(address);

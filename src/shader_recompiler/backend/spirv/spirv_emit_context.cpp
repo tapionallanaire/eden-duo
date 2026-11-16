@@ -478,6 +478,24 @@ bool LeanGlobalMemory() {
     }();
     return enabled && Settings::CurrentProgramIsSwitch2();
 }
+
+// EDEN_NX2_SSBO_SELECT=1 (experiment): a global load picks its buffer with OpSelect on the buffer
+// pointers and loads once, instead of switching to a load per candidate buffer (Switch 2 titles).
+bool HoistGlobalBases() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_HOIST_BASES");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled && Settings::CurrentProgramIsSwitch2();
+}
+
+bool SelectGlobalLoads() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SSBO_SELECT");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled && Settings::CurrentProgramIsSwitch2();
+}
 } // Anonymous namespace
 
 void VectorTypes::Define(Sirit::Module& sirit_ctx, Id base_type, std::string_view name) {
@@ -985,13 +1003,70 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     write_storage_cas_loop_func = func;
 }
 
+Id EmitContext::GlobalBaseAddress(const Info& info, size_t index) {
+    const Id zero{u32_zero_value};
+    const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
+    const auto& ssbo{info.storage_buffers_descriptors[index]};
+    const Id words{EmitGetCbufU32x2(*this, IR::Value{ssbo.cbuf_index}, IR::Value{ssbo.cbuf_offset})};
+    if (ssbo.indirect_offset == ~0U) {
+        return OpBitwiseAnd(U64, OpBitcast(U64, words), Constant(U64, ssbo_align_mask));
+    }
+    // The pointer is read through the buffer bound for the constant buffer pointer.
+    const auto holder{std::ranges::find_if(
+        info.storage_buffers_descriptors, [&ssbo](const auto& desc) {
+            return desc.cbuf_index == ssbo.cbuf_index && desc.cbuf_offset == ssbo.cbuf_offset &&
+                   desc.indirect_offset == ~0U;
+        })};
+    if (holder == info.storage_buffers_descriptors.end()) {
+        return Constant(U64, ~u64{0});
+    }
+    const size_t holder_index{
+        static_cast<size_t>(std::distance(info.storage_buffers_descriptors.begin(), holder))};
+    const Id holder_low{OpCompositeExtract(U32[1], words, 0U)};
+    const Id byte{OpIAdd(U32[1],
+                         OpBitwiseAnd(U32[1], holder_low,
+                                      Const(static_cast<u32>(profile.min_ssbo_alignment - 1))),
+                         Const(ssbo.indirect_offset))};
+    const Id word_index{OpShiftRightLogical(U32[1], byte, Const(2U))};
+    const Id storage{ssbos[holder_index].U32};
+    const auto load_word{[&](Id word) {
+        return OpLoad(U32[1], OpAccessChain(storage_types.U32.element, storage, zero, word));
+    }};
+    const Id pointer_words{OpCompositeConstruct(
+        U32[2], load_word(word_index), load_word(OpIAdd(U32[1], word_index, Const(1U))))};
+    return OpBitwiseAnd(U64, OpBitcast(U64, pointer_words), Constant(U64, ssbo_align_mask));
+}
+
 void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     const Info& info{program.info};
     if (!info.uses_global_memory || !profile.support_int64) {
         return;
     }
+    if (info.native_global_bounds && SelectGlobalLoads()) {
+        AddCapability(spv::Capability::VariablePointersStorageBuffer);
+    }
     using DefPtr = Id StorageDefinitions::*;
     const Id zero{u32_zero_value};
+    // EDEN_NX2_HOIST_BASES=1 (experiment): the candidate buffers' base addresses (from constant
+    // buffers or a pointer table) are read once, in the prologue, instead of in every access.
+    // Inlined at each of its accesses, Ocarina of Time's lighting vertex program re-read them 72
+    // times: 29,658 instructions and ~4,000 register reloads a vertex on Adreno (Turnip).
+    // Only for programs that do not write global memory, so the table cannot change under them.
+    const bool hoisted_bases{info.native_global_bounds && HoistGlobalBases() &&
+                             !info.stores_global_memory &&
+                             !info.storage_buffers_descriptors.empty()};
+    if (hoisted_bases) {
+        const Id pointer{TypePointer(spv::StorageClass::Private, U64)};
+        global_base_vars.clear();
+        for (size_t index = 0; index < info.storage_buffers_descriptors.size(); ++index) {
+            const Id variable{AddGlobalVariable(pointer, spv::StorageClass::Private)};
+            if (profile.supported_spirv >= 0x00010400) {
+                interfaces.push_back(variable);
+            }
+            global_base_vars.push_back(variable);
+        }
+        global_base_info = &info;
+    }
     const bool inline_mesh_loads{profile.has_broken_mesh_global_memory_calls &&
                                  runtime_info.mesh_as_compute &&
                                  (stage == Stage::Task || stage == Stage::Mesh)};
@@ -1000,42 +1075,15 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                            : spv::FunctionControlMask::MaskNone};
     const spv::FunctionControlMask load_control{
         inline_mesh_loads ? spv::FunctionControlMask::Inline : helper_control};
+    // select_type (a load's buffer pointer type): pick the candidate buffer with OpSelect and call
+    // callback(element pointer, found) once, without a branch per buffer.
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
-                               auto&& callback) {
+                               auto&& callback, Id select_type = Id{}) {
         AddLabel();
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
-        const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
         const auto base_address{[&](size_t index) {
-            const auto& ssbo{info.storage_buffers_descriptors[index]};
-            const Id words{EmitGetCbufU32x2(*this, IR::Value{ssbo.cbuf_index},
-                                           IR::Value{ssbo.cbuf_offset})};
-            if (ssbo.indirect_offset == ~0U) {
-                return OpBitwiseAnd(U64, OpBitcast(U64, words), Constant(U64, ssbo_align_mask));
-            }
-            // The pointer is read through the buffer bound for the constant buffer pointer.
-            const auto holder{std::ranges::find_if(
-                info.storage_buffers_descriptors, [&ssbo](const auto& desc) {
-                    return desc.cbuf_index == ssbo.cbuf_index &&
-                           desc.cbuf_offset == ssbo.cbuf_offset && desc.indirect_offset == ~0U;
-                })};
-            if (holder == info.storage_buffers_descriptors.end()) {
-                return Constant(U64, ~u64{0});
-            }
-            const size_t holder_index{static_cast<size_t>(
-                std::distance(info.storage_buffers_descriptors.begin(), holder))};
-            const Id holder_low{OpCompositeExtract(U32[1], words, 0U)};
-            const Id byte{OpIAdd(U32[1],
-                                 OpBitwiseAnd(U32[1], holder_low,
-                                              Const(static_cast<u32>(profile.min_ssbo_alignment - 1))),
-                                 Const(ssbo.indirect_offset))};
-            const Id word_index{OpShiftRightLogical(U32[1], byte, Const(2U))};
-            const Id storage{ssbos[holder_index].U32};
-            const auto load_word{[&](Id word) {
-                return OpLoad(U32[1], OpAccessChain(storage_types.U32.element, storage, zero, word));
-            }};
-            const Id pointer_words{OpCompositeConstruct(
-                U32[2], load_word(word_index), load_word(OpIAdd(U32[1], word_index, Const(1U))))};
-            return OpBitwiseAnd(U64, OpBitcast(U64, pointer_words), Constant(U64, ssbo_align_mask));
+            return hoisted_bases ? OpLoad(U64, global_base_vars[index])
+                                 : GlobalBaseAddress(info, index);
         }};
         const auto access{[&](size_t index, Id ssbo_addr, Id cond) {
             const Id then_label{OpLabel()};
@@ -1063,6 +1111,25 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                                              OpULessThan(U1, distance, best_distance))};
                 best_distance = OpSelect(U64, better, distance, best_distance);
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
+            }
+            if (Sirit::ValidId(select_type) && num_buffers != 0) {
+                // One load through a selected buffer pointer (variable pointers) instead of a
+                // switch with a load in each arm: the loads of a program stay in one block, so
+                // the driver can issue them together. Ocarina of Time's lighting vertex programs
+                // read ~72 such addresses a vertex; each waited out its own branch on Adreno.
+                Id buffer{ssbos[0].*ssbo_member};
+                for (size_t index = 1; index < num_buffers; ++index) {
+                    buffer = OpSelect(select_type,
+                                      OpIEqual(U1, best_index, Const(static_cast<u32>(index))),
+                                      ssbos[index].*ssbo_member, buffer);
+                }
+                const Id found{OpINotEqual(U1, best_index, Const(~0U))};
+                const Id offset{OpUConvert(U32[1], best_distance)};
+                const Id element_index{OpSelect(U32[1], found,
+                                                OpShiftRightLogical(U32[1], offset, Const(shift)),
+                                                Const(0U))};
+                callback(OpAccessChain(element_pointer, buffer, zero, element_index), found, Id{});
+                return;
             }
             if (LeanGlobalMemory()) {
                 std::vector<Sirit::Literal> literals;
@@ -1107,7 +1174,8 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             access(index, ssbo_addr, cond);
         }
     }};
-    const auto define_load{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift) {
+    const auto define_load{[&](DefPtr ssbo_member, Id element_pointer, Id type, u32 shift,
+                               Id array_type) {
         const Id function_type{TypeFunction(type, U64)};
         const Id func_id{OpFunction(type, load_control, function_type)};
         const Id addr{OpFunctionParameter(U64)};
@@ -1128,6 +1196,26 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                                 OpCompositeConstruct(type, std::span{words}.first(count)));
                         });
             OpReturnValue(ConstantNull(type));
+            OpFunctionEnd();
+            return func_id;
+        }
+        if (info.native_global_bounds && SelectGlobalLoads() &&
+            !info.storage_buffers_descriptors.empty()) {
+            // An address in no candidate buffer still reads 0.
+            const u32 count{1U << (shift - 2)};
+            define_body(
+                ssbo_member, addr, element_pointer, shift,
+                [&](Id ssbo_pointer, Id found, Id) {
+                    const Id value{OpLoad(type, ssbo_pointer)};
+                    Id condition{found};
+                    if (count > 1) {
+                        const std::array<Id, 4> lanes{found, found, found, found};
+                        condition = OpCompositeConstruct(TypeVector(U1, count),
+                                                         std::span{lanes}.first(count));
+                    }
+                    OpReturnValue(OpSelect(type, condition, value, ConstantNull(type)));
+                },
+                array_type);
             OpFunctionEnd();
             return func_id;
         }
@@ -1171,7 +1259,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         [&](DefPtr ssbo_member, const StorageTypeDefinition& type_def, Id type, size_t size) {
             const Id element_type{type_def.element};
             const u32 shift{static_cast<u32>(std::countr_zero(size))};
-            const Id load_func{define_load(ssbo_member, element_type, type, shift)};
+            const Id load_func{define_load(ssbo_member, element_type, type, shift, type_def.array)};
             const Id write_func{define_write(ssbo_member, element_type, type, shift)};
             return std::make_pair(load_func, write_func);
         }};

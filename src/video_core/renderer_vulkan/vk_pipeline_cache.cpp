@@ -36,6 +36,7 @@
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
+#include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
@@ -74,6 +75,126 @@
 namespace Vulkan {
 
 namespace {
+/// EDEN_NX2_FLAT_LIGHTING=<program hash>[,...]|all: in those vertex programs every global
+/// memory load that feeds neither the position, control flow nor a memory write reads
+/// EDEN_NX2_FLAT_LIGHTING_VALUE (u32 bits, default 0) instead. Per-vertex lighting read from
+/// memory (Ocarina of Time's light probes) then folds to a constant and its spills go away.
+bool FlatLightingProgram(u64 hash) {
+    static const bool all = [] {
+        const char* value = std::getenv("EDEN_NX2_FLAT_LIGHTING");
+        return value && std::string_view{value} == "all";
+    }();
+    static const auto hashes = [] {
+        std::unordered_set<u64> list;
+        if (const char* value = std::getenv("EDEN_NX2_FLAT_LIGHTING")) {
+            for (const char* p = value; *p;) {
+                char* end{};
+                const u64 key = std::strtoull(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                list.insert(key);
+                p = *end ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    return all || hashes.contains(hash);
+}
+
+void FlattenGlobalLighting(Shader::IR::Program& program, u64 hash) {
+    namespace IR = Shader::IR;
+    if (program.stage != Shader::Stage::VertexB || !FlatLightingProgram(hash)) {
+        return;
+    }
+    std::unordered_set<const IR::Inst*> keep;
+    std::vector<const IR::Inst*> work;
+    const auto root = [&](const IR::Value& value) {
+        if (value.IsImmediate()) {
+            return;
+        }
+        if (const IR::Inst* const inst = value.TryInstRecursive(); inst && keep.insert(inst).second) {
+            work.push_back(inst);
+        }
+    };
+    const auto root_args = [&](const IR::Inst& inst) {
+        for (size_t i = 0; i < inst.NumArgs(); ++i) {
+            root(inst.Arg(i));
+        }
+    };
+    for (IR::Block* const block : program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            switch (inst.GetOpcode()) {
+            case IR::Opcode::SetAttribute: {
+                const IR::Attribute attr{inst.Arg(0).Attribute()};
+                if (attr >= IR::Attribute::PositionX && attr <= IR::Attribute::PositionW) {
+                    root_args(inst);
+                }
+                break;
+            }
+            case IR::Opcode::SetAttributeIndexed:
+            case IR::Opcode::WriteGlobalU8:
+            case IR::Opcode::WriteGlobalS8:
+            case IR::Opcode::WriteGlobalU16:
+            case IR::Opcode::WriteGlobalS16:
+            case IR::Opcode::WriteGlobal32:
+            case IR::Opcode::WriteGlobal64:
+            case IR::Opcode::WriteGlobal128:
+                root_args(inst);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case IR::AbstractSyntaxNode::Type::If:
+            root(node.data.if_node.cond);
+            break;
+        case IR::AbstractSyntaxNode::Type::Repeat:
+            root(node.data.repeat.cond);
+            break;
+        case IR::AbstractSyntaxNode::Type::Break:
+            root(node.data.break_node.cond);
+            break;
+        default:
+            break;
+        }
+    }
+    while (!work.empty()) {
+        const IR::Inst* const inst{work.back()};
+        work.pop_back();
+        root_args(*inst);
+    }
+    static const u32 bits = [] {
+        const char* value = std::getenv("EDEN_NX2_FLAT_LIGHTING_VALUE");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 0)) : 0U;
+    }();
+    size_t flattened{};
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            const IR::Opcode op{inst.GetOpcode()};
+            const bool load32 = op == IR::Opcode::LoadGlobalU8 || op == IR::Opcode::LoadGlobalS8 ||
+                                op == IR::Opcode::LoadGlobalU16 ||
+                                op == IR::Opcode::LoadGlobalS16 || op == IR::Opcode::LoadGlobal32;
+            if ((!load32 && op != IR::Opcode::LoadGlobal64 && op != IR::Opcode::LoadGlobal128) ||
+                keep.contains(&inst)) {
+                continue;
+            }
+            IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+            const IR::Value c{bits};
+            inst.ReplaceUsesWith(load32 ? c
+                                 : op == IR::Opcode::LoadGlobal64
+                                     ? ir.CompositeConstruct(c, c)
+                                     : ir.CompositeConstruct(c, c, c, c));
+            ++flattened;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Flat lighting: program {:016x}, {} global loads read 0x{:x}", hash,
+             flattened, bits);
+}
+
 using Shader::Backend::SPIRV::EmitSPIRV;
 using Shader::Maxwell::ConvertLegacyToGeneric;
 using Shader::Maxwell::GenerateGeometryPassthrough;
@@ -3096,6 +3217,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             infos[index - 1] = &program.info;
             runtime_infos[index] = MakeRuntimeInfo(programs, key, program, previous_stage, device);
             ConvertLegacyToGeneric(program, runtime_infos[index]);
+            FlattenGlobalLighting(program, key.unique_hashes[index]);
             previous_stage = &program;
             continue;
         }
@@ -3122,7 +3244,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             }
         }
         std::vector<u32> code;
-        if (emitted && !stage_cache.Verify()) {
+        if (emitted && !stage_cache.Verify() && !FlatLightingProgram(key.unique_hashes[index])) {
             code = emitted->spirv;
             program = emitted->program;
             binding = emitted->bindings_out;
@@ -3154,6 +3276,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 }
             }
             ConvertLegacyToGeneric(program, runtime_info);
+            FlattenGlobalLighting(program, key.unique_hashes[index]);
             // EDEN_NX2_MESH_EMULATION_DUMP=<dir>: write the emulation's vertex shader for spirv-val.
             if (mesh_emulation && program.stage == Shader::Stage::Mesh) {
                 if (const char* const dump{std::getenv("EDEN_NX2_MESH_EMULATION_DUMP")}) {

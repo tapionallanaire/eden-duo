@@ -587,7 +587,7 @@ if (NOT YUZU_STATIC_ROOM)
         find_package(cpp-jwt)
     endif()
 
-    if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS)
+    if (ARCHITECTURE_arm64 OR DYNARMIC_TESTS OR YUZU_TESTS)
         find_package(oaknut)
     endif()
 

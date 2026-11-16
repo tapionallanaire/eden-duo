@@ -8,12 +8,14 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <type_traits>
 
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/debugger/trace_hooks.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
@@ -2502,6 +2504,35 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     default: UNREACHABLE_MSG("Unhandled SVC {:#x}!", imm);
     }
 }
+/// The calling thread, the sdk return address of the SVC stub's caller and the first two return
+/// addresses in main up its frame-pointer chain (0 when not found), as module offsets.
+static Nx2KStats::CallerKey CallerOf(KernelCore& kernel, KProcess& process, u32 imm) {
+    Svc::ThreadContext ctx{};
+    process.GetArmInterface(kernel.CurrentPhysicalCoreIndex())->GetContext(ctx);
+    const u64 main = Nx2KStats::g_main_base.load(std::memory_order_relaxed);
+    const u64 main_size = Nx2KStats::g_main_size.load(std::memory_order_relaxed);
+    const u64 sdk = Nx2KStats::g_sdk_base.load(std::memory_order_relaxed);
+    const u64 sdk_size = Nx2KStats::g_sdk_size.load(std::memory_order_relaxed);
+    const auto in_main = [&](u64 address) { return address - main < main_size; };
+    std::array<u64, 2> found{};
+    size_t count = 0;
+    auto& memory = process.GetMemory();
+    u64 fp = ctx.fp;
+    u64 ret = ctx.lr;
+    for (int frame = 0; frame < 24 && count < found.size(); ++frame) {
+        if (in_main(ret)) {
+            found[count++] = ret - main;
+        }
+        if (fp == 0 || (fp & 7) != 0 || !memory.IsValidVirtualAddressRange(fp, 16)) {
+            break;
+        }
+        ret = memory.Read64(fp + 8);
+        fp = memory.Read64(fp);
+    }
+    const u64 lr = ctx.lr - sdk < sdk_size ? ctx.lr - sdk : ~u64{};
+    return {imm, GetCurrentThread(kernel).GetThreadId(), lr, found[0], found[1]};
+}
+
 /// Dispatches SVC `imm` for the current thread, with optional tracing and trace-hook reporting.
 void Call(Core::System& system, u32 imm) {
     auto& kernel = system.Kernel();
@@ -2583,10 +2614,50 @@ void Call(Core::System& system, u32 imm) {
         namespace Spikes = VideoCommon::Nx2Spikes;
         const bool spikes = Spikes::Counting();
         const auto started = spikes ? Spikes::Clock::now() : Spikes::Clock::time_point{};
+        // EDEN_NX2_SVC_CALLERS: who in main makes this call (see nx2_kstats.h).
+        std::optional<Nx2KStats::CallerKey> caller;
+        if (Nx2KStats::g_callers_enabled) {
+            static thread_local u32 sample{};
+            switch (imm) {
+            case 0x0B: case 0x18: case 0x1A: case 0x1B: case 0x1C: case 0x1D: case 0x21: case 0x34: case 0x35:
+                if (++sample % 4 == 0) {
+                    caller = CallerOf(kernel, process, imm);
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        const s64 sleep_ns = static_cast<s64>(GetArg64(args, 0));
+        const u64 kstats_start = Nx2KStats::g_enabled || caller ? Nx2KStats::NowNs() : 0;
         if (process.Is64Bit()) {
             Call64(system, imm, args);
         } else {
             Call32(system, imm, args);
+        }
+        if (kstats_start != 0) {
+            const u64 ns = Nx2KStats::NowNs() - kstats_start;
+            if (Nx2KStats::g_enabled) {
+                Nx2KStats::Add(Nx2KStats::g_stats.svc_count[imm & 0xFF]);
+                Nx2KStats::Add(Nx2KStats::g_stats.svc_ns[imm & 0xFF], ns);
+                if (imm == 0x0B && sleep_ns <= 0) {
+                    Nx2KStats::Add(Nx2KStats::g_stats.yields[0]);
+                    Nx2KStats::Add(Nx2KStats::g_stats.yields[1], ns);
+                } else if (imm == 0x0B) {
+                    Nx2KStats::Add(Nx2KStats::g_stats.sleeps[0]);
+                    Nx2KStats::Add(Nx2KStats::g_stats.sleeps[1], static_cast<u64>(sleep_ns));
+                    Nx2KStats::Add(Nx2KStats::g_stats.sleeps[2], ns);
+                    Nx2KStats::Add(Nx2KStats::g_stats.sleep_hist[Nx2KStats::Bucket(ns)]);
+                    Nx2KStats::Add(Nx2KStats::g_stats.sleep_asked_hist[Nx2KStats::Bucket(
+                        static_cast<u64>(sleep_ns))]);
+                }
+            }
+            if (caller) {
+                std::scoped_lock lock{Nx2KStats::g_callers_mutex};
+                auto& [calls, total] = Nx2KStats::g_callers[*caller];
+                ++calls;
+                total += ns;
+            }
         }
         if (spikes) {
             const auto time = Spikes::Clock::now() - started;
