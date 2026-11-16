@@ -678,9 +678,12 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     // cores 3-6 next to the guest threads while the prime core stays nearly idle.
     // Fire Emblem: Fortune's Weave's battle map: ~32 ms of back CPU a frame on cores 3-6, 27 ms on
     // the critical cores (20 -> 22 fps, Odin 2); the prime core alone is slower (the front shares it).
+    // Donkey Kong Bananza's mining tunnel, Odin 2: back CPU 55 -> 48 ms a frame, 104.6 -> 100.5 ms.
     constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
     const char* core = std::getenv("EDEN_NX2_BACK_CORE");
-    if (core == nullptr && Settings::GetCurrentProgramID() == FortunesWeaveProgramId) {
+    if (core == nullptr && (Settings::GetCurrentProgramID() == FortunesWeaveProgramId ||
+                            Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId)) {
         core = "critical";
     }
     if (core && std::strcmp(core, "prime") == 0) {
