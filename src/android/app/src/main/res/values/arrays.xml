@@ -263,6 +263,20 @@
         <item>4</item>
     </integer-array>
 
+    <string-array name="rendererDlssReplacementNames">
+        <item>@string/dlss_replacement_auto</item>
+        <item>@string/dlss_replacement_sgsr2</item>
+        <item>@string/dlss_replacement_fsr3</item>
+        <item>@string/dlss_replacement_standin</item>
+    </string-array>
+
+    <integer-array name="rendererDlssReplacementValues">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+    </integer-array>
+
     <string-array name="rendererScalingFilterNames">
         <item>@string/scaling_filter_nearest_neighbor</item>
         <item>@string/scaling_filter_bilinear</item>

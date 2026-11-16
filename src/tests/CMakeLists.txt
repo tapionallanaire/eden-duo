@@ -85,6 +85,7 @@ add_executable(tests
     video_core/ampere_guarded_ulea.cpp
     video_core/ampere_compute_lowering.cpp
     video_core/native_macro_fifo.cpp
+    video_core/turing_macro_jit_a64.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
@@ -103,6 +104,11 @@ add_executable(tests
 create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core input_common video_core)
+
+# The ARM64 macro JIT runs in dynarmic's A64 emulator (video_core/turing_macro_jit_a64.cpp).
+if (ARCHITECTURE_x86_64 AND TARGET merry::oaknut)
+    target_link_libraries(tests PRIVATE merry::oaknut dynarmic::dynarmic)
+endif()
 
 if (ENABLE_MCP_SERVER)
     target_sources(tests PRIVATE mcp/protocol.cpp)

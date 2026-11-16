@@ -36,6 +36,7 @@
 #include "core/hle/kernel/k_thread_queue.h"
 #include "core/hle/kernel/k_worker_task_manager.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/kernel/svc_types.h"
@@ -1393,6 +1394,31 @@ namespace Kernel {
             static_cast<ThreadState>((old_state & ~ThreadState::Mask) | (state & ThreadState::Mask)),
             std::memory_order_relaxed);
         if (m_thread_state.load(std::memory_order_relaxed) != old_state) {
+            if (Nx2KStats::g_enabled && (old_state & ThreadState::Mask) == ThreadState::Waiting &&
+                state == ThreadState::Runnable) {
+                const KScheduler* const waker = kernel.CurrentScheduler();
+                const s32 core = this->GetActiveCore();
+                using namespace Nx2KStats;
+                m_nx2_wake_kind = waker == nullptr ? HostThread
+                                  : core < 0 || &kernel.Scheduler(core) == waker
+                                      ? SameCore
+                                  : kernel.Scheduler(core).GetSchedulerCurrentThread() ==
+                                          kernel.Scheduler(core).GetIdleThread()
+                                      ? OtherCoreIdle
+                                      : OtherCoreBusy;
+                if (m_nx2_wake_kind == OtherCoreBusy) {
+                    const KThread* const running = kernel.Scheduler(core).GetSchedulerCurrentThread();
+                    const s32 other = running != nullptr ? running->GetPriority() : 64;
+                    Add(g_stats.busy_priority[this->GetPriority() < other    ? 0
+                                              : this->GetPriority() == other ? 1
+                                                                             : 2]);
+                    if (this->GetPriority() >= other) {
+                        m_nx2_wake_kind = OtherCoreQueued;
+                    }
+                }
+                m_nx2_switch_ns = 0;
+                m_nx2_ready_ns = NowNs();
+            }
             KScheduler::OnThreadStateChanged(kernel, this, old_state);
         }
     }

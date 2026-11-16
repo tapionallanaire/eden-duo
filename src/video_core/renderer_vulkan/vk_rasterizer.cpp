@@ -1226,6 +1226,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, bool is_indirect, Func&& dra
         report_failure("configure failed");
         return;
     }
+    if (static const bool pipeline_stats{std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr};
+        pipeline_stats && !pipeline->StatisticsLogged()) {
+        // Native keys through the diagnostics' program map (needs EDEN_NX2_DIAG_DIR): the shader
+        // cache's bound-shader table can be stale here (the fast pipeline cache skips it).
+        auto& diag = VideoCommon::Nx2Diag::Diagnostics::Get();
+        std::array<u64, 6> native_keys{};
+        native_keys[1] = diag.KeyOfLocked(DiagShader(*maxwell3d, 1));
+        native_keys[5] = diag.KeyOfLocked(DiagShader(*maxwell3d, 5));
+        pipeline->LogExecutableStatistics(native_keys);
+    }
     if (frame_dump.Capturing()) {
         frame_dump.NoteKeys(pipeline->ShaderHashes(),
                             pipeline_cache.GraphicsNativeKeys(pipeline->ShaderHashes()));
@@ -2927,6 +2937,10 @@ bool RasterizerVulkan::SupportsGameDlssNetwork() const {
            device.CanPartitionGuestWarps();
 }
 
+bool RasterizerVulkan::CreatesGuestWidthComputeShaders() const {
+    return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+}
+
 std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst) {
     std::scoped_lock lock{texture_cache.mutex};
@@ -2953,7 +2967,7 @@ void RasterizerVulkan::NoteCameraMotionDraw() {
     if (!motion.armed) {
         return;
     }
-    if (!UsesNvidiaDlss()) {
+    if (!UsesNvidiaDlss() && !Ocarina::CameraMotionUpscaleRequested()) {
         motion.armed = false;
         motion.jitter_active = false;
         motion.jitter_ready = false;
@@ -3181,8 +3195,9 @@ bool RasterizerVulkan::AccelerateCameraMotionUpscale(const Tegra::Engines::Fermi
     }
     if (motion.evaluations < 4 || (!done && motion.evaluations < 64)) {
         LOG_INFO(Render_Vulkan,
-                 "Ocarina of Time anti-aliasing: NVIDIA DLSS {} (scene depth {:#x} {}x{} -> "
+                 "Ocarina of Time anti-aliasing: {} {} (scene depth {:#x} {}x{} -> "
                  "{}x{}, {} draws, camera {:#x}, jitter {},{}, reset {})",
+                 UsesNvidiaDlss() ? "NVIDIA DLSS" : "FSR 3.1",
                  done ? "applied" : "unavailable; the game's own runs", scene->depth, src.width,
                  src.height, dst.width, dst.height, scene->draws, scene->camera, jitter[0],
                  jitter[1], reset);

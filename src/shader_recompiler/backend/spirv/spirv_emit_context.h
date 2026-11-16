@@ -400,6 +400,13 @@ public:
     std::array<Id, 2> software_matrix_functions{};
     std::optional<CooperativeHmmaTypes> cooperative_hmma; ///< Set when a program lowers HMMA to it
     std::vector<Id> interfaces;
+
+    /// Private copies of the global memory candidate buffers' base addresses, set by the
+    /// prologue (EDEN_NX2_HOIST_BASES), and the program info they are computed from.
+    std::vector<Id> global_base_vars;
+    const Info* global_base_info{};
+    /// A candidate buffer's base address for the global memory helpers.
+    Id GlobalBaseAddress(const Info& info, size_t index);
     std::vector<std::pair<u32, spv::Op>> opcode_rewrites;
 
     // Task and mesh programs. Their stage buffer: the task's output region is the task payload

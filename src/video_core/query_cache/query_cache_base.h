@@ -141,6 +141,11 @@ protected:
         const u64 addr_end = addr_begin + size;
 
         const u64 page_end = (addr_end - 1) >> Core::DEVICE_PAGEBITS;
+        // Pages no query was ever cached on: nothing to find, skip the lock (every inline write
+        // invalidates here; Fortune's Weave spent ~2.7% of the GPU back thread on this mutex).
+        if (!page_filter.Any(addr, size)) {
+            return;
+        }
         std::scoped_lock lock(cache_mutex);
         if (cached_queries.empty()) {
             return;

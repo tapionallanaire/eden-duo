@@ -626,11 +626,15 @@ public:
     /// Indirectly read banks of native programs already uploaded this frame.
     std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
     struct NativeUniformBankShadow {
+        // bytes is left uninitialized: a page is only compared once initialized_mask says it
+        // was copied. Value-initializing it zeroed 64 KiB per new bank (Fortune's Weave's battle
+        // map: ~3% of the GPU back thread in memset, plus the page faults of touching it).
+        NativeUniformBankShadow() {}
         u64 last_draw_ticket{};
         u64 last_frame_tick{~u64{0}};
         u64 last_skipped_draw_ticket{~u64{0}}; ///< Profiler only: bank_once_per_frame skips
         u32 initialized_mask{};
-        std::array<u8, 0x10000> bytes{};
+        std::array<u8, 0x10000> bytes;
     };
     std::unordered_map<DAddr, NativeUniformBankShadow> native_indirect_uniform_shadow;
     std::array<std::pair<DAddr, NativeUniformBankShadow*>, 8> native_indirect_uniform_cache{};
@@ -902,6 +906,13 @@ private:
         }();
         if (forced >= 0) {
             return forced == 1;
+        }
+        // Fire Emblem: Fortune's Weave reads its luminance counters (written by compute atomics)
+        // back on the CPU for its auto-exposure: without the copies it read zeros, set the
+        // darkest exposure and its scenes came out white.
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+        if (Settings::GetCurrentProgramID() == FortunesWeaveProgramId) {
+            return true;
         }
         return gpu_memory == nullptr || !gpu_memory->UsesNativeTiling();
     }

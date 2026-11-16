@@ -1629,7 +1629,20 @@ bool TextureCacheRuntime::WantsTemporalUpscaleDepth() const {
         const char* const value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
         return value && std::string_view{value} == "standin";
     }();
-    return !force_standin && !fsr3_unsupported;
+    if (force_standin) {
+        return false;
+    }
+    switch (Settings::values.dlss_replacement.GetValue()) {
+    case Settings::DlssReplacement::Sgsr2:
+        return !sgsr2_failed;
+    case Settings::DlssReplacement::Fsr3:
+        return !fsr3_failed;
+    case Settings::DlssReplacement::StandIn:
+        return false;
+    case Settings::DlssReplacement::Auto:
+    default:
+        return !fsr3_unsupported;
+    }
 }
 
 bool TextureCacheRuntime::UsesNvidiaDlss() const {
@@ -1658,14 +1671,28 @@ std::optional<VideoCore::GameDlssProbe> TextureCacheRuntime::ProbeGameDlssOutput
 #endif
 }
 
+namespace {
+// FSR's own RCAS, set by the sharpness slider: FSR takes 0-1 for 2 to 0 stops, and the slider
+// stores stops x 100, so this is the percentage the slider shows; 0% (stored 200) is off.
+// EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides the slider. Returns (on, FSR's sharpness).
+std::pair<bool, f32> Fsr3Sharpening() {
+    static const char* const sharpen_override = std::getenv("EDEN_NX2_TEMPORAL_SHARPEN");
+    const int slider = Settings::values.fsr_sharpening_slider.GetValue();
+    bool sharpen = slider < 200;
+    f32 stops = static_cast<f32>(slider) / 100.0f;
+    if (sharpen_override) {
+        sharpen = std::string_view{sharpen_override} != "off";
+        stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
+    }
+    return {sharpen, 1.0f - stops / 2.0f};
+}
+} // Anonymous namespace
+
 bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageView& input_color,
                                           ImageView& motion_vectors, ImageView& depth,
                                           std::array<u32, 2> render_size,
                                           std::array<f32, 2> jitter,
                                           std::array<f32, 2> motion_scale) {
-#ifdef __ANDROID__
-    return false;
-#else
     if (!WantsTemporalUpscaleDepth()) {
         return false;
     }
@@ -1684,36 +1711,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
         return true;
     }
 #endif
-    if (!fsr3_upscaler) {
-        if (!Fsr3Upscaler::IsSupported(device)) {
-            LOG_WARNING(Render_Vulkan, "FSR 3.1 needs formats or features this device lacks; "
-                                       "using the temporal stand-in");
-            fsr3_unsupported = true;
-            return false;
-        }
-        try {
-            fsr3_upscaler = std::make_unique<Fsr3Upscaler>(device, scheduler, memory_allocator,
-                                                           staging_buffer_pool, descriptor_pool,
-                                                           compute_pass_descriptor_queue);
-        } catch (const vk::Exception& exception) {
-            LOG_ERROR(Render_Vulkan, "FSR 3.1 failed to start ({}); using the temporal stand-in",
-                      exception.what());
-            fsr3_unsupported = true;
-            return false;
-        }
-    }
-    // FSR's own RCAS, set by the sharpness slider: FSR takes 0-1 for 2 to 0 stops, and the slider
-    // stores stops x 100, so this is the percentage the slider shows; 0% (stored 200) is off.
-    // EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides the slider.
-    static const char* const sharpen_override = std::getenv("EDEN_NX2_TEMPORAL_SHARPEN");
-    const int slider = Settings::values.fsr_sharpening_slider.GetValue();
-    bool sharpen = slider < 200;
-    f32 stops = static_cast<f32>(slider) / 100.0f;
-    if (sharpen_override) {
-        sharpen = std::string_view{sharpen_override} != "off";
-        stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
-    }
-    fsr3_upscaler->Upscale({
+    const Fsr3Upscaler::Inputs inputs{
         .color = input_color.Handle(Shader::TextureType::Color2D),
         .depth = depth.DepthView(),
         .motion_vectors = motion_vectors.Handle(Shader::TextureType::Color2D),
@@ -1724,9 +1722,31 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
                                 motion_scale[1] * static_cast<f32>(render_size[1])},
         .frame_time_ms = frame_time_ms,
         .reset = reset,
-        .sharpen = sharpen,
-        .sharpness = 1.0f - stops / 2.0f,
-    });
+        .sharpen = false,
+        .sharpness = 0.0f,
+    };
+    if (Settings::values.dlss_replacement.GetValue() == Settings::DlssReplacement::Sgsr2) {
+        Sgsr2Upscaler* const sgsr2 = Sgsr2();
+        if (!sgsr2) {
+            return false; // the temporal stand-in from now on (sgsr2_failed)
+        }
+        sgsr2->Upscale(inputs);
+        DrawUpscaledOutput(dst_framebuffer, sgsr2->OutputView(), sgsr2->OutputImage(),
+                           sgsr2->PointSampler());
+        static bool sgsr2_logged{};
+        if (!std::exchange(sgsr2_logged, true)) {
+            LOG_INFO(Render_Vulkan, "DLSS replaced by SGSR 2: {}x{} -> {}x{}", render_size[0],
+                     render_size[1], extent.width, extent.height);
+        }
+        return true;
+    }
+    if (!Fsr3()) {
+        fsr3_unsupported = true; // the temporal stand-in from now on
+        return false;
+    }
+    Fsr3Upscaler::Inputs fsr3_inputs = inputs;
+    std::tie(fsr3_inputs.sharpen, fsr3_inputs.sharpness) = Fsr3Sharpening();
+    fsr3_upscaler->Upscale(fsr3_inputs);
     DrawUpscaledOutput(dst_framebuffer, fsr3_upscaler->OutputView(), fsr3_upscaler->OutputImage(),
                        fsr3_upscaler->PointSampler());
     static bool logged{};
@@ -1736,7 +1756,46 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
                  render_size[1], extent.width, extent.height);
     }
     return true;
-#endif
+}
+
+Sgsr2Upscaler* TextureCacheRuntime::Sgsr2() {
+    if (sgsr2_upscaler || sgsr2_failed) {
+        return sgsr2_upscaler.get();
+    }
+    if (!Sgsr2Upscaler::IsSupported(device)) {
+        LOG_WARNING(Render_Vulkan, "SGSR 2 needs formats this device lacks");
+        sgsr2_failed = true;
+        return nullptr;
+    }
+    try {
+        sgsr2_upscaler = std::make_unique<Sgsr2Upscaler>(device, scheduler, memory_allocator,
+                                                         staging_buffer_pool, descriptor_pool,
+                                                         compute_pass_descriptor_queue);
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "SGSR 2 failed to start ({})", exception.what());
+        sgsr2_failed = true;
+    }
+    return sgsr2_upscaler.get();
+}
+
+Fsr3Upscaler* TextureCacheRuntime::Fsr3() {
+    if (fsr3_upscaler || fsr3_failed) {
+        return fsr3_upscaler.get();
+    }
+    if (!Fsr3Upscaler::IsSupported(device)) {
+        LOG_WARNING(Render_Vulkan, "FSR 3.1 needs formats or features this device lacks");
+        fsr3_failed = true;
+        return nullptr;
+    }
+    try {
+        fsr3_upscaler = std::make_unique<Fsr3Upscaler>(device, scheduler, memory_allocator,
+                                                       staging_buffer_pool, descriptor_pool,
+                                                       compute_pass_descriptor_queue);
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "FSR 3.1 failed to start ({})", exception.what());
+        fsr3_failed = true;
+    }
+    return fsr3_upscaler.get();
 }
 
 void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view,
@@ -1871,7 +1930,6 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
                                                   std::array<u32, 2> render_size,
                                                   const std::array<f32, 16>& reprojection,
                                                   std::array<f32, 2> jitter, bool reset) {
-#ifdef EGLANTINE_STREAMLINE
     const VkExtent2D render_extent{render_size[0], render_size[1]};
     const VkExtent2D upscale_extent = dst_framebuffer->RenderArea();
     if (upscale_extent.width < render_extent.width ||
@@ -1880,64 +1938,120 @@ bool TextureCacheRuntime::UpscaleWithCameraMotion(Framebuffer* dst_framebuffer,
         depth.Samples() != VK_SAMPLE_COUNT_1_BIT) {
         return false;
     }
-    if (!DlssUpscaler()) {
-        return false;
-    }
     if (!camera_motion_pass) {
         camera_motion_pass = std::make_unique<CameraMotionPass>(
             device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator);
     }
-    camera_motion_pass->Record(depth.DepthView(), render_extent, reprojection);
-    const StreamlineDlssUpscaler::Image motion_vectors{
-        .view = camera_motion_pass->View(),
-        .image = camera_motion_pass->Image(),
-        .format = CameraMotionPass::FORMAT,
-        .range{
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-        .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+    const auto log_once = [&](const char* upscaler) {
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_INFO(Render_Vulkan, "Anti-aliasing replaced by {}: {}x{} -> {}x{}", upscaler,
+                     render_extent.width, render_extent.height, upscale_extent.width,
+                     upscale_extent.height);
+        }
     };
-    bool upscaled{};
-    try {
-        upscaled = dlss_upscaler->Upscale({
-            .color = DlssImage(device, input_color,
-                               input_color.Handle(Shader::TextureType::Color2D),
-                               VK_IMAGE_ASPECT_COLOR_BIT),
-            .depth = DlssImage(device, depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
-            .motion_vectors = motion_vectors,
+#ifdef EGLANTINE_STREAMLINE
+    if (DlssUpscaler()) {
+        camera_motion_pass->Record(depth.DepthView(), render_extent, reprojection);
+        const StreamlineDlssUpscaler::Image motion_vectors{
+            .view = camera_motion_pass->View(),
+            .image = camera_motion_pass->Image(),
+            .format = CameraMotionPass::FORMAT,
+            .range{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .barrier_aspect = VK_IMAGE_ASPECT_COLOR_BIT,
+        };
+        bool upscaled{};
+        try {
+            upscaled = dlss_upscaler->Upscale({
+                .color = DlssImage(device, input_color,
+                                   input_color.Handle(Shader::TextureType::Color2D),
+                                   VK_IMAGE_ASPECT_COLOR_BIT),
+                .depth = DlssImage(device, depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
+                .motion_vectors = motion_vectors,
+                .render_size = render_extent,
+                .upscale_size = upscale_extent,
+                .jitter = jitter,
+                // The motion vectors are in render pixels.
+                .motion_vector_scale = {1.0f, 1.0f},
+                .reset = reset,
+                .depth_inverted = false,
+                .hdr = false,
+            });
+        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan, "NVIDIA DLSS evaluation unavailable ({})",
+                        exception.what());
+        }
+        if (!upscaled) {
+            dlss_unsupported = true;
+            return false;
+        }
+        DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(),
+                           dlss_upscaler->OutputImage(), dlss_upscaler->PointSampler());
+        log_once("NVIDIA DLSS");
+        return true;
+    }
+#endif
+    // SGSR 2 when chosen as the DLSS replacement; it takes the same reversed depth and motion.
+    if (Settings::values.dlss_replacement.GetValue() == Settings::DlssReplacement::Sgsr2) {
+        Sgsr2Upscaler* const sgsr2 = Sgsr2();
+        if (!sgsr2) {
+            return false;
+        }
+        camera_motion_pass->Record(depth.DepthView(), render_extent, reprojection);
+        sgsr2->Upscale({
+            .color = input_color.Handle(Shader::TextureType::Color2D),
+            .depth = camera_motion_pass->ReversedDepthView(),
+            .motion_vectors = camera_motion_pass->View(),
             .render_size = render_extent,
             .upscale_size = upscale_extent,
             .jitter = jitter,
-            // The motion vectors are in render pixels.
-            .motion_vector_scale = {1.0f, 1.0f},
+            .motion_vector_scale = {1.0f, 1.0f}, // render pixels
+            .frame_time_ms = 1000.0f / 30.0f,
             .reset = reset,
-            .depth_inverted = false,
-            .hdr = false,
+            .sharpen = false,
+            .sharpness = 0.0f,
         });
-    } catch (const vk::Exception& exception) {
-        LOG_WARNING(Render_Vulkan, "NVIDIA DLSS evaluation unavailable ({})", exception.what());
+        DrawUpscaledOutput(dst_framebuffer, sgsr2->OutputView(), sgsr2->OutputImage(),
+                           sgsr2->PointSampler());
+        log_once("SGSR 2");
+        return true;
     }
-    if (!upscaled) {
-        dlss_unsupported = true;
+    // FSR 3.1: its shaders take reversed depth, which the motion pass also writes.
+    Fsr3Upscaler* const fsr3 = Fsr3();
+    if (!fsr3) {
         return false;
     }
-    DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
-                       dlss_upscaler->PointSampler());
-    static bool logged{};
-    if (!logged) {
-        logged = true;
-        LOG_INFO(Render_Vulkan, "Anti-aliasing replaced by NVIDIA DLSS: {}x{} -> {}x{}",
-                 render_extent.width, render_extent.height, upscale_extent.width,
-                 upscale_extent.height);
-    }
+    camera_motion_pass->Record(depth.DepthView(), render_extent, reprojection);
+    const auto [sharpen, sharpness] = Fsr3Sharpening();
+    const auto now = std::chrono::steady_clock::now();
+    const f32 frame_time_ms =
+        fsr3_last_evaluation
+            ? std::chrono::duration<f32, std::milli>(now - *fsr3_last_evaluation).count()
+            : 1000.0f / 30.0f;
+    fsr3_last_evaluation = now;
+    fsr3->Upscale({
+        .color = input_color.Handle(Shader::TextureType::Color2D),
+        .depth = camera_motion_pass->ReversedDepthView(),
+        .motion_vectors = camera_motion_pass->View(),
+        .render_size = render_extent,
+        .upscale_size = upscale_extent,
+        .jitter = jitter,
+        .motion_vector_scale = {1.0f, 1.0f}, // render pixels
+        .frame_time_ms = frame_time_ms,
+        .reset = reset,
+        .sharpen = sharpen,
+        .sharpness = sharpness,
+    });
+    DrawUpscaledOutput(dst_framebuffer, fsr3->OutputView(), fsr3->OutputImage(),
+                       fsr3->PointSampler());
+    log_once("FSR 3.1");
     return true;
-#else
-    return false;
-#endif
 }
 
 bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageView& dst,

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -1130,6 +1131,66 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area, is_indexed);
 }
 
+void GraphicsPipeline::LogExecutableStatistics(const std::array<u64, 6>& native_keys) {
+    static const std::vector<u64> wanted = [] {
+        std::vector<u64> keys;
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_STATS");
+        if (value == nullptr || std::string_view{value} == "all") {
+            return keys;
+        }
+        for (char* end = nullptr; *value != ' '; value = *end != ' ' ? end + 1 : end) {
+            keys.push_back(std::strtoull(value, &end, 16));
+            if (end == value) {
+                break;
+            }
+        }
+        return keys;
+    }();
+    if (statistics_logged.load(std::memory_order_relaxed) || !IsBuilt() || !pipeline ||
+        !device.IsKhrPipelineExecutablePropertiesEnabled()) {
+        return;
+    }
+    if (!wanted.empty() && std::ranges::none_of(native_keys, [](u64 native_key) {
+            return native_key != 0 && std::ranges::find(wanted, native_key) != wanted.end();
+        })) {
+        // Not one of them: done, once its programs are known.
+        if (native_keys[1] != 0 && native_keys[5] != 0) {
+            statistics_logged.store(true, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (statistics_logged.exchange(true)) {
+        return;
+    }
+    const auto& logical = device.GetLogical();
+    const auto executables = logical.GetPipelineExecutablePropertiesKHR(*pipeline);
+    for (u32 index = 0; index < executables.size(); ++index) {
+        std::string text;
+        for (const auto& statistic : logical.GetPipelineExecutableStatisticsKHR(*pipeline, index)) {
+            switch (statistic.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                text += std::format("{}={}; ", std::string_view{statistic.name}, statistic.value.b32 != 0);
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                text += std::format("{}={}; ", std::string_view{statistic.name}, statistic.value.i64);
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                text += std::format("{}={}; ", std::string_view{statistic.name}, statistic.value.u64);
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                text += std::format("{}={:.2f}; ", std::string_view{statistic.name}, statistic.value.f64);
+                break;
+            default:
+                break;
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Pipeline statistics, keys vs {:016x} fs {:016x}, {} ({}): {}",
+                 native_keys[1] != 0 ? native_keys[1] : native_keys[0], native_keys[5],
+                 std::string_view{executables[index].name},
+                 std::string_view{executables[index].description}, text);
+    }
+}
+
 std::array<u64, 2> GraphicsPipeline::TableBuckets(const Tegra::Engines::Maxwell3D& maxwell3d_,
                                                   Tegra::MemoryManager& gpu_memory_) const {
     // Hogwarts Legacy binds handle tables of 4 to 800 entries; the base pipeline declares 1024
@@ -1978,7 +2039,9 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .primitiveRestartEnable = VK_FALSE,
     };
     VkPipelineCreateFlags flags{};
-    if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
+    if (device.IsKhrPipelineExecutablePropertiesEnabled() &&
+        (Settings::values.renderer_debug.GetValue() ||
+         std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr)) {
         flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     }
     if (uses_descriptor_buffer) {

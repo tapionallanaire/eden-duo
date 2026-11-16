@@ -94,6 +94,12 @@ void AlphaTest(EmitContext& ctx) {
 } // Anonymous namespace
 
 void EmitPrologue(EmitContext& ctx) {
+    if (ctx.global_base_info != nullptr) {
+        for (size_t index = 0; index < ctx.global_base_vars.size(); ++index) {
+            ctx.OpStore(ctx.global_base_vars[index],
+                        ctx.GlobalBaseAddress(*ctx.global_base_info, index));
+        }
+    }
     if (ctx.stage == Stage::Fragment && ctx.runtime_info.dual_source_blend) {
         // Initialize dual-source blending outputs - prevents MoltenVK crash.
         const Id zero{ctx.Const(0.0f)};

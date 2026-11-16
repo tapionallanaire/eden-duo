@@ -79,6 +79,10 @@ public:
     // Context accessors.
     // These should not be called if the CPU is running.
     virtual void GetContext(Kernel::Svc::ThreadContext& ctx) const = 0;
+    /// The guest PC as last stored by the CPU backend, read from any thread (racy, diagnostics only).
+    virtual u64 PeekPC() const {
+        return 0;
+    }
     virtual void SetContext(const Kernel::Svc::ThreadContext& ctx) = 0;
     virtual void SetTpidrroEl0(u64 value) = 0;
 

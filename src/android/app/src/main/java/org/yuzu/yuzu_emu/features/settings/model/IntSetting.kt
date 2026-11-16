@@ -25,6 +25,7 @@ enum class IntSetting(override val key: String) : AbstractIntSetting {
     RENDERER_FRAME_GEN_FLOW_SCALE("frame_gen_flow_scale"),
     RENDERER_VSYNC("use_vsync"),
     RENDERER_SCALING_FILTER("scaling_filter"),
+    RENDERER_DLSS_REPLACEMENT("dlss_replacement"),
     RENDERER_ANTI_ALIASING("anti_aliasing"),
     RENDERER_SCREEN_LAYOUT("screen_layout"),
     RENDERER_ASPECT_RATIO("aspect_ratio"),
