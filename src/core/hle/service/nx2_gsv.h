@@ -91,6 +91,39 @@ namespace Service {
 /// LOCAL TEST (Zelda): steady-clock time of the last decoded video frame (PaceToVblank).
 inline std::atomic<s64> g_nx2_video_last_frame_ns{0};
 
+// The server of the Switch 2 sessions, on a host thread of its own. am hands out the first of
+// them (GetGraphicsSupervisor), and am runs as a guest-core service thread on emulated core 3:
+// served there, PresentClientBuffer's wait for the frame held core 3 (Donkey Kong Bananza: ~26 ms
+// of every ~47 ms frame), and game threads scheduled on it sat runnable (ExecuteDirector_Worker3
+// ready 61 % of the time) while the game's next frame waited on them. EDEN_NX2_HOST_GSV=0: serve
+// them on the requesting session's server as before.
+inline ServerManager& Nx2SessionServer(Core::System& system, HLERequestContext& ctx) {
+    static const bool off = [] {
+        const char* value = std::getenv("EDEN_NX2_HOST_GSV");
+        return value != nullptr && value[0] == '0';
+    }();
+    if (off) {
+        return ctx.GetManager()->GetServerManager();
+    }
+    // One server per game run: the kernel owns it (RunServer) and destroys it at shutdown, and the
+    // Android app boots the next game in the same process.
+    static std::mutex mutex;
+    static const void* owner{};
+    static ServerManager* server{};
+    std::scoped_lock lk{mutex};
+    if (const void* const app = system.ApplicationProcess(); server == nullptr || owner != app) {
+        auto manager = std::make_unique<ServerManager>(system);
+        server = manager.get();
+        owner = app;
+        auto shared = std::make_shared<std::unique_ptr<ServerManager>>(std::move(manager));
+        system.Kernel()
+            .RunOnHostCoreProcess("nx2gsv",
+                                  [shared] { ServerManager::RunServer(std::move(*shared)); })
+            .detach();
+    }
+    return *server;
+}
+
 // Creates a session served by `iface` and returns its client end. Unlike PushIpcInterface this
 // works from a domain too, for callers that want a raw session handle.
 template <class T>
@@ -104,10 +137,10 @@ inline Kernel::KClientSession* CreateRawSession(Core::System& system, HLERequest
     session->Initialize(kernel, nullptr, 0);
     Kernel::KSession::Register(kernel, session);
 
-    auto manager =
-        std::make_shared<SessionRequestManager>(kernel, ctx.GetManager()->GetServerManager());
+    ServerManager& server = Nx2SessionServer(system, ctx);
+    auto manager = std::make_shared<SessionRequestManager>(kernel, server);
     manager->SetSessionHandler(std::move(iface));
-    ctx.GetManager()->GetServerManager().RegisterSession(&session->GetServerSession(), manager);
+    server.RegisterSession(&session->GetServerSession(), manager);
     return &session->GetClientSession();
 }
 
