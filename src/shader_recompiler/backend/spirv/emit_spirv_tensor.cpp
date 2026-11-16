@@ -36,7 +36,15 @@ struct HmmaScratch {
     bool block;
     u32 slots;
     Id local_invocation_index;
+    /// uvec4 elements, four neighbouring lanes' word read in one load (EDEN_NX2_HMMA_VEC4=0: words)
+    bool vec4;
+    Id vec_pointer;
 };
+
+bool EnvOff(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '0';
+}
 
 u32 HmmaScratchSlots(const IR::Program& program) {
     const auto& size = program.workgroup_size;
@@ -61,15 +69,21 @@ bool UsesHmmaScratch(const EmitContext& ctx, const IR::Program& program) {
 
 HmmaScratch DefineHmmaScratch(EmitContext& ctx, const IR::Program& program) {
     const u32 slots = HmmaScratchSlots(program);
-    const Id array_type = ctx.TypeArray(ctx.U32[1], ctx.Const(slots * HMMA_LANE_WORDS));
+    // Odin 2 (Turnip), Bananza's upscaler network: 46 -> 25 ms a frame with QUANT below.
+    static const bool vec4_enabled = !EnvOff("EDEN_NX2_HMMA_VEC4");
     HmmaScratch scratch{};
+    scratch.vec4 = vec4_enabled && slots % 4 == 0;
+    const u32 lanes_per_element = scratch.vec4 ? 4 : 1;
+    const Id array_type = ctx.TypeArray(scratch.vec4 ? ctx.U32[4] : ctx.U32[1],
+                                        ctx.Const(slots * HMMA_LANE_WORDS / lanes_per_element));
     scratch.slots = slots;
     scratch.word_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[1]);
+    scratch.vec_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[4]);
     // With SPV_KHR_workgroup_memory_explicit_layout every Block variable aliases the others from
     // offset 0: put this one after the guest's shared memory.
     scratch.block = ctx.uses_explicit_workgroup_layout && program.shared_memory_size != 0;
     if (scratch.block) {
-        ctx.Decorate(array_type, spv::Decoration::ArrayStride, 4U);
+        ctx.Decorate(array_type, spv::Decoration::ArrayStride, 4U * lanes_per_element);
         const Id struct_type = ctx.TypeStruct(array_type);
         ctx.MemberDecorate(struct_type, 0U, spv::Decoration::Offset,
                            Common::AlignUp(program.shared_memory_size, 16U));
@@ -209,7 +223,14 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         const auto add = [&](Id a, Id b) { return ctx.OpIAdd(u32ty, a, b); };
         const auto and_ = [&](Id a, u32 b) { return ctx.OpBitwiseAnd(u32ty, a, imm(b)); };
         const auto unpack = [&](Id v) { return ctx.OpUnpackHalf2x16(ctx.F32[2], v); };
+        static const bool quantize = !EnvOff("EDEN_NX2_HMMA_QUANT");
         const auto round_half = [&](Id value) {
+            if (quantize) {
+                // The GPU's own f32 -> f16 -> f32 rounding (f16 subnormals become 0) in place of
+                // the ~15 integer operations below (EDEN_NX2_HMMA_QUANT=0 keeps them). Odin 2:
+                // 64.9k -> 53.6k instructions in Bananza's network, picture unchanged.
+                return ctx.OpQuantizeToF16(f32ty, value);
+            }
             // Do not express the intermediate rounding as unpack(pack(value)): drivers may
             // eliminate that round trip. Round normal significands explicitly, ties to even;
             // half subnormals lie on the exactly representable 2^-24 grid.
@@ -265,9 +286,27 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         Id subgroup_base{};
         const auto scratch_pointer = [&](Id word, Id slot) {
             const Id index = add(ctx.OpIMul(u32ty, word, imm(scratch->slots)), slot);
+            if (scratch->vec4) {
+                const Id element = ctx.OpShiftRightLogical(u32ty, index, imm(2));
+                const Id component = and_(index, 3);
+                return scratch->block ? ctx.OpAccessChain(scratch->word_pointer, scratch->variable,
+                                                          imm(0), element, component)
+                                      : ctx.OpAccessChain(scratch->word_pointer, scratch->variable,
+                                                          element, component);
+            }
             return scratch->block
                        ? ctx.OpAccessChain(scratch->word_pointer, scratch->variable, imm(0), index)
                        : ctx.OpAccessChain(scratch->word_pointer, scratch->variable, index);
+        };
+        // Words `word` of four lanes from `first` (a multiple of 4), one uvec4 load.
+        const auto load4 = [&](Id word, Id first) {
+            const Id index = add(ctx.OpIMul(u32ty, word, imm(scratch->slots)), add(subgroup_base, first));
+            const Id element = ctx.OpShiftRightLogical(u32ty, index, imm(2));
+            return ctx.OpLoad(ctx.U32[4],
+                              scratch->block ? ctx.OpAccessChain(scratch->vec_pointer,
+                                                                 scratch->variable, imm(0), element)
+                                             : ctx.OpAccessChain(scratch->vec_pointer,
+                                                                 scratch->variable, element));
         };
         const auto subgroup_barrier = [&] {
             ctx.OpControlBarrier(imm(static_cast<u32>(spv::Scope::Subgroup)),
@@ -293,16 +332,27 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         // need; unrolling all of K=16 raises register pressure and slows large dispatches.
         // pick(low, high) chooses the K group's register; with immediates, its scratch word.
         const auto emit_group = [&](auto pick) {
+            // vec4: A's rows and B's columns of the group, each four lanes in one load.
+            const bool vec4 = scratch && scratch->vec4;
+            std::array<Id, 2> a_rows{}, b_cols{};
+            if (vec4) {
+                for (u32 row = 0; row < 2; ++row)
+                    a_rows[row] = load4(pick(imm(row), imm(row + 2)), a_base);
+                for (u32 col = 0; col < 2; ++col)
+                    b_cols[col] = load4(pick(imm(4), imm(5)), add(b_base, imm(col * 4)));
+            }
             for (u32 component = 0; component < 4; ++component) {
                 const Id b = pick(inputs[4], inputs[5]);
                 const Id b_word = pick(imm(4), imm(5));
                 std::array<Id, 2> bs;
                 for (u32 col = 0; col < 2; ++col)
-                    bs[col] = unpack(fetch(b, b_word, add(b_base, imm(component + col * 4))));
+                    bs[col] = unpack(vec4 ? ctx.OpCompositeExtract(u32ty, b_cols[col], component)
+                                          : fetch(b, b_word, add(b_base, imm(component + col * 4))));
                 for (u32 row = 0; row < 2; ++row) {
-                    const Id as = unpack(fetch(pick(inputs[row], inputs[row + 2]),
-                                               pick(imm(row), imm(row + 2)),
-                                               add(a_base, imm(component))));
+                    const Id as = unpack(vec4 ? ctx.OpCompositeExtract(u32ty, a_rows[row], component)
+                                              : fetch(pick(inputs[row], inputs[row + 2]),
+                                                      pick(imm(row), imm(row + 2)),
+                                                      add(a_base, imm(component))));
                     for (u32 col = 0; col < 2; ++col) {
                         Id value = ctx.OpLoad(f32ty, accumulators[row * 2 + col]);
                         for (u32 half = 0; half < 2; ++half) {
