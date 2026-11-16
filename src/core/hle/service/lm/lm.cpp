@@ -87,7 +87,17 @@ DECLARE_ENUM_FLAG_OPERATORS(LogPacketFlags);
 
 class ILogger final : public ServiceFramework<ILogger> {
 public:
-    explicit ILogger(Core::System& system_) : ServiceFramework{system_, "ILogger"} {}
+    explicit ILogger(Core::System& system_) : ServiceFramework{system_, "ILogger"} {
+        static const FunctionInfo functions[] = {
+            {0, &ILogger::Log, "Log"},
+            {1, &ILogger::SetDestination, "SetDestination"},
+            {2, &ILogger::StubReplyZeroed, "TransmitHashedLog"}, //20.0.0+
+            {3, &ILogger::StubReplyZeroed, "DevNotify"}, //20.0.0+
+            {11, &ILogger::StubReplyInterface, "Unknown11"},
+        };
+        RegisterHandlers(functions);
+    }
+
 private:
     void Log(HLERequestContext& ctx) {
         std::size_t offset{};
@@ -253,25 +263,25 @@ private:
 
         std::string output_log{};
         if (process_name) {
-            output_log += fmt::format("Process: {}\n", *process_name);
+            output_log += std::format("Process: {}\n", *process_name);
         }
         if (module_name) {
-            output_log += fmt::format("Module: {}\n", *module_name);
+            output_log += std::format("Module: {}\n", *module_name);
         }
         if (file_name) {
-            output_log += fmt::format("File: {}\n", *file_name);
+            output_log += std::format("File: {}\n", *file_name);
         }
         if (function_name) {
-            output_log += fmt::format("Function: {}\n", *function_name);
+            output_log += std::format("Function: {}\n", *function_name);
         }
         if (line_number && *line_number != 0) {
-            output_log += fmt::format("Line: {}\n", *line_number);
+            output_log += std::format("Line: {}\n", *line_number);
         }
-        output_log += fmt::format("ProcessID: {:X}\n", entry.pid);
-        output_log += fmt::format("ThreadID: {:X}\n", entry.tid);
+        output_log += std::format("ProcessID: {:X}\n", entry.pid);
+        output_log += std::format("ThreadID: {:X}\n", entry.tid);
 
         if (text_log) {
-            output_log += fmt::format("Log Text: {}\n", *text_log);
+            output_log += std::format("Log Text: {}\n", *text_log);
         }
         LOG_DEBUG(Service_LM, "LogManager {} ({}):\n{}", NameOf(entry.severity),
                   DestinationToString(destination), output_log);
@@ -322,25 +332,20 @@ private:
     };
     static_assert(sizeof(LogPacketHeader) == 0x18, "LogPacketHeader is an invalid size");
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
-    }
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, &ILogger::Log, "Log"},
-        FunctionInfo{1, &ILogger::SetDestination, "SetDestination"},
-        FunctionInfo{2, nullptr, "TransmitHashedLog", MakeVersionGate({20,0,0})},
-        FunctionInfo{3, nullptr, "DevNotify", MakeVersionGate({20,0,0})}
-    );
     ::Common::unordered_map<LogPacketHeaderEntry, std::vector<u8>> entries{};
     LogDestination destination{LogDestination::All};
 };
 
 class LM final : public ServiceFramework<LM> {
 public:
-    explicit LM(Core::System& system_) : ServiceFramework{system_, "lm"} {}
+    explicit LM(Core::System& system_) : ServiceFramework{system_, "lm"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &LM::OpenLogger, "OpenLogger"},
+        };
+        // clang-format on
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
+        RegisterHandlers(functions);
     }
 
 private:
@@ -351,26 +356,21 @@ private:
         rb.Push(ResultSuccess);
         rb.PushIpcInterface<ILogger>(ctx, system);
     }
-
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, &LM::OpenLogger, "OpenLogger"}
-    );
 };
 
 class LM_GET final : public ServiceFramework<LM_GET> {
 public:
-    explicit LM_GET(Core::System& system_) : ServiceFramework{system_, "lm:get"} {}
-
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
+    explicit LM_GET(Core::System& system_)
+        : ServiceFramework{system_, "lm:get"}
+    {
+        static const FunctionInfo functions[] = {
+            {0, nullptr, "StartLogging"},
+            {1, nullptr, "StopLogging"},
+            {2, nullptr, "GetLog"},
+            {100, nullptr, "CreateDevNotificationReceiver"},
+        };
+        RegisterHandlers(functions);
     }
-
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, nullptr, "StartLogging"},
-        FunctionInfo{1, nullptr, "StopLogging"},
-        FunctionInfo{2, nullptr, "GetLog"},
-        FunctionInfo{100, nullptr, "CreateDevNotificationReceiver"}
-    );
 };
 
 void LoopProcess(Core::System& system) {

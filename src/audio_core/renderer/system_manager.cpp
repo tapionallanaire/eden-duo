@@ -28,12 +28,17 @@ void SystemManager::InitializeUnsafe() {
         audio_renderer.Start();
         thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("AudioRenderSystemManager");
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
+            // The emulated CPU cores and the GPU thread run at Critical. At High this thread lost the
+            // core to them while a level loaded and the sink ran dry: renders came up to 54 ms apart for
+            // 5 ms of audio each (Retroid Pocket Flip 2, Crash Team Racing). It uses about 1 % of a core.
+            Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
             while (active && !stop_token.stop_requested()) {
                 {
                     std::scoped_lock l{mutex1};
-                    for (auto system : systems)
+                    for (auto system : systems) {
+                        system->WaitForUpdate();
                         system->SendCommandToDsp();
+                    }
                 }
                 audio_renderer.Signal();
                 audio_renderer.Wait();

@@ -6,9 +6,12 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <span>
 #include <utility>
+
+#include <boost/container/small_vector.hpp>
 
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -53,6 +56,21 @@ protected:
 
 private:
     vk::ShaderModule module;
+};
+
+class VertexRepackPass final : public ComputePass {
+public:
+    VertexRepackPass(const Device& device, Scheduler& scheduler, DescriptorPool& descriptor_pool,
+                     StagingBufferPool& staging_pool, ComputePassDescriptorQueue& descriptor_queue);
+    /// Returns nothing when the range exceeds the device limits or the source buffer; the binding
+    /// is then left as is.
+    std::optional<std::pair<VkBuffer, VkDeviceSize>> Assemble(VkBuffer source, u32 offset, u32 size,
+                                                              u64 buffer_size);
+
+private:
+    Scheduler& scheduler;
+    StagingBufferPool& staging_pool;
+    ComputePassDescriptorQueue& descriptor_queue;
 };
 
 class Uint8Pass final : public ComputePass {
@@ -130,11 +148,75 @@ public:
     void Assemble(Image& image, const StagingBufferRef& map,
                   std::span<const VideoCommon::SwizzleParameters> swizzles);
 
+    /// Decodes only `layers` of `image` (an initialized array); `map` holds them in order.
+    void AssembleLayers(Image& image, const StagingBufferRef& map,
+                        std::span<const VideoCommon::SwizzleParameters> swizzles,
+                        std::span<const u32> layers);
+
+    /// Where a decode writes: an RGBA8 image with a storage view per (host) level.
+    struct Target {
+        VkImage image;
+        VkImageAspectFlags aspect_mask;
+        bool initialized;
+        std::function<VkImageView(s32 host_level)> level_view;
+        bool wait; ///< Wait for the GPU afterwards (the decoded image itself is sampled).
+        /// When set, the input holds only these layers (in order), each decoded into
+        /// layer_view(host level, layer).
+        std::span<const u32> layers{};
+        std::function<VkImageView(s32 host_level, u32 layer)> layer_view{};
+    };
+
+    /// Decodes `info`'s ASTC data in `map` into `target`. `skip` leading levels are absent on the
+    /// host (TrimmedLevels) and `guest_size_bytes` is the full guest size.
+    void AssembleInto(const VideoCommon::ImageInfo& info, u32 skip, size_t guest_size_bytes,
+                      const Target& target, const StagingBufferRef& map,
+                      std::span<const VideoCommon::SwizzleParameters> swizzles);
+
 private:
     Scheduler& scheduler;
     StagingBufferPool& staging_buffer_pool;
     ComputePassDescriptorQueue& compute_pass_descriptor_queue;
     MemoryAllocator& memory_allocator;
+};
+
+class BlockLinearUnswizzle2DBufferPass final : public ComputePass {
+public:
+    explicit BlockLinearUnswizzle2DBufferPass(
+        const Device& device_, Scheduler& scheduler_, DescriptorPool& descriptor_pool_,
+        StagingBufferPool& staging_buffer_pool_,
+        ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+    ~BlockLinearUnswizzle2DBufferPass();
+
+    /// Returns true when the guest layout of the image can be unswizzled by this pass
+    [[nodiscard]] static bool IsSupported(const Image& image);
+
+    /// Unswizzles the block linear guest data of the image, read from a GPU buffer, into a linear
+    /// buffer. Returns the linear buffer and the copies that upload it into the image.
+    std::pair<VkBuffer, boost::container::small_vector<VkBufferImageCopy, 16>> Unswizzle(
+        Image& image, VkBuffer src_buffer, VkDeviceSize src_offset);
+
+private:
+    Scheduler& scheduler;
+    StagingBufferPool& staging_buffer_pool;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
+};
+
+/// Compresses an RGBA8 image level to BC1 or BC3 blocks in a buffer (bc_encoder.comp).
+class BcEncoderPass final : public ComputePass {
+public:
+    explicit BcEncoderPass(const Device& device_, Scheduler& scheduler_,
+                           DescriptorPool& descriptor_pool_,
+                           ComputePassDescriptorQueue& compute_pass_descriptor_queue_);
+    ~BcEncoderPass();
+
+    /// Encodes every layer of one level (`source` is its RGBA8 storage view) into `buffer`,
+    /// `out_offset` bytes past `buffer_offset`; blocks are row-major, layer after layer.
+    void Encode(VkImageView source, u32 width, u32 height, u32 layers, bool bc3, VkBuffer buffer,
+                VkDeviceSize buffer_offset, VkDeviceSize buffer_size, VkDeviceSize out_offset);
+
+private:
+    Scheduler& scheduler;
+    ComputePassDescriptorQueue& compute_pass_descriptor_queue;
 };
 
 class BlockLinearUnswizzle3DPass final : public ComputePass {

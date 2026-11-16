@@ -16,6 +16,7 @@
 #include "shader_recompiler/frontend/ir/modifiers.h"
 #include "shader_recompiler/frontend/ir/value.h"
 #include "shader_recompiler/ir_opt/passes.h"
+#include "shader_recompiler/ir_opt/predicate_mask.h"
 
 namespace Shader::Optimization {
 namespace {
@@ -337,6 +338,29 @@ bool FoldXmadMultiply(IR::Block& block, IR::Inst& inst) {
     return true;
 }
 
+/// Replaces (BitFieldUExtract(a, 16, 16) << 16) + BitFieldUExtract(a, 0, 16) with a: what an XMAD
+/// multiplication by 1 leaves once its products by 0 and 1 are folded
+bool FoldHalvesRecombine(IR::Inst& inst) {
+    for (size_t arg = 0; arg < 2; ++arg) {
+        IR::Inst* const shl{inst.Arg(arg).TryInstRecursive()};
+        IR::Inst* const low{inst.Arg(1 - arg).TryInstRecursive()};
+        if (!shl || !low || shl->GetOpcode() != IR::Opcode::ShiftLeftLogical32 ||
+            shl->Arg(1) != IR::Value{16U} || low->GetOpcode() != IR::Opcode::BitFieldUExtract ||
+            low->Arg(1) != IR::Value{0U} || low->Arg(2) != IR::Value{16U}) {
+            continue;
+        }
+        IR::Inst* const high{shl->Arg(0).TryInstRecursive()};
+        if (!high || high->GetOpcode() != IR::Opcode::BitFieldUExtract ||
+            high->Arg(1) != IR::Value{16U} || high->Arg(2) != IR::Value{16U} ||
+            high->Arg(0).Resolve() != low->Arg(0).Resolve()) {
+            continue;
+        }
+        inst.ReplaceUsesWith(low->Arg(0));
+        return true;
+    }
+    return false;
+}
+
 template <typename T>
 void FoldAdd(IR::Block& block, IR::Inst& inst) {
     if (inst.HasAssociatedPseudoOperation()) {
@@ -351,10 +375,37 @@ void FoldAdd(IR::Block& block, IR::Inst& inst) {
         return;
     }
     if constexpr (std::is_same_v<T, u32>) {
+        if (FoldHalvesRecombine(inst)) {
+            return;
+        }
         if (FoldXmadMultiply(block, inst)) {
             return;
         }
         if (FoldXmadMultiplyAdd(block, inst)) {
+            return;
+        }
+    }
+}
+
+/// Folds products by 0 and 1. An XMAD multiplication by a 16-bit immediate leaves them behind (the
+/// cross term of the high halves), and Ocarina's IMAD.WIDE pointer + offset then hid the pointer
+/// from storage buffer tracking, which bound the offset word as the buffer instead.
+void FoldIMul32(IR::Inst& inst) {
+    if (FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a * b; })) {
+        return;
+    }
+    for (size_t arg = 0; arg < 2; ++arg) {
+        const IR::Value factor{inst.Arg(arg)};
+        if (!factor.IsImmediate()) {
+            continue;
+        }
+        if (factor.U32() == 0) {
+            inst.ReplaceUsesWith(IR::Value{0U});
+            return;
+        }
+        if (factor.U32() == 1) {
+            const IR::Value other{inst.Arg(1 - arg)};
+            inst.ReplaceUsesWith(other);
             return;
         }
     }
@@ -953,6 +1004,37 @@ void FoldDriverConstBuffer(Environment& env, IR::Block& block, IR::Inst& inst, u
     }
 }
 
+void FoldSMax32(IR::Block& block, IR::Inst& inst) {
+    // guest shaders normalize predicate masks with max(x, -x): it is 1 for -1 and 1, and 0 for
+    // 0. NVIDIA's compiler miscompiles the max form which crashes with a vkDeviceLost
+    for (size_t index = 0; index < 2; ++index) {
+        const IR::Value value{inst.Arg(index).Resolve()};
+        const IR::Inst* const negation{inst.Arg(1 - index).TryInstRecursive()};
+        if (!negation || negation->GetOpcode() != IR::Opcode::INeg32 ||
+            negation->Arg(0).Resolve() != value) {
+            continue;
+        }
+        IR::IREmitter ir{block, IR::Block::InstructionList::s_iterator_to(inst)};
+        const IR::Inst* const select{value.TryInstRecursive()};
+        if (select && select->GetOpcode() == IR::Opcode::SelectU32 &&
+            IsMaskConstant(select->Arg(1).Resolve()) &&
+            IsMaskConstant(select->Arg(2).Resolve())) {
+            // absolute value on both arms
+            const IR::Value true_value{select->Arg(1).Resolve()};
+            const IR::Value false_value{select->Arg(2).Resolve()};
+            inst.ReplaceUsesWith(ir.Select(IR::U1{select->Arg(0)},
+                                           ir.Imm32(true_value.U32() != 0 ? 1U : 0U),
+                                           ir.Imm32(false_value.U32() != 0 ? 1U : 0U)));
+            return;
+        }
+        // mask merged by predicated moves (phi of -s and 1 - s) is still -1, 0 or 1 when the
+        // it can be proven it, and max(x, -x) of such a mask is exactly x & 1.
+        if (MaskValues(value) != MaskUnknown) {
+            inst.ReplaceUsesWith(ir.BitwiseAnd(IR::U32{value}, ir.Imm32(1)));
+            return;
+        }
+    }
+}
 void ConstantPropagation(Environment& env, IR::Block& block, IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::GetRegister:
@@ -963,9 +1045,10 @@ void ConstantPropagation(Environment& env, IR::Block& block, IR::Inst& inst) {
         return FoldAdd<u32>(block, inst);
     case IR::Opcode::ISub32:
         return FoldISub32(inst);
+    case IR::Opcode::SMax32:
+        return FoldSMax32(block, inst);
     case IR::Opcode::IMul32:
-        FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a * b; });
-        return;
+        return FoldIMul32(inst);
     case IR::Opcode::ShiftRightArithmetic32:
         FoldWhenAllImmediates(inst, [](s32 a, s32 b) { return static_cast<u32>(a >> b); });
         return;

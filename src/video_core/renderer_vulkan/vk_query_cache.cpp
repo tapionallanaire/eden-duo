@@ -5,13 +5,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstddef>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <memory>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
+#include <algorithm>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
@@ -84,9 +87,52 @@ public:
 
     void Sync(size_t start, size_t size) {
         const auto& dev = device.GetLogical();
-        const VkResult query_result = dev.GetQueryResults(
-            *query_pool, static_cast<u32>(start), static_cast<u32>(size), sizeof(u64) * size,
-            &host_results[start], sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        const auto read = [&](VkQueryResultFlags flags) {
+            return dev.GetQueryResults(*query_pool, static_cast<u32>(start),
+                                       static_cast<u32>(size), sizeof(u64) * size,
+                                       &host_results[start], sizeof(u64),
+                                       VK_QUERY_RESULT_64_BIT | flags);
+        };
+        // No WAIT_BIT: Turnip gives up on a waited query after about two seconds and loses the
+        // whole device ("query timeout"), which FINAL FANTASY RESONANCE hit within minutes on the
+        // Retroid Pocket Flip 2. Wait for the submitted work that used the bank instead.
+        VkResult query_result = read(0);
+        if (query_result == VK_NOT_READY) {
+            // The game needs the real counts: FINAL FANTASY RESONANCE drew its characters as
+            // glowing silhouettes when unavailable results read as 0, and as dark ones at 1, on the
+            // AYN Thor. When the work using the bank isn't submitted yet, wait for the GPU thread
+            // to submit it, then for the GPU, as WAIT_BIT would but without Turnip's timeout.
+            auto& semaphore = scheduler.GetMasterSemaphore();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+            while (last_used_tick >= semaphore.CurrentTick() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::microseconds{200});
+            }
+            const auto gpu_wait_start = std::chrono::steady_clock::now();
+            if (last_used_tick < semaphore.CurrentTick()) {
+                semaphore.Wait(last_used_tick);
+            }
+            Scheduler::NoteGpuWait(std::source_location::current(), std::chrono::steady_clock::now() - gpu_wait_start);
+            query_result = read(0);
+        }
+        if (query_result == VK_NOT_READY) {
+            // Still not there after a second (a query that was never ended): report what isn't
+            // available as at least one sample passed rather than stall the fence thread.
+            std::vector<u64> with_availability(size * 2);
+            query_result = dev.GetQueryResults(
+                *query_pool, static_cast<u32>(start), static_cast<u32>(size),
+                sizeof(u64) * with_availability.size(), with_availability.data(), sizeof(u64) * 2,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_PARTIAL_BIT |
+                    VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (query_result == VK_SUCCESS || query_result == VK_NOT_READY) {
+                for (size_t i = 0; i < size; ++i) {
+                    const u64 value = with_availability[i * 2];
+                    const bool available = with_availability[i * 2 + 1] != 0;
+                    host_results[start + i] = available ? value : (std::max)(value, u64{1});
+                }
+                query_result = VK_SUCCESS;
+            }
+        }
         switch (query_result) {
         case VK_SUCCESS:
             return;
@@ -213,18 +259,30 @@ public:
         last_accumulation_checkpoint = (std::max)(last_accumulation_checkpoint, num_slots_used);
     }
 
+    // Called at each submission. The running query carries the count across it: a guest's
+    // reset-to-report window can span one.
     void CloseCounter() override {
         PauseCounter();
         // Called at every submit. Where results are read back on the CPU, nothing else ends the
         // host query until the guest resets the counter, so it would grow by a slot per render
         // pass and every StartCounter would walk all of its banks. Fold the samples counted so
         // far into amend_value instead, keeping the guest-visible count intact.
-        if (!resolves_on_cpu || !current_query) {
+        if (resolves_on_cpu) {
+            if (!current_query) {
+                return;
+            }
+            ReplicateCurrentQuery();
+            rasterizer->SyncOperation([this] { amend_value = accumulation_value; });
+            AbandonCurrentQuery();
             return;
         }
-        ReplicateCurrentQuery();
-        rasterizer->SyncOperation([this] { amend_value = accumulation_value; });
-        AbandonCurrentQuery();
+        // A title that counts without resetting or reporting grows the query by a slot at every
+        // submission and render pass, and the query keeps every bank it touches alive. Ocarina of
+        // Time's title screen and file select reached 16,384 slots over 64 banks (its gameplay
+        // windows span at most 36 slots). Past a bank, drop the count as a reset would.
+        if (current_query && current_query->size_slots > SamplesQueryBank::BANK_SIZE) {
+            ResetCounter();
+        }
     }
 
     bool HasPendingSync() const override {

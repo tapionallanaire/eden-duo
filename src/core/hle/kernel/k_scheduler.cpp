@@ -8,6 +8,8 @@
 
 #include "common/assert.h"
 #include "common/bit_util.h"
+#include <thread>
+
 #include "common/fiber.h"
 #include "common/logging.h"
 #include "core/arm/arm_interface.h"
@@ -20,6 +22,7 @@
 #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/physical_core.h"
 
 namespace Kernel {
@@ -370,6 +373,13 @@ void KScheduler::SwitchThread(KernelCore& kernel, KThread* next_thread) {
     //     KProcess::Switch(cur_process, next_process);
     // }
 
+    if (Nx2KStats::g_enabled) {
+        Nx2KStats::Add(Nx2KStats::g_stats.switches);
+        if (next_thread->m_nx2_ready_ns != 0 && next_thread->m_nx2_switch_ns == 0) {
+            next_thread->m_nx2_switch_ns = Nx2KStats::NowNs();
+        }
+    }
+
     // Set the new thread.
     SetCurrentThread(kernel, next_thread);
     m_current_thread = next_thread;
@@ -456,6 +466,11 @@ void KScheduler::ScheduleImplFiber(KernelCore& kernel) {
                 // If we do, another core is interfering, and we must start again.
                 goto retry;
             }
+            // Give the core up while we wait: the holder may need this very core (or a
+            // thread it waits on, such as the GPU thread, may). Spinning here held the Odin
+            // 2's prime core for 20-35 ms per occurrence in FINAL FANTASY RESONANCE, with the
+            // GPU thread runnable behind it, and each occurrence was a frame shown late.
+            std::this_thread::yield();
         }
 
         // It's time to switch the thread.
@@ -887,6 +902,12 @@ void KScheduler::RescheduleCores(KernelCore& kernel, u64 core_mask) {
     // Send IPI
     for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
         if (core_mask & (1ULL << i)) {
+            if (Nx2KStats::g_enabled) {
+                KScheduler& target = kernel.Scheduler(i);
+                Nx2KStats::Add(target.GetSchedulerCurrentThread() == target.GetIdleThread()
+                                   ? Nx2KStats::g_stats.interrupts_idle
+                                   : Nx2KStats::g_stats.interrupts_busy);
+            }
             kernel.PhysicalCore(i).Interrupt();
         }
     }

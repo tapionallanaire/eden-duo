@@ -10,6 +10,8 @@
 #include <codecvt>
 #include <cstdio>
 #include <cstring>
+#include <format>
+#include <fstream>
 #include <locale>
 #include <map>
 #include <set>
@@ -52,6 +54,7 @@ extern "C" {
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+#include "video_core/nx2_profile.h"
 #include "frontend_common/play_time_manager.h"
 #include "core/constants.h"
 #include "core/core.h"
@@ -67,6 +70,7 @@ extern "C" {
 #include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/memory/dmnt_cheat_types.h"
 #include "core/frontend/applets/cabinet.h"
 #include "core/frontend/applets/controller.h"
 #include "core/frontend/applets/error.h"
@@ -101,6 +105,7 @@ extern "C" {
 #include "video_core/vulkan_common/vulkan_instance.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/shader_notify.h"
+#include "video_core/shader_modes.h"
 #include "network/announce_multiplayer_session.h"
 
 #define jconst [[maybe_unused]] const auto
@@ -389,6 +394,10 @@ void EmulationSession::ShutdownEmulation() {
         m_system.DetachDebugger();
         m_system.ShutdownMainProcess();
         m_load_result = Core::SystemResultStatus::ErrorNotInitialized;
+        // Release this game's second-screen window and its Vulkan objects before the next
+        // game starts. The success path used to return before this teardown, so they were
+        // carried over into whatever was opened next.
+        DSModSession::OnRenderWindowTeardown();
         m_window.reset();
         OnEmulationStopped(Core::SystemResultStatus::Success);
         return;
@@ -454,7 +463,7 @@ void EmulationSession::RunEmulation() {
     }
 
     // Load the disk shader cache.
-    if (Settings::values.use_disk_shader_cache.GetValue()) {
+    if (Settings::values.use_disk_shader_cache.GetValue() || VideoCore::CompileRun()) {
         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
         m_system.Renderer().ReadRasterizer()->LoadDiskResources(
             m_system.GetApplicationProcessProgramID(), std::stop_token{}, LoadDiskCacheProgress);
@@ -489,6 +498,13 @@ void EmulationSession::RunEmulation() {
     m_applet_id = static_cast<int>(Service::AM::AppletId::Application);
 }
 
+void EmulationSession::SetShaderRunMode(bool record, bool compile, bool compile_max) {
+    // All three are read before the renderer exists: recording from the first pipeline the game
+    // builds, compile and max compile when the title's plan is loaded at boot.
+    VideoCore::SetShaderRecording(record);
+    VideoCore::SetCompileRun(compile);
+    VideoCore::SetMaxCompile(compile_max);
+}
 void EmulationSession::RequestDiskShaderCacheReload(u64 program_id) {
     // Loading a later session may notify through the previous callback while
     // InitializeEmulation already holds m_mutex. Initial loading handles that title.
@@ -666,15 +682,16 @@ constexpr CpuPartInfo s_cpu_list[] = {
     {0x51, 0xc00, "Falkor"},
     {0x51, 0xc01, "Saphira"},
     {0x51, 0x001, "Oryon"},
+    {0x51, 0x002, "Oryon"},
 };
 
-const char* find_cpu_name(u32 vendor, u32 part) {
+std::string find_cpu_name(u32 vendor, u32 part) {
     for (const auto& cpu : s_cpu_list) {
         if (cpu.vendor == vendor && cpu.part == part) {
             return cpu.name;
         }
     }
-    return nullptr;
+    return std::format("Unknown (vendor={:#04x}, part={:#03x})", vendor, part);
 }
 
 u64 read_midr_sysfs(u32 cpu_id) {
@@ -716,7 +733,7 @@ std::pair<u32, std::string> get_pretty_cpus() {
             const auto part = (midr >> 4) & 0xfff;
 
             if (!cpus.empty()) cpus += " + ";
-            cpus += fmt::format("{}x {}", count, find_cpu_name(vendor, part));
+            cpus += std::format("{}x {}", count, find_cpu_name(vendor, part));
         }
     }
 
@@ -826,7 +843,25 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_surfaceDestroyed(JNIEnv* env, jobject
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_setAppDirectory(JNIEnv* env, jobject instance,
                                                            [[maybe_unused]] jstring j_directory) {
-    Common::FS::SetAppDirectory(Common::Android::GetJString(env, j_directory));
+    const std::string app_directory = Common::Android::GetJString(env, j_directory);
+    Common::FS::SetAppDirectory(app_directory);
+    // Diagnostics: <app directory>/env.txt holds NAME=VALUE lines that become environment
+    // variables (the EDEN_* switches), since an Android app has no command line to set them on.
+    if (std::ifstream file{app_directory + "/env.txt"}) {
+        for (std::string line; std::getline(file, line);) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                line.pop_back();
+            }
+            const size_t equals = line.find('=');
+            if (equals == std::string::npos || equals == 0 || line[0] == '#') {
+                continue;
+            }
+            setenv(line.substr(0, equals).c_str(), line.substr(equals + 1).c_str(), 1);
+        }
+        if (std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr) {
+            VideoCommon::Nx2Profile::g_enabled.store(true); // read at load, before this
+        }
+    }
     DSModSession::OnAppDirectorySet();
 }
 
@@ -941,7 +976,7 @@ jobjectArray Java_org_yuzu_yuzu_1emu_utils_GpuDriverHelper_getSystemDriverInfo(
 
     auto driver_version = device.GetDriverVersion();
     auto version_string =
-        fmt::format("{}.{}.{}", VK_API_VERSION_MAJOR(driver_version),
+        std::format("{}.{}.{}", VK_API_VERSION_MAJOR(driver_version),
                     VK_API_VERSION_MINOR(driver_version), VK_API_VERSION_PATCH(driver_version));
     auto driver_name = device.GetDriverName();
 #else
@@ -997,8 +1032,26 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_pauseEmulation(JNIEnv* env, jclass cl
     EmulationSession::GetInstance().PauseEmulation();
 }
 
+// Eden Duo: set before run(). Record writes this session's new pipelines to recording.bin; compile
+// max makes the boot warm build every vertex/fragment pair the plan knows.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderRunMode(JNIEnv* env, jclass clazz,
+                                                           jboolean record, jboolean compile,
+                                                           jboolean compile_max) {
+    EmulationSession::GetInstance().SetShaderRunMode(record == JNI_TRUE, compile == JNI_TRUE,
+                                                     compile_max == JNI_TRUE);
+}
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_stopEmulation(JNIEnv* env, jclass clazz) {
     EmulationSession::GetInstance().HaltEmulation();
+}
+
+// Eden Duo: hand back host memory that the caches no longer need, when Android reports low memory
+// or the user asks for it. Safe to call while a game runs; does nothing when none does.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_recoverMemory(JNIEnv* env, jclass clazz) {
+    auto& session = EmulationSession::GetInstance();
+    if (!session.IsRunning()) {
+        return;
+    }
+    session.System().GPU().RecoverMemory();
 }
 
 jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_isRunning(JNIEnv* env, jclass clazz) {
@@ -1007,6 +1060,31 @@ jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_isRunning(JNIEnv* env, jclass cla
 
 jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_isPaused(JNIEnv* env, jclass clazz) {
     return static_cast<jboolean>(EmulationSession::GetInstance().IsPaused());
+}
+
+jobjectArray Java_org_yuzu_yuzu_1emu_NativeLibrary_getRuntimeCheats(JNIEnv* env, jclass clazz) {
+    const auto cheats = EmulationSession::GetInstance().System().GetRuntimeCheats();
+    const auto runtime_cheat_class = env->FindClass("org/yuzu/yuzu_emu/NativeLibrary$RuntimeCheat");
+    const auto constructor = env->GetMethodID(runtime_cheat_class, "<init>", "(ILjava/lang/String;ZZ)V");
+    auto result = env->NewObjectArray(static_cast<jsize>(cheats.size()), runtime_cheat_class, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(cheats.size()); ++i) {
+        const auto& cheat = cheats[i];
+        const auto name = Common::Android::ToJString(env, cheat.name);
+        const auto item = env->NewObject(runtime_cheat_class, constructor, static_cast<jint>(cheat.id), name,
+                                         static_cast<jboolean>(cheat.enabled),
+                                         static_cast<jboolean>(cheat.is_master));
+        env->SetObjectArrayElement(result, i, item);
+        env->DeleteLocalRef(name);
+        env->DeleteLocalRef(item);
+    }
+    env->DeleteLocalRef(runtime_cheat_class);
+    return result;
+}
+
+jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_setRuntimeCheatEnabled(JNIEnv* env, jclass clazz,
+                                                                      jint id, jboolean enabled) {
+    return static_cast<jboolean>(EmulationSession::GetInstance().System().SetCheatEnabled(
+        static_cast<u32>(id), static_cast<bool>(enabled)));
 }
 
 jbyteArray Java_org_yuzu_yuzu_1emu_NativeLibrary_getAppletCaptureBuffer(JNIEnv* env, jclass clazz) {
@@ -1112,7 +1190,7 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getCpuSummary(JNIEnv* env, jobject
         u32 threads = pretty_cpus.first;
         std::string cpus = pretty_cpus.second;
 
-        fmt::format_to(std::back_inserter(result), "CPUs: {}\n{} Threads",
+        std::format_to(std::back_inserter(result), "CPUs: {}\n{} Threads",
                        cpus, threads);
 
         FILE* f = std::fopen(CPUINFO_PATH, "r");
@@ -1200,7 +1278,7 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getCpuSummary(JNIEnv* env, jobject
             }
         }
 
-        fmt::format_to(std::back_inserter(result), "\nLLVM CPU: {}", fallback_cpu_detection());
+        std::format_to(std::back_inserter(result), "\nLLVM CPU: {}", fallback_cpu_detection());
 
         return Common::Android::ToJString(env, result);
     } catch (...) {
@@ -1284,7 +1362,7 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getVulkanDriverVersion(JNIEnv* env
             const u32 major = (driver_version >> 24) << 2;
             const u32 minor = (driver_version >> 12) & 0xFFF;
             const u32 patch = driver_version & 0xFFF;
-            version_str = fmt::format("{}.{}.{}", major, minor, patch);
+            version_str = std::format("{}.{}.{}", major, minor, patch);
         }
         else if (vendor_id == VENDOR_ARM) {
             u32 major = VK_API_VERSION_MAJOR(driver_version);
@@ -1297,14 +1375,14 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getVulkanDriverVersion(JNIEnv* env
                 minor = (driver_version >> 12) & 0x3FF;
                 patch = driver_version & 0xFFF;
             }
-            version_str = fmt::format("{}.{}.{}", major, minor, patch);
+            version_str = std::format("{}.{}.{}", major, minor, patch);
         }
         // Standard Vulkan version encoding for other vendors
         else {
             const u32 major = VK_API_VERSION_MAJOR(driver_version);
             const u32 minor = VK_API_VERSION_MINOR(driver_version);
             const u32 patch = VK_API_VERSION_PATCH(driver_version);
-            version_str = fmt::format("{}.{}.{}", major, minor, patch);
+            version_str = std::format("{}.{}.{}", major, minor, patch);
         }
 
         return Common::Android::ToJString(env, version_str);
@@ -1328,8 +1406,8 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getVulkanApiVersion(JNIEnv* env, j
 
         // Include variant if non-zero (rare on Android)
         const std::string version_str = variant > 0
-            ? fmt::format("{}.{}.{}.{}", variant, major, minor, patch)
-            : fmt::format("{}.{}.{}", major, minor, patch);
+            ? std::format("{}.{}.{}.{}", variant, major, minor, patch)
+            : std::format("{}.{}.{}", major, minor, patch);
 
         return Common::Android::ToJString(env, version_str);
     } catch (...) {
@@ -1420,7 +1498,7 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_run(JNIEnv* env, jobject jobj, jstrin
 }
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_logDeviceInfo(JNIEnv* env, jclass clazz) {
-    LOG_INFO(Frontend, "eden Version: {}-{}", Common::g_scm_branch, Common::g_scm_desc);
+    LOG_INFO(Frontend, "eden Version: {}-{}", std::string_view{Common::g_scm_branch}, std::string_view{Common::g_scm_desc});
     LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
 }
 
@@ -1719,10 +1797,10 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getSavePath(JNIEnv* env, jobject j
 
     auto& system = EmulationSession::GetInstance().System();
 
+    // Eden Duo: the selected profile (the one a game runs as), not always profile 0.
     Service::Account::ProfileManager manager;
-    // TODO: Pass in a selected user once we get the relevant UI working
-    const auto user_id = manager.GetUser(static_cast<std::size_t>(0));
-    ASSERT(user_id);
+    const std::optional<Common::UUID> user_id = manager.GetLastOpenedUser();
+    ASSERT(user_id && user_id->IsValid());
 
     const auto saveDir = Common::FS::GetEdenPath(Common::FS::EdenPath::SaveDir);
     auto vfsSaveDir = system.GetFilesystem()->OpenDirectory(Common::FS::PathToUTF8String(saveDir),
@@ -1737,10 +1815,10 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getSavePath(JNIEnv* env, jobject j
 jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getDefaultProfileSaveDataRoot(JNIEnv* env,
                                                                             jobject jobj,
                                                                             jboolean jfuture) {
+    // Eden Duo: the selected profile (the one a game runs as), not always profile 0.
     Service::Account::ProfileManager manager;
-    // TODO: Pass in a selected user once we get the relevant UI working
-    const auto user_id = manager.GetUser(static_cast<std::size_t>(0));
-    ASSERT(user_id);
+    const std::optional<Common::UUID> user_id = manager.GetLastOpenedUser();
+    ASSERT(user_id && user_id->IsValid());
 
     const auto user_save_data_root =
         FileSys::SaveDataFactory::GetUserGameSaveDataRoot(user_id->AsU128(), jfuture);
@@ -1951,14 +2029,14 @@ JNIEXPORT jobject JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_checkForUpdate(
     std::optional<Common::Net::Release> release = UpdateChecker::GetUpdate();
     if (!release) return nullptr;
 
-    const std::string tag = release->tag;
-    const std::string title = release->title;
+    const std::string tag = release->tag_name;
+    const std::string title = release->name;
     const std::string body = release->body;
     const std::string url = release->html_url;
 
     // Android *should* only ever define a single asset.
     // If not, something has gone wrong, but the Kotlin side can handle it.
-    const auto assets = release->GetPlatformAssets();
+    const auto assets = Common::Net::GetPlatformAssets(release.value());
 
     jclass updateResultClass = env->FindClass("org/yuzu/yuzu_emu/NativeLibrary$UpdateResult");
     if (!updateResultClass) {
@@ -1998,9 +2076,10 @@ JNIEXPORT jobject JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_checkForUpdate(
     env->CallVoidMethod(updateResult, setUrl, jurl);
 
     // TODO(crueter): Handling for multiple assets?
+    // TODO(crueter): Digest verification
     // Maybe another data class x(
-    for (const Common::Net::Asset &a : assets) {
-        const auto jaurl = env->NewStringUTF(a.path.c_str());
+    for (const Common::Net::NamedAsset &a : assets) {
+        const auto jaurl = env->NewStringUTF(a.asset.browser_download_url.c_str());
         env->CallVoidMethod(updateResult, addAsset, jaurl);
         env->DeleteLocalRef(jaurl);
     }
@@ -2207,7 +2286,7 @@ JNIEXPORT jstring JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_getUserImagePath
     const auto uuid = Common::UUID{uuid_string};
 
     const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
-        fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
+        std::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
 
     jstring result = Common::Android::ToJString(env, Common::FS::PathToUTF8String(path));
     return result ? result : env->NewStringUTF("");
@@ -2223,7 +2302,7 @@ JNIEXPORT jboolean JNICALL Java_org_yuzu_yuzu_1emu_NativeLibrary_saveUserImage(
     const auto image_source = Common::Android::GetJString(env, jimagePath);
 
     const auto dest_path = Common::FS::GetEdenPath(Common::FS::EdenPath::NANDDir) /
-        fmt::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
+        std::format("system/save/8000000000000010/su/avators/{}.jpg", uuid.FormattedString());
 
     const auto dest_dir = dest_path.parent_path();
     if (!Common::FS::CreateDirs(dest_dir)) {

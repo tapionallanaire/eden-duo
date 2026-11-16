@@ -33,6 +33,7 @@ import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.HomeSettingAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentHomeSettingsBinding
+import org.yuzu.yuzu_emu.duo.savetransfer.SaveTransferActivity
 import org.yuzu.yuzu_emu.features.DocumentProvider
 import org.yuzu.yuzu_emu.features.fetcher.SpacingItemDecoration
 import org.yuzu.yuzu_emu.features.settings.model.Settings
@@ -241,6 +242,27 @@ class HomeSettingsFragment : Fragment() {
                             null
                         )
                         binding.root.findNavController().navigate(action)
+                    }
+                )
+            )
+            add(
+                HomeSetting(
+                    R.string.save_sync,
+                    R.string.save_sync_description,
+                    R.drawable.ic_save,
+                    {
+                        org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(requireContext())
+                            .showSettings(requireActivity())
+                    }
+                )
+            )
+            add(
+                HomeSetting(
+                    R.string.save_transfer,
+                    R.string.save_transfer_description,
+                    R.drawable.ic_save,
+                    {
+                        startActivity(Intent(requireContext(), SaveTransferActivity::class.java))
                     }
                 )
             )

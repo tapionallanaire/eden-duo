@@ -31,6 +31,8 @@ target_sources(core PRIVATE
     mods/mod_settings.h
     mods/mod_user_source.cpp
     mods/mod_user_source.h
+    mods/mod_sysfont_source.cpp
+    mods/mod_sysfont_source.h
     mods/mod_romfs_sources.cpp
     mods/mod_romfs_sources.h
     mods/mod_map.cpp
@@ -50,6 +52,8 @@ target_sources(core PRIVATE
     mods/mod_msbt.h
     mods/mod_module_host.cpp
     mods/mod_module_services.cpp
+    mods/mod_texture_readback.cpp
+    mods/mod_texture_readback.h
     mods/mod_nx_assets.cpp
     mods/mod_nx_assets.h
     mods/mod_nx_runtime.cpp
@@ -87,6 +91,25 @@ target_sources(core PRIVATE
 # Duo's per-tick snapshots still use the pinned dense map implementation (see
 # .upstream/DIVERGENCES.md; the package is added in externals/CMakeLists.txt).
 target_link_libraries(core PUBLIC unordered_dense::unordered_dense)
+
+# Manifests, load plans, the persist store and the external-content index are parsed with
+# nlohmann JSON. Upstream dropped it for jacinth (#4412); Duo keeps it (DIVERGENCES #31, added
+# in externals/CMakeLists.txt). PUBLIC because the DSMod tests include it directly.
+target_link_libraries(core PUBLIC nlohmann_json::nlohmann_json)
+
+# dsm:u is written against both upstream service handler-table forms. Eden #4480 replaced the
+# constructor-time RegisterHandlers table with a per-service FindRequest override built by
+# CreateStaticMap; select the form the service.h in this tree provides, and re-run the configure
+# when that header changes (an upstream merge can switch the form).
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/hle/service/service.h")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/hle/service/service.h" DUO_HLE_STATIC_DISPATCH
+    REGEX "CreateStaticMap")
+if (DUO_HLE_STATIC_DISPATCH)
+    set_property(SOURCE hle/service/dsm/dsm.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS DUO_HLE_STATIC_DISPATCH=1)
+endif()
+unset(DUO_HLE_STATIC_DISPATCH)
 
 # Title-specific DSMod code is an optional, separately distributable shared object.  It is kept
 # outside the core archive so Eden APKs contain only the generic host and a package can provide a

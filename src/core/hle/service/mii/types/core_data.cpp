@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -55,8 +58,8 @@ void CoreData::BuildRandom(Age age, Gender gender, Race race) {
         axis_y = MiiUtil::GetRandomValue<u32>(3);
     }
 
-    const std::size_t index{3 * static_cast<std::size_t>(age) +
-                            9 * static_cast<std::size_t>(gender) + static_cast<std::size_t>(race)};
+    const std::size_t index{9 * static_cast<std::size_t>(gender) +
+                            3 * static_cast<std::size_t>(race) + static_cast<std::size_t>(age)};
 
     const auto& faceline_type_info{RawData::RandomMiiFaceline.at(index)};
     const auto& faceline_color_info{RawData::RandomMiiFacelineColor.at(

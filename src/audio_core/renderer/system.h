@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -181,6 +182,11 @@ public:
     void SendCommandToDsp();
 
     /**
+     * Hold the next render back while a game that answers every render has fallen two behind.
+     */
+    void WaitForUpdate();
+
+    /**
      * Generate a list of commands for the AudioRenderer based on current state.
      *
      * @param command_buffer      - Buffer for commands to be written to.
@@ -313,6 +319,15 @@ private:
     u64 num_command_lists_generated{};
     /// Number of times the system has updated
     u64 num_times_updated{};
+    /// Updates in a row, each within two renders of the last, that mark a game as answering
+    /// every render
+    static constexpr u32 PromptUpdates{64};
+    /// Renders signalled to the game since its last update (guarded by lock)
+    u32 renders_since_update{};
+    /// Updates in a row that came within two renders of the one before, up to PromptUpdates
+    u32 prompt_updates{};
+    /// Signalled when the game has updated
+    std::condition_variable update_cv{};
     /// Number of frames generated, written back to the game
     std::atomic<u64> frames_elapsed{};
     /// Is the AudioRenderer running too slow?

@@ -11,8 +11,7 @@
 #include <numeric>
 #include <sstream>
 #include <thread>
-#include <fmt/chrono.h>
-#include <fmt/ranges.h>
+#include <format>
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -44,7 +43,7 @@ PerfStats::~PerfStats() {
 
     const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir);
     // %F Date format expanded is "%Y-%m-%d"
-    const auto filename = fmt::format("{}_{:016X}.csv",
+    const auto filename = std::format("{}_{:016X}.csv",
         [&] {
             std::ostringstream oss;
             oss << std::put_time(std::localtime(&t), "%F-%H-%M");
@@ -86,6 +85,11 @@ void PerfStats::EndSystemFrame() {
 }
 
 void PerfStats::EndGameFrame() {
+    const s64 now = Clock::now().time_since_epoch().count();
+    const s64 last = last_game_frame.exchange(now, std::memory_order_relaxed);
+    if (last != 0 && now - last > worst_frame_gap.load(std::memory_order_relaxed)) {
+        worst_frame_gap.store(now - last, std::memory_order_relaxed);
+    }
     game_frames.fetch_add(1, std::memory_order_relaxed);
     total_game_frames.fetch_add(1, std::memory_order_relaxed); // Eden Duo: GetTotals
 }
@@ -125,6 +129,9 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
         .frametime = duration_cast<DoubleSecs>(accumulated_frametime).count() /
                      static_cast<double>(system_frames),
         .emulation_speed = system_us_per_second.count() / 1'000'000.0,
+        .worst_frame_gap = duration_cast<DoubleSecs>(
+                               Clock::duration{worst_frame_gap.exchange(0, std::memory_order_relaxed)})
+                               .count(),
     };
 
     // Reset counters

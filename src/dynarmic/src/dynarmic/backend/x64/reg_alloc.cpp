@@ -11,7 +11,7 @@
 #include <numeric>
 #include <utility>
 
-#include <fmt/ostream.h>
+#include <format>
 #include "dynarmic/backend/x64/hostloc.h"
 #include "common/assert.h"
 #include <bit>
@@ -84,7 +84,7 @@ void HostLocInfo::ReleaseAll() noexcept {
     is_scratch = false;
 }
 
-void HostLocInfo::AddValue(HostLoc loc, IR::Inst* inst) noexcept {
+void HostLocInfo::AddValue(HostLoc, IR::Inst* inst) noexcept {
     if (is_set_last_use) {
         is_set_last_use = false;
         values.clear();
@@ -465,22 +465,24 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noex
     return std::nullopt;
 }
 
-void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, HostLoc host_loc) noexcept {
-    ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
+// The checks that scan every location for def_inst are debug-only: per IR instruction they cost as
+// much as the rest of register allocation.
+void RegAlloc::DefineValueImpl(BlockOfCode&, IR::Inst* def_inst, HostLoc host_loc) noexcept {
+    DEBUG_ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
     LocInfo(host_loc).AddValue(host_loc, def_inst);
-    ASSERT(*ValueLocation(def_inst) == host_loc);
+    DEBUG_ASSERT(*ValueLocation(def_inst) == host_loc);
 }
 
 void RegAlloc::DefineValueImpl(BlockOfCode& code, IR::Inst* def_inst, const IR::Value& use_inst) noexcept {
-    ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
+    DEBUG_ASSERT(!ValueLocation(def_inst) && "def_inst has already been defined");
     if (use_inst.IsImmediate()) {
         const HostLoc location = ScratchImpl(code, gpr_order);
         DefineValueImpl(code, def_inst, location);
         LoadImmediate(code, use_inst, location);
     } else {
-        ASSERT(ValueLocation(use_inst.GetInst()) && "use_inst must already be defined");
-        const HostLoc location = *ValueLocation(use_inst.GetInst());
-        DefineValueImpl(code, def_inst, location);
+        const auto location = ValueLocation(use_inst.GetInst());
+        ASSERT(location && "use_inst must already be defined");
+        DefineValueImpl(code, def_inst, *location);
     }
 }
 
@@ -528,7 +530,7 @@ void RegAlloc::SpillRegister(BlockOfCode& code, HostLoc loc) noexcept {
     Move(code, new_loc, loc);
 }
 
-HostLoc RegAlloc::FindFreeSpill(bool is_xmm) const noexcept {
+HostLoc RegAlloc::FindFreeSpill([[maybe_unused]] bool is_xmm) const noexcept {
     // TODO(lizzie): Ok, Windows hates XMM spills, this means less perf for windows
     // but it's fine anyways. We can find other ways to cheat it later - but which?!?!
     // we should NOT save xmm each block entering... MAYBE xbyak has a bug on start/end?

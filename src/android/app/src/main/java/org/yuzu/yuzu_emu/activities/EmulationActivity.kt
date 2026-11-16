@@ -8,6 +8,7 @@ package org.yuzu.yuzu_emu.activities
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
@@ -252,14 +253,54 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         return super.onKeyDown(keyCode, event)
     }
 
+    /**
+     * Eden Duo: Android asks us to give memory back before it kills the process. Collect the
+     * renderer's caches so the game survives what would otherwise look like a crash.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            org.yuzu.yuzu_emu.utils.MemoryGuard.recover(this)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        // Eden Duo: if the device is already tight, say so before Android closes the game.
+        org.yuzu.yuzu_emu.utils.MemoryGuard.warnIfLow(this)
         nfcReader.startScanning()
         startMotionSensorListener()
         InputHandler.updateControllerData()
         notifyPhysicalControllerState()
 
         buildPictureInPictureParams()
+        applyEmulationDisplayMode()
+    }
+
+    /**
+     * Duet Plus: Switch games present at most 60 fps. On a 120 Hz panel a 30 fps game's frames
+     * land 3, 4 or 5 refreshes apart (AYN Thor: 55-77 % at 4 in Hogwarts Legacy); the panel's
+     * 60 Hz mode holds them at 2 (97 %). Frame generation needs the panel's top rate.
+     */
+    fun applyEmulationDisplayMode() {
+        val display = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay
+        }) ?: return
+        val current = display.mode
+        val modes = display.supportedModes.filter {
+            it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight
+        }
+        val wanted = if (BooleanSetting.RENDERER_FRAME_GEN.getBoolean(needsGlobal = false)) {
+            modes.maxByOrNull { it.refreshRate }
+        } else {
+            modes.filter { it.refreshRate > 59f }.minByOrNull { it.refreshRate }
+        } ?: return
+        if (window.attributes.preferredDisplayModeId != wanted.modeId) {
+            window.attributes = window.attributes.also { it.preferredDisplayModeId = wanted.modeId }
+        }
     }
 
     override fun onPause() {
@@ -273,6 +314,11 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         super.onDestroy()
         if (launchRedirected) return // nothing was set up (see ScreenSwap)
         if (isFinishing) CompanionApp.endSession() // Eden Duo: No Companion App
+        // Duet Plus: push the saves this session wrote.
+        if (isFinishing) {
+            org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this)
+                .afterExit(org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH)
+        }
         inputManager.unregisterInputDeviceListener(this)
         stopForegroundService(this)
         NativeLibrary.playTimeManagerStop()

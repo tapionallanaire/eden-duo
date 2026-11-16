@@ -15,6 +15,7 @@ import androidx.core.content.edit
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.activities.AuxCompanionActivity
+import org.yuzu.yuzu_emu.duo.DuoCapability
 import org.yuzu.yuzu_emu.features.settings.model.AbstractBooleanSetting
 import org.yuzu.yuzu_emu.views.AuxPresentation
 
@@ -117,6 +118,8 @@ object ScreenSwap {
     fun redirectLaunch(activity: Activity, hasEmulationSession: Boolean): Boolean {
         val intent = activity.intent ?: return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        // Eden Duo: no second panel, no swap.
+        if (DuoCapability.isSingleScreen(activity)) return false
         return if (hasEmulationSession) {
             forwardToRunningGame(activity, intent)
         } else {

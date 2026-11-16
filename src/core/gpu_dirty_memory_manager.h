@@ -1,8 +1,12 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <functional>
@@ -11,6 +15,7 @@
 #include <vector>
 
 #include "core/device_memory_manager.h"
+#include "video_core/nx2_perf.h"
 
 namespace Core {
 
@@ -24,6 +29,18 @@ public:
     ~GPUDirtyMemoryManager() = default;
 
     void Collect(PAddr address, size_t size) {
+        // A transform covers one page_size (2 KiB) page, a write can span several (HLE writes
+        // come in up to 4 KiB per guest page): an unsplit one lost every block past the first
+        // page, and the GPU kept stale data there (Hogwarts Legacy: half-updated textures).
+        while (size != 0) {
+            const size_t chunk = (std::min)(size, page_size - (address & page_mask));
+            CollectPage(address, chunk);
+            address += chunk;
+            size -= chunk;
+        }
+    }
+
+    void CollectPage(PAddr address, size_t size) {
         TransformAddress t = BuildTransform(address, size);
         TransformAddress tmp, original;
         do {
@@ -47,7 +64,33 @@ public:
                                                 std::memory_order_relaxed));
     }
 
+    /// Calls `callback` for each write collected and not yet gathered, without consuming them.
+    void ForEachPending(const std::function<void(PAddr, size_t)>& callback) {
+        std::vector<TransformAddress> pending;
+        {
+            std::scoped_lock lk(guard);
+            pending = back_buffer;
+            const TransformAddress t = current.load(std::memory_order_acquire);
+            if (IsValid(t.address)) {
+                pending.push_back(t);
+            }
+        }
+        for (const auto& transform : pending) {
+            ForEachRun(transform, callback);
+        }
+    }
+
     void Gather(std::function<void(PAddr, size_t)>& callback) {
+        // Nothing collected: back_buffer only grows (under guard) while current holds a valid
+        // address, and only Gather resets current, so an invalid current means both are empty.
+        // Every fence gathers each core's manager; most find nothing.
+        if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DirtyGatherFast) &&
+            !IsValid(current.load(std::memory_order_acquire).address)) {
+            return;
+        }
+        // FlushRegion also gathers off the GPU thread (host1x video decode reads); serialize
+        // gatherers so one cannot swap or clear front_buffer while another iterates it.
+        std::scoped_lock gather_lk(gather_guard);
         {
             std::scoped_lock lk(guard);
             TransformAddress t = current.exchange(default_transform, std::memory_order_relaxed);
@@ -57,19 +100,7 @@ public:
             }
         }
         for (auto& transform : front_buffer) {
-            size_t offset = 0;
-            u64 mask = transform.mask;
-            while (mask != 0) {
-                const size_t empty_bits = std::countr_zero(mask);
-                offset += empty_bits << align_bits;
-                mask = mask >> empty_bits;
-
-                const size_t continuous_bits = std::countr_one(mask);
-                callback((static_cast<PAddr>(transform.address) << page_bits) + offset,
-                         continuous_bits << align_bits);
-                mask = continuous_bits < align_size ? (mask >> continuous_bits) : 0;
-                offset += continuous_bits << align_bits;
-            }
+            ForEachRun(transform, callback);
         }
         front_buffer.clear();
     }
@@ -79,6 +110,22 @@ private:
         u32 address;
         u32 mask;
     };
+
+    template <typename Func>
+    static void ForEachRun(const TransformAddress& transform, Func&& callback) {
+        size_t offset = 0;
+        u64 mask = transform.mask;
+        while (mask != 0) {
+            const size_t empty_bits = std::countr_zero(mask);
+            offset += empty_bits << align_bits;
+            mask = mask >> empty_bits;
+            const size_t continuous_bits = std::countr_one(mask);
+            callback((static_cast<PAddr>(transform.address) << page_bits) + offset,
+                     continuous_bits << align_bits);
+            mask = continuous_bits < align_size ? (mask >> continuous_bits) : 0;
+            offset += continuous_bits << align_bits;
+        }
+    }
 
     constexpr static size_t page_bits = DEVICE_PAGEBITS - 1;
     constexpr static size_t page_size = 1ULL << page_bits;
@@ -115,6 +162,7 @@ private:
 
     std::atomic<TransformAddress> current{};
     std::mutex guard;
+    std::mutex gather_guard;
     std::vector<TransformAddress> back_buffer;
     std::vector<TransformAddress> front_buffer;
 };

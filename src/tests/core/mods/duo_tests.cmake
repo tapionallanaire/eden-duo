@@ -14,6 +14,7 @@ target_sources(tests PRIVATE
     core/mods/firmware_version_leak.cpp
     core/mods/firmware_version_nca_path.cpp
     core/mods/map_pan_zoom_host_value.cpp
+    core/mods/profile_reload.cpp
     core/mods/map_room_category.cpp
     core/mods/image_fallback.cpp
     core/mods/mod_load_plan.cpp
@@ -24,6 +25,8 @@ target_sources(tests PRIVATE
     core/mods/runtime18.cpp
     core/mods/runtime21.cpp
     core/mods/runtime22.cpp
+    core/mods/runtime23_sysfont.cpp
+    core/mods/runtime24_texture_readback.cpp
     core/mods/runtime16_image.cpp
     core/mods/text_markup.cpp
     core/mods/text_slant.cpp

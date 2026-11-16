@@ -34,7 +34,10 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
 }
 
 void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_storage,
-                                        const ActionHandle& handle) {
+                                        const ActionHandle& handle, std::mutex& action_mutex) {
+    // An action already taken off the list may still be running: let it finish first, as when
+    // actions ran under the guard.
+    std::scoped_lock run(action_mutex);
     std::scoped_lock lk(guard);
 
     // We want to ensure the iterator still exists prior to erasing it
@@ -50,19 +53,26 @@ void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_stor
 }
 
 void SyncpointManager::DeregisterGuestAction(u32 syncpoint_id, const ActionHandle& handle) {
-    DeregisterAction(guest_action_storage[syncpoint_id], handle);
+    DeregisterAction(guest_action_storage[syncpoint_id], handle, guest_action_mutex);
 }
 
 void SyncpointManager::DeregisterHostAction(u32 syncpoint_id, const ActionHandle& handle) {
-    DeregisterAction(host_action_storage[syncpoint_id], handle);
+    DeregisterAction(host_action_storage[syncpoint_id], handle, host_action_mutex);
 }
 
 void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
-    Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id]);
+    Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id],
+              guest_action_mutex, syncpoint_id);
+}
+
+void SyncpointManager::SetGuestMirror(GuestMirror mirror) {
+    std::scoped_lock lk(guard);
+    guest_mirror = std::move(mirror);
 }
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
-    Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
+    Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id],
+              host_action_mutex);
 }
 
 void SyncpointManager::WaitGuest(u32 syncpoint_id, u32 expected_value) {
@@ -73,19 +83,50 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
     Wait(syncpoints_host[syncpoint_id], wait_host_cv, expected_value);
 }
 
-void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
-                                 std::list<RegisteredAction>& action_storage) {
-    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
-
-    std::scoped_lock lk(guard);
-    auto it = action_storage.begin();
-    while (it != action_storage.end()) {
-        if (it->expected_value > new_value) {
-            break;
-        }
-        it->action();
-        it = action_storage.erase(it);
+bool SyncpointManager::WaitHostFor(u32 syncpoint_id, u32 expected_value,
+                                   std::chrono::milliseconds timeout) {
+    auto& syncpoint = syncpoints_host[syncpoint_id];
+    const auto pred = [&]() { return syncpoint.load(std::memory_order_acquire) >= expected_value; };
+    if (pred()) {
+        return true;
     }
+    std::unique_lock lk(guard);
+    return wait_host_cv.wait_for(lk, timeout, pred);
+}
+
+void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
+                                 std::list<RegisteredAction>& action_storage,
+                                 std::mutex& action_mutex, std::optional<u32> mirrored_id) {
+    u32 new_value;
+    if (mirrored_id) {
+        // Before the value is published: the lock-free ready checks in RegisterAction and Wait
+        // must not see it ahead of the mirrored page.
+        std::scoped_lock lk(guard);
+        if (guest_mirror) {
+            guest_mirror(*mirrored_id, syncpoint.load(std::memory_order_relaxed) + 1);
+        }
+        new_value = syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1;
+    } else {
+        new_value = syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+
+    // Due actions run with only action_mutex held. Run under the guard, a frame composite (a guest
+    // action) blocked every other increment and wait for its whole length: the GPU thread spent
+    // 10% of its time here in FINAL FANTASY RESONANCE.
+    std::scoped_lock run(action_mutex);
+    std::list<RegisteredAction> due;
+    {
+        std::scoped_lock lk(guard);
+        auto it = action_storage.begin();
+        while (it != action_storage.end() && it->expected_value <= new_value) {
+            ++it;
+        }
+        due.splice(due.end(), action_storage, action_storage.begin(), it);
+    }
+    for (auto& registered : due) {
+        registered.action();
+    }
+    std::scoped_lock lk(guard);
     wait_cv.notify_all();
 }
 

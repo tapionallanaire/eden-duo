@@ -10,7 +10,7 @@
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/find.hpp>
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
@@ -485,6 +485,17 @@ void ProfileManager::ResetUserSaveFile()
 {
     RemoveAllProfiles();
     ParseUserSaveFile();
+    // Eden Duo: re-open the selected user, as the constructor does. A manager built before the
+    // user folder was known kept a stale (random) last-opened user across this reload, so
+    // anything asking it for the running account (the companion save reader) got the wrong one.
+    if (user_count > 0) {
+        auto current =
+            std::clamp<int>(static_cast<s32>(Settings::values.current_user), 0, MAX_USERS - 1);
+        if (!UserExistsIndex(current)) {
+            current = 0;
+        }
+        OpenUser(*GetUser(current));
+    }
 }
 
 std::vector<UUID> ProfileManager::FindExistingProfileUUIDs()
@@ -507,7 +518,7 @@ std::vector<std::string> ProfileManager::FindExistingProfileStrings()
 
     for (const UUID &uuid : uuids) {
         auto user_id = uuid.AsU128();
-        uuid_strings.emplace_back(fmt::format("{:016X}{:016X}", user_id[1], user_id[0]));
+        uuid_strings.emplace_back(std::format("{:016X}{:016X}", user_id[1], user_id[0]));
     }
 
     return uuid_strings;

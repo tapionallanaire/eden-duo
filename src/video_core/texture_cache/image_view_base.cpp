@@ -28,6 +28,8 @@ ImageViewBase::ImageViewBase(const ImageViewInfo& info, const ImageInfo& image_i
     ASSERT_MSG(VideoCore::Surface::IsViewCompatible(image_info.format, info.format, false, true),
                "Image view format {} is incompatible with image format {}", info.format,
                image_info.format);
+    unroll_x = image_info.unroll_x;
+    unroll_y = image_info.unroll_y;
     if (image_info.forced_flushed) {
         flags |= ImageViewFlagBits::PreemtiveDownload;
     }

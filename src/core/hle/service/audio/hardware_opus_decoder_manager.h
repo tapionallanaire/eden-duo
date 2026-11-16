@@ -25,6 +25,7 @@ public:
     ~IHardwareOpusDecoderManager() override;
 
 private:
+    void OpenHwacodClient(HLERequestContext& ctx);
     Result OpenHardwareOpusDecoder(Out<SharedPointer<IHardwareOpusDecoder>> out_decoder,
                                    OpusParameters params, u32 tmem_size,
                                    InCopyHandle<Kernel::KTransferMemory> tmem_handle);
@@ -49,7 +50,6 @@ private:
     Result GetWorkBufferSizeForMultiStreamExEx(
         Out<u32> out_size, InLargeData<OpusMultiStreamParametersEx, BufferAttr_HipcPointer> params);
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override;
     Core::System& system;
     AudioCore::OpusDecoder::OpusDecoderManager impl;
 };

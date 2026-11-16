@@ -17,7 +17,7 @@
 #include <string_view>
 #include <type_traits>
 #include <deque>
-#include <fmt/core.h>
+#include <format>
 
 #include "common/settings_enums.h"
 #include "common/assert.h"
@@ -60,6 +60,7 @@ SWITCHABLE(NvdecEmulation, false);
 SWITCHABLE(Region, true);
 SWITCHABLE(RendererBackend, true);
 SWITCHABLE(ScalingFilter, false);
+SWITCHABLE(FrameGenType, false);
 SWITCHABLE(SpirvOptimizeMode, true);
 SWITCHABLE(TimeZone, true);
 SETTING(VSyncMode, true);
@@ -113,22 +114,23 @@ std::string GetTimeZoneString(TimeZone time_zone) {
     return location_name;
 }
 
+/// Logs every setting's value, modified ones first, hiding the token secrets.
 void LogSettings() {
     std::deque<std::string> settings_list;
     for (auto& [category, settings] : values.linkage.by_category) {
         for (const auto& setting : settings) {
-            // Hide the token secret, for security reasons.
-            if (setting->Id() != values.eden_token.Id()) {
+            // Hide the token secrets, for security reasons.
+            if (setting->Id() != values.eden_token.Id() && setting->Id() != values.mcp_token.Id()) {
                 auto const is_default = setting->ToString() == setting->DefaultToString();
-                auto const name = fmt::format(
+                auto const name = std::format(
                     "{:c}{:c} {}.{}",
                     is_default ? '-' : 'M',
                     setting->UsingGlobal() ? '-' : 'C', TranslateCategory(category),
                     setting->GetLabel());
                 if (is_default)
-                    settings_list.push_back(fmt::format("{}: {}", name, setting->Canonicalize()));
+                    settings_list.push_back(std::format("{}: {}", name, setting->Canonicalize()));
                 else
-                    settings_list.push_front(fmt::format("{}: {}", name, setting->Canonicalize()));
+                    settings_list.push_front(std::format("{}: {}", name, setting->Canonicalize()));
             }
         }
     }
@@ -229,6 +231,26 @@ u64 GetCurrentProgramID() {
     return current_program_id;
 }
 
+static bool current_program_is_switch2 = false;
+
+void SetCurrentProgramIsSwitch2(bool is_switch2) {
+    current_program_is_switch2 = is_switch2;
+}
+
+bool CurrentProgramIsSwitch2() {
+    return current_program_is_switch2;
+}
+
+static std::optional<AstcRecompression> astc_recompression_override;
+
+AstcRecompression GetAstcRecompression() {
+    return astc_recompression_override.value_or(values.astc_recompression.GetValue());
+}
+
+void SetAstcRecompressionOverride(std::optional<AstcRecompression> recompression) {
+    astc_recompression_override = recompression;
+}
+
 bool IsDockedMode() {
     return values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked;
 }
@@ -259,6 +281,7 @@ const char* TranslateCategory(Category category) {
     case Category::RendererHacks:
     case Category::RendererDebug:
     case Category::RendererExtensions:
+    case Category::RendererMemory:
         return "Renderer";
     case Category::System:
     case Category::SystemAudio:

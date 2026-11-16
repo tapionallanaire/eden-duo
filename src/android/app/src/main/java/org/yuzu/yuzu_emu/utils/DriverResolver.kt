@@ -54,7 +54,8 @@ object DriverResolver {
         "crueter/GameHub-8Elite-Drivers",
         "K11MCH1/AdrenoToolsDrivers",
         "Weab-chan/freedreno_turnip-CI",
-        "Balemuni/Balemunis-Aurora"
+        "Balemuni/Balemunis-Aurora",
+        "StevenMXZ/Adreno-Tools-Drivers"
     )
 
     private val urlCache = ConcurrentHashMap<String, ResolvedDriver>()
@@ -137,11 +138,13 @@ object DriverResolver {
 
         return coroutineScope {
             // Search all repositories in parallel
-            repositories.map { repoPath ->
+            // An exact asset name in any repository beats a fuzzy match in an earlier one.
+            val found = repositories.map { repoPath ->
                 async {
                     searchRepository(repoPath, filename)
                 }
-            }.firstNotNullOfOrNull { it.await() }.also { resolved ->
+            }.mapNotNull { it.await() }
+            (found.firstOrNull { it.filename.equals(filename, ignoreCase = true) } ?: found.firstOrNull()).also { resolved ->
                 // Cache the result if found
                 resolved?.let {
                     urlCache[filename] = it
@@ -407,7 +410,8 @@ object DriverResolver {
             Log.info("[DriverResolver] Successfully installed driver to internal storage")
             // Clean up cache file
             downloadedFile.delete()
-            return Uri.fromFile(File(localPath))
+            // The installed file keeps the downloaded asset's name, which a fuzzy match can differ from.
+            return Uri.fromFile(File(GpuDriverHelper.driverStoragePath + resolvedDriver.filename))
         } else {
             Log.error("[DriverResolver] Failed to copy driver to internal storage")
             downloadedFile.delete()

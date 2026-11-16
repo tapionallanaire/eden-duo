@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -16,6 +19,7 @@ enum class PixelFormat : u32 {
     Bgra8888 = 5,
     Rgba5551 = 6,
     Rgba4444 = 7,
+    Rgba1010102 = 43,
 };
 
 } // namespace Service::android

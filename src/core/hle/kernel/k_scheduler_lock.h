@@ -9,6 +9,7 @@
 #include "core/hle/kernel/k_spin_lock.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/physical_core.h"
 
 namespace Kernel {
@@ -33,7 +34,20 @@ public:
         } else {
             // Otherwise, we want to disable scheduling and acquire the spinlock.
             SchedulerType::DisableScheduling(m_kernel);
-            m_spin_lock.Lock();
+            if (Nx2KStats::g_enabled) {
+                Nx2KStats::Add(Nx2KStats::g_stats.sched_lock[0]);
+                if (!m_spin_lock.TryLock()) {
+                    const u64 start = Nx2KStats::NowNs();
+                    m_spin_lock.Lock();
+                    m_nx2_locked_ns = Nx2KStats::NowNs();
+                    Nx2KStats::Add(Nx2KStats::g_stats.sched_lock[1]);
+                    Nx2KStats::Add(Nx2KStats::g_stats.sched_lock[2], m_nx2_locked_ns - start);
+                } else {
+                    m_nx2_locked_ns = Nx2KStats::NowNs();
+                }
+            } else {
+                m_spin_lock.Lock();
+            }
 
             ASSERT(m_lock_count == 0);
             ASSERT(m_owner_thread == nullptr);
@@ -61,6 +75,10 @@ public:
 
             // Note that we no longer hold the lock, and unlock the spinlock.
             m_owner_thread = nullptr;
+            if (Nx2KStats::g_enabled) {
+                Nx2KStats::Add(Nx2KStats::g_stats.sched_lock[3],
+                               Nx2KStats::NowNs() - m_nx2_locked_ns);
+            }
             m_spin_lock.Unlock();
 
             // Enable scheduling, and perform a rescheduling operation.
@@ -75,6 +93,7 @@ private:
     KAlignedSpinLock m_spin_lock{};
     s32 m_lock_count{};
     std::atomic<KThread*> m_owner_thread{};
+    u64 m_nx2_locked_ns{};
 };
 
 } // namespace Kernel

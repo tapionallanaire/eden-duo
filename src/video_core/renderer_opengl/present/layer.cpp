@@ -69,7 +69,7 @@ GLuint Layer::ConfigureDraw(std::array<GLfloat, 3 * 2>& out_matrix,
 
     glDisablei(GL_SCISSOR_TEST, 0);
 
-    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr) {
+    if (filters.get_scaling_filter() == Settings::ScalingFilter::Fsr || filters.get_scaling_filter() == Settings::ScalingFilter::Fsr3) {
         if (!fsr || fsr->NeedsRecreation(layout.screen)) {
             fsr.emplace(layout.screen.GetWidth(), layout.screen.GetHeight());
         }
@@ -140,7 +140,15 @@ FramebufferTextureInfo Layer::LoadFBToScreenInfo(const Tegra::FramebufferConfig&
     const u32 bytes_per_pixel{VideoCore::Surface::BytesPerBlock(pixel_format)};
     const u64 size_in_bytes{Tegra::Texture::CalculateSize(
         true, bytes_per_pixel, framebuffer.stride, framebuffer.height, 1, block_height_log2, 0)};
-    const u8* const host_ptr{device_memory.GetPointer<u8>(framebuffer_addr)};
+    // The framebuffer is contiguous only per page: a DMA-written one (Hogwarts Legacy's boot key
+    // art) read as one block from its first page's host pointer showed blocks of other memory
+    // from 0x1E0000 bytes in. Read it through the page table when the range isn't one span.
+    const u8* host_ptr{device_memory.GetSpan(framebuffer_addr, size_in_bytes)};
+    if (!host_ptr && device_memory.GetPointer<u8>(framebuffer_addr)) {
+        tiled_scratch.resize(size_in_bytes);
+        device_memory.ReadBlockUnsafe(framebuffer_addr, tiled_scratch.data(), size_in_bytes);
+        host_ptr = tiled_scratch.data();
+    }
     if (host_ptr) {
         const std::span<const u8> input_data(host_ptr, size_in_bytes);
         Tegra::Texture::UnswizzleTexture(gl_framebuffer_data, input_data, bytes_per_pixel,
@@ -182,6 +190,11 @@ void Layer::ConfigureFramebufferTexture(const Tegra::FramebufferConfig& framebuf
         internal_format = GL_RGBA8;
         framebuffer_texture.gl_format = GL_RGBA;
         framebuffer_texture.gl_type = GL_UNSIGNED_INT_8_8_8_8_REV;
+        break;
+    case Service::android::PixelFormat::Rgba1010102:
+        internal_format = GL_RGB10_A2;
+        framebuffer_texture.gl_format = GL_RGBA;
+        framebuffer_texture.gl_type = GL_UNSIGNED_INT_2_10_10_10_REV;
         break;
     case Service::android::PixelFormat::Rgb565:
         internal_format = GL_RGB565;

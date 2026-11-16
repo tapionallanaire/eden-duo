@@ -458,9 +458,13 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::SetAttributeIndexed:
         info.stores_indexed_attributes = true;
         break;
-    case IR::Opcode::SetFragColor:
-        info.stores_frag_color[inst.Arg(0).U32()] = true;
+    case IR::Opcode::SetFragColor: {
+        const u32 render_target{inst.Arg(0).U32()};
+        info.stores_frag_color[render_target] = true;
+        info.frag_color_components[render_target] |=
+            static_cast<u8>(1U << inst.Arg(1).U32());
         break;
+    }
     case IR::Opcode::SetSampleMask:
         info.stores_sample_mask = true;
         break;
@@ -489,6 +493,11 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::IsTextureScaled:
     case IR::Opcode::IsImageScaled:
         info.uses_rescaling_uniform = true;
+        break;
+    case IR::Opcode::TensorMulAdd:
+        info.uses_subgroup_shuffles = true;
+        info.uses_fp32_denorms_preserve = true;
+        info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::LaneId:
         info.uses_subgroup_invocation_id = true;
@@ -965,10 +974,12 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         switch (program.stage) {
         case Stage::VertexA:
         case Stage::VertexB:
+        case Stage::Task: // bound in the vertex slot
             return 0x110u;
         case Stage::TessellationControl:
             return 0x210u;
         case Stage::TessellationEval:
+        case Stage::Mesh: // bound in the tessellation slot
             return 0x310u;
         case Stage::Geometry:
             return 0x410u;
@@ -980,6 +991,11 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         throw InvalidArgument("Invalid stage {}", program.stage);
     }()};
     info.nvn_buffer_base = base;
+    if (program.stage == Stage::Task || program.stage == Stage::Mesh) {
+        // The stage buffer reads the workgroup index; the epilogue splits work by invocation.
+        info.uses_workgroup_id = true;
+        info.uses_local_invocation_id = true;
+    }
 
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {

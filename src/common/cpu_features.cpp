@@ -59,18 +59,6 @@ static inline u64 xgetbv(u32 index) {
 #endif
 
 namespace Common {
-#ifdef ARCHITECTURE_x86_64
-CPUCaps::Manufacturer CPUCaps::ParseManufacturer(std::string_view brand_string) {
-    if (brand_string == "GenuineIntel") {
-        return Manufacturer::Intel;
-    } else if (brand_string == "AuthenticAMD") {
-        return Manufacturer::AMD;
-    } else if (brand_string == "HygonGenuine") {
-        return Manufacturer::Hygon;
-    }
-    return Manufacturer::Unknown;
-}
-
 std::optional<int> GetProcessorCount() {
 #if defined(_WIN32)
     // Get the buffer length.
@@ -110,6 +98,18 @@ std::optional<int> GetProcessorCount() {
     // Shame on you
     return std::nullopt;
 #endif
+}
+
+#ifdef ARCHITECTURE_x86_64
+CPUCaps::Manufacturer CPUCaps::ParseManufacturer(std::string_view brand_string) {
+    if (brand_string == "GenuineIntel") {
+        return Manufacturer::Intel;
+    } else if (brand_string == "AuthenticAMD") {
+        return Manufacturer::AMD;
+    } else if (brand_string == "HygonGenuine") {
+        return Manufacturer::Hygon;
+    }
+    return Manufacturer::Unknown;
 }
 
 /// @brief Detects the various CPU features
@@ -225,6 +225,10 @@ const CPUCaps g_cpu_caps = [] {
         }
     }
 
+    if (caps.invariant_tsc && caps.tsc_frequency == 0) {
+        caps.tsc_frequency = X64::EstimateRDTSCFrequency();
+    }
+
     if (max_std_fn >= 0x16) {
         __cpuid(cpu_id, 0x16);
         caps.base_frequency = cpu_id[0];
@@ -248,6 +252,7 @@ WallClock::WallClock(bool invariant_, u64 rdtsc_frequency_) noexcept
     , rdtsc_ns_factor{invariant_ ? GetFixedPoint64Factor(rdtsc_frequency_ % NsRatio::den, NsRatio::den) : 0}
     , cntpct_rdtsc_factor{invariant_ ? GetFixedPoint64Factor(CNTFRQ, rdtsc_frequency_) : 0}
     , gputick_rdtsc_factor{invariant_ ? GetFixedPoint64Factor(GPUTickFreq, rdtsc_frequency_) : 0}
+    , base_rdtsc{invariant_ ? Common::X64::FencedRDTSC() : 0}
     , invariant{invariant_}
 {}
 
@@ -270,9 +275,35 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 }
 
 s64 WallClock::GetCNTPCT() const {
-    if (!invariant)
-        return GetUptime() * NsToCNTPCTRatio::num / NsToCNTPCTRatio::den;
-    return MultiplyHigh(GetUptime(), cntpct_rdtsc_factor);
+    if (!invariant) {
+#ifdef _WIN32
+        static const u64 qpf = [] {
+            LARGE_INTEGER f{};
+            QueryPerformanceFrequency(&f);
+            return static_cast<u64>(f.QuadPart);
+        }();
+        LARGE_INTEGER qpc{};
+        QueryPerformanceCounter(&qpc);
+        const u64 cntfrq = GetGuestCNTFRQ();
+        if (qpf == 10'000'000ULL && cntfrq == Switch2CNTFRQ) {
+            return static_cast<s64>((static_cast<u64>(qpc.QuadPart) * 25ULL) >> 3);
+        }
+        if (qpf != 0) {
+            return static_cast<s64>(
+                MultiplyAndDivide64(static_cast<u64>(qpc.QuadPart), cntfrq, qpf));
+        }
+#endif
+        return MultiplyAndDivide64(GetUptime(), GetGuestCNTFRQ(), NsRatio::den);
+    }
+    return MultiplyHigh(GetUptime(), cntpct_rdtsc_factor.load(std::memory_order_relaxed));
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
+    if (invariant) {
+        cntpct_rdtsc_factor.store(GetFixedPoint64Factor(frequency, rdtsc_frequency),
+                                  std::memory_order_relaxed);
+    }
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -282,9 +313,24 @@ s64 WallClock::GetGPUTick() const {
 }
 
 s64 WallClock::GetUptime() const {
-    if (!invariant)
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    return s64(Common::X64::FencedRDTSC());
+    if (!invariant) {
+#ifdef _WIN32
+        static const u64 qpf = [] {
+            LARGE_INTEGER f{};
+            QueryPerformanceFrequency(&f);
+            return static_cast<u64>(f.QuadPart);
+        }();
+        if (qpf == 10'000'000ULL) {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            return qpc.QuadPart * 100LL;
+        }
+#endif
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+    return static_cast<s64>(Common::X64::FencedRDTSC() - base_rdtsc);
 }
 
 bool WallClock::IsNative() const {
@@ -329,7 +375,7 @@ namespace {
 } // namespace
 
 WallClock::WallClock(bool invariant_, u64 rdtsc_frequency_) noexcept {
-    const u64 host_cntfrq = std::max<u64>(GetHostCNTFRQ(), 1);
+    host_cntfrq = std::max<u64>(GetHostCNTFRQ(), 1);
     ns_cntfrq_factor = GetFixedPointFactor(NsRatio::den, host_cntfrq);
     us_cntfrq_factor = GetFixedPointFactor(UsRatio::den, host_cntfrq);
     ms_cntfrq_factor = GetFixedPointFactor(MsRatio::den, host_cntfrq);
@@ -352,6 +398,11 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 
 s64 WallClock::GetCNTPCT() const {
     return MultiplyHigh(GetUptime(), guest_cntfrq_factor);
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
+    guest_cntfrq_factor = GetFixedPointFactor(frequency, host_cntfrq);
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -392,7 +443,11 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
 }
 
 s64 WallClock::GetCNTPCT() const {
-    return GetUptime() * NsToCNTPCTRatio::num / NsToCNTPCTRatio::den;
+    return MultiplyAndDivide64(GetUptime(), GetGuestCNTFRQ(), NsRatio::den);
+}
+
+void WallClock::SetGuestCNTFRQ(u64 frequency) {
+    guest_cntfrq.store(frequency, std::memory_order_relaxed);
 }
 
 s64 WallClock::GetGPUTick() const {
@@ -412,9 +467,13 @@ u64 WallClock::NsToTicks(std::chrono::nanoseconds ns) const {
 }
 #endif
 
+u64 WallClock::CPUTickToGuestCNTPCT(u64 cpu_tick) const {
+    return MultiplyAndDivide64(cpu_tick, GetGuestCNTFRQ(), CPUTickFreq);
+}
+
 // Wall clock MUST be initialized AFTER g_cpu_caps
 // C++ only guarantees ctor init in the order they appear in TU
-const WallClock g_wall_clock = [] {
+WallClock g_wall_clock = [] {
 #if defined(ARCHITECTURE_x86_64)
     auto const& caps = Common::g_cpu_caps;
     return WallClock(caps.invariant_tsc && caps.tsc_frequency > std::nano::den, caps.tsc_frequency);

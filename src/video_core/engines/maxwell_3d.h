@@ -9,8 +9,10 @@
 #include <array>
 #include <bitset>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -19,11 +21,13 @@
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/math_util.h"
+#include "common/settings.h"
 #include "video_core/engines/const_buffer_info.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
 #include "video_core/gpu.h"
 #include "video_core/macro.h"
+#include "video_core/split_write_tracker.h"
 #include "video_core/textures/texture.h"
 #include "video_core/engines/maxwell_3d.h"
 
@@ -33,6 +37,11 @@ class System;
 
 namespace Tegra {
 class MemoryManager;
+struct Nx2DrawPrograms;
+}
+
+namespace VideoCommon {
+class GpuSplit;
 }
 
 namespace VideoCore {
@@ -2535,6 +2544,19 @@ public:
             return IsShaderConfigEnabled(static_cast<std::size_t>(type));
         }
 
+        // Switch 2 (NVN) task and mesh pipelines (clc597.h): SET_MESH_CONTROL, SET_MESH_SHADER_A
+        // and _B, SET_MESH_INIT_SHADER. While mesh control is on, the vertex slot holds the task
+        // program (or the mesh program when there is no task), the tessellation slot the mesh
+        // program and the geometry slot a pass-through header naming the per-primitive outputs.
+        static constexpr std::size_t MeshControl = 0x114c / 4;
+        static constexpr std::size_t MeshShaderA = 0x1150 / 4;
+        static constexpr std::size_t MeshShaderB = 0x1154 / 4;
+        static constexpr std::size_t MeshInitShader = 0x1158 / 4;
+
+        bool IsMeshEnabled() const {
+            return (reg_array[MeshControl] & 1) != 0;
+        }
+
         struct ConstantBuffer {
             u32 size;
             u32 address_high;
@@ -2604,6 +2626,12 @@ public:
             u32 start_shader_mask;
             u32 stop_shader_mask;
         };
+
+        // Native C597/C797 use byte counts at 0x600 rather than legacy end addresses.
+        u64 NativeVertexStreamSize(std::size_t index) const {
+            const std::size_t method = 0x600 / sizeof(u32) + index * 2;
+            return (u64{reg_array[method] & 0xffU} << 32) | reg_array[method + 1];
+        }
 
         // clang-format off
         union {
@@ -3039,11 +3067,14 @@ public:
             Maxwell3D::Regs::PrimitiveTopology topology{};
             DrawMode draw_mode{};
             bool draw_indexed{};
+            u32 draw_element_count{}; // Zero for indirect draws whose count is not known yet.
             u32 base_index{};
             Maxwell3D::Regs::VertexBuffer vertex_buffer;
             Maxwell3D::Regs::IndexBuffer index_buffer;
             u32 base_instance{};
             u32 instance_count{};
+            /// Deferred instances already drawn by flushes in the middle of the current loop.
+            u32 drawn_instances{};
             std::vector<u8> inline_index_draw_indexes;
         };
         struct DrawTextureState {
@@ -3070,7 +3101,14 @@ public:
         };
         void ProcessMethodCall(Maxwell3D& maxwell3d, u32 method, u32 argument);
         void Clear(Maxwell3D& maxwell3d, u32 layer_count);
-        void DrawDeferred(Maxwell3D& maxwell3d);
+        /// Draws the waiting instances. loop_continues is set when the loop goes on afterwards.
+        void DrawDeferred(Maxwell3D& maxwell3d, bool loop_continues = false);
+        /// Instances after the first wait to be drawn together (DrawDeferred).
+        [[nodiscard]] bool HasDeferredDraw() const noexcept {
+            return draw_state.draw_mode == DrawMode::Instance && draw_state.instance_count != 0;
+        }
+        /// Methods an instance loop writes between its draws; any other write ends the loop.
+        [[nodiscard]] static bool IsInstanceLoopMethod(u32 method) noexcept;
         void DrawArray(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 vertex_first, u32 vertex_count, u32 base_instance, u32 num_instances);
         void DrawArrayInstanced(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 vertex_first, u32 vertex_count, bool subsequent);
         void DrawIndex(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 index_first, u32 index_count, u32 base_index, u32 base_instance, u32 num_instances);
@@ -3079,6 +3117,9 @@ public:
         void SetInlineIndexBuffer(Maxwell3D& maxwell3d, u32 index);
         void SetInlineIndexBuffer(Maxwell3D& maxwell3d, u32 method, const u32* base_start, u32 amount);
         void DrawBegin(Maxwell3D& maxwell3d);
+        /// Nx2Perf draw_begin_coalesce: the effect of `repeats` more DrawBegin calls right after
+        /// one, with no write in between.
+        void AddInstances(Maxwell3D& maxwell3d, u32 repeats);
         void DrawEnd(Maxwell3D& maxwell3d, u32 instance_count = 1, bool force_draw = false);
         void DrawIndexSmall(Maxwell3D& maxwell3d, u32 argument);
         void DrawTexture(Maxwell3D& maxwell3d);
@@ -3129,11 +3170,80 @@ public:
     /// Reads a register value located at the input method address
     u32 GetRegisterValue(u32 method) const;
 
+    void TraceFirstMethodWrite(u32 method, u32 argument);
+
+    /// GPU memory, for Turing macros that read memory into their FIFO or data RAM.
+    MemoryManager& GetMemoryManager() {
+        return memory_manager;
+    }
+
+    void SetNativeTuringMacroMode(bool enabled) {
+        GetNativeMacroEngine().native_turing = enabled;
+        upload_state.SetNativePartialTransfers(enabled);
+    }
+    void SetNativeMacroContext(std::shared_ptr<NativeMacroContext> context) {
+        native_macro_context = std::move(context);
+    }
+    MacroEngine& GetNativeMacroEngine() { return native_macro_context ? native_macro_context->engine : macro_engine; }
+    /// This channel's MME data RAM (shared with its compute engine).
+    std::array<u32, 0xc00>& GetNativeDataRam() { return native_data_ram; }
+    std::span<u32> GetNativeMacroPositions() { return native_macro_context ? std::span<u32>{native_macro_context->positions} : std::span<u32>{macro_positions}; }
+
+    /// Root tables: eight 256-byte tables written inline (method 0x504 selects a table, bits 0-2,
+    /// and a byte offset, bits 8-15; each 0x508 writes the next word) that shaders read as constant
+    /// banks 24-31. NVN2 keeps push constants in bank 24, which the Ampere lowering reads as bank 17.
+    struct RootTables {
+        static constexpr u32 SelectMethod = 0x504 / 4;
+        static constexpr u32 LoadMethod = 0x508 / 4;
+        std::array<std::array<u32, 64>, 8> tables{};
+        u32 selected{};
+        u32 offset{};
+        bool loaded{};
+    } root_tables;
+
+
     /// Write the value to the register identified by method.
     void CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) override;
 
+    void CallStateMethod(Core::System& system, u32 method, u32 argument) override;
+
     /// Write multiple values to the register identified by method.
     void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) override;
+
+    /// GpuSplit's back (fast_maxwell3d): CallMethod for each of up to 64 single writes to the
+    /// constant buffer data registers, uploaded in one memory write within a device page.
+    void CallConstBufferWords(Core::System& system, const u32* methods, const u32* arguments,
+                              u32 count);
+
+    /// GpuSplit's back (fast_maxwell3d): processes a contiguous run of non-executable state
+    /// register writes from the SPSC ring in one loop.
+    size_t CallStateMethodRun(const u64* entry, size_t max_words);
+
+    /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
+    /// the front instead of CallMethod: runs macros and macro uploads against a copy of the
+    /// registers and sends the register writes to the back thread.
+    void FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                         u32 argument, bool is_last_call);
+    void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                              const u32* base_start, u32 amount, u32 methods_pending);
+    /// Nx2Perf FrontRun: FrontCallMethod for `count` words of one command below the macro
+    /// range, `methods_pending` of the command's words left at the first one.
+    void FrontCallMethodRun(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                            const u32* words, u32 count, bool incrementing, u32 methods_pending);
+    /// EDEN_NX2_PERF_VERIFY (FrontRun): FrontCallMethod appends its register writes here.
+    std::vector<std::array<u32, 3>>* front_run_record{};
+
+    [[nodiscard]] static bool FrontIsWriterDraw(const Regs& regs);
+    [[nodiscard]] static bool FrontIsWriterDraw(const std::array<u32, Regs::NUM_REGS>& regs) {
+        return FrontIsWriterDraw(reinterpret_cast<const Regs&>(regs));
+    }
+
+    /// Nx2Perf MacroReadWriterSet: the programs a draw with these registers binds, as the
+    /// pipeline cache resolves them (ShaderCache::RefreshStages). False when the draw may write
+    /// guest memory whatever its programs are: rasterizer off, transform feedback, task and mesh
+    /// programs.
+    [[nodiscard]] static bool Nx2DrawProgramsOf(const Regs& regs, bool native, u64 memory_id,
+                                                u64 map_serial, Tegra::Nx2DrawPrograms& out);
 
     bool ShouldExecute() const {
         return execute_on;
@@ -3214,6 +3324,12 @@ private:
 
     void ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call);
 
+    /// CallMethod with every check, for the cases and tools CallMethodFast leaves out.
+    void CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
+    void CallMethodFast(u32 method, u32 method_argument, bool is_last_call);
+    /// EDEN_NX2_PERF_VERIFY: CallMethodFast's register state against CallMethodSlow's.
+    void VerifyCallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call);
+
     /// Retrieves information about a specific TIC entry from the TIC buffer.
     Texture::TICEntry GetTICEntry(u32 tic_index) const;
 
@@ -3226,7 +3342,18 @@ private:
      * @param method Method to call
      * @param parameters Arguments to the method call
      */
-    void CallMacroMethod(Core::System& system, u32 method, const std::vector<u32>& parameters);
+    void CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters);
+
+    /// Whether state register writes that keep the register's value are dropped (CallMethod).
+    /// Switch 2 titles only: a Switch 1 title's same-value writes still raise the dirty flags
+    /// (the shader re-validation Hogwarts Legacy needs runs from them).
+    static bool SkipSameValueWrites() {
+        static const bool skip = [] {
+            const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
+            return value == nullptr || value[0] != '0';
+        }();
+        return skip && Settings::CurrentProgramIsSwitch2();
+    }
 
     /// Handles writes to the macro uploading register.
     void ProcessMacroUpload(u32 data);
@@ -3265,10 +3392,35 @@ private:
 
     /// Macro method that is currently being executed / being fed parameters.
     u32 executing_macro = 0;
+
+    struct RecentWrite {
+        u32 method;
+        u32 argument;
+        u32 amount;
+        u32 pending;
+    };
+    std::array<RecentWrite, 48> recent_writes{};
+    size_t recent_write_index = 0;
+    const bool record_write_history{
+#ifdef NDEBUG
+        std::getenv("EDEN_NX2_3D_HISTORY") != nullptr
+#else
+        true
+#endif
+    };
+    void RecordWrite(u32 method, u32 argument, u32 amount, u32 pending) {
+        if (!record_write_history) {
+            return;
+        }
+        recent_writes[recent_write_index++ % recent_writes.size()] = {method, argument, amount, pending};
+    }
+    void DumpRecentWrites(u32 method);
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
 
     /// Interpreter for the macro codes uploaded to the GPU.
+    std::shared_ptr<NativeMacroContext> native_macro_context;
+    std::array<u32, 0xc00> native_data_ram{};
     MacroEngine macro_engine;
 
     Upload::State upload_state;
@@ -3277,6 +3429,40 @@ private:
 
     std::vector<std::pair<GPUVAddr, size_t>> macro_segments;
     bool current_macro_dirty{};
+
+    // Split GPU thread, macros on the front (FrontCallMethod): the front's state, and whether
+    // the front owns the macro code and bindings (the back thread then leaves them alone).
+    struct FrontState;
+    FrontState& Front(Core::System& system, VideoCommon::GpuSplit& split);
+    void ReleaseFront();
+    void FrontWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 argument,
+                    bool is_last_call, bool from_macro);
+    void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state,
+                       std::span<const u32> borrowed = {});
+    void FrontTrackInstanceLoop(FrontState& state, u32 method, u32 value);
+    bool FrontSkipsLoopWrite(FrontState& state, u32 method, u32 value, bool shadow_kept);
+    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
+                      u32 count);
+    bool FrontDmaReadEarly(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
+                           GPUVAddr source, u32 ram, u32 words);
+    /// What the draw the front's registers describe may write (MacroReadWriterSet): Draw when
+    /// the back proved its exact programs write no memory, Gpu otherwise.
+    VideoCommon::SplitWriteTracker::Effect FrontDrawEffect(VideoCommon::GpuSplit& split,
+                                                           FrontState& state);
+    void FrontVerify(VideoCommon::GpuSplit& split, FrontState& state);
+    void FinishFrontMacro(Core::System& system);
+    // shared_ptr: FrontState is defined after the constructor in the .cpp (libc++ needs it complete)
+    std::shared_ptr<FrontState> front;
+    bool front_macros{};
+    // EDEN_NX2_SPLIT_VERIFY: the last SET_SHADOW_RAM_CONTROL writes each side saw (argument,
+    // mode before, path), printed when the sides disagree.
+    struct ControlWrite {
+        u32 argument;
+        u32 before;
+        u32 path;
+    };
+    std::array<ControlWrite, 16> back_control_writes{};
+    u32 back_control_count{};
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \

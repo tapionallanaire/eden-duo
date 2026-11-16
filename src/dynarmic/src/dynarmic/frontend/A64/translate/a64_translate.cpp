@@ -11,19 +11,20 @@
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/frontend/A64/decoder/a64.h"
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
+#include "dynarmic/interface/A64/config.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/terminal.h"
 
 namespace Dynarmic::A64 {
 
-void Translate(IR::Block& block, LocationDescriptor descriptor, MemoryReadCodeFuncType memory_read_code, TranslationOptions options) {
+void Translate(IR::Block& block, LocationDescriptor descriptor, A64::UserConfig const& conf) {
     const bool single_step = descriptor.SingleStepping();
-    TranslatorVisitor visitor{block, descriptor, std::move(options)};
+    TranslatorVisitor visitor{block, descriptor, conf};
 
     bool should_continue = true;
     do {
         const u64 pc = visitor.ir.current_location->PC();
-        if (const auto instruction = memory_read_code(pc)) {
+        if (const auto instruction = conf.callbacks->MemoryReadCode(pc)) {
             if (auto decoder = Decode<TranslatorVisitor, bool>(visitor, *instruction)) {
                 should_continue = *decoder;
             } else {
@@ -82,6 +83,9 @@ bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor,
 #include "dynarmic/frontend/A64/translate/impl/impl.cpp"
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
 #include "dynarmic/frontend/A64/translate/impl/load_store_exclusive.cpp"
+#include "dynarmic/frontend/A64/translate/impl/load_store_atomic.cpp"
+#include "dynarmic/frontend/A64/translate/impl/memory_tagging.cpp"
+#include "dynarmic/frontend/A64/translate/impl/pointer_authentication.cpp"
 #include "dynarmic/frontend/A64/translate/impl/load_store_load_literal.cpp"
 #include "dynarmic/frontend/A64/translate/impl/load_store_multiple_structures.cpp"
 #include "dynarmic/frontend/A64/translate/impl/load_store_no_allocate_pair.cpp"
@@ -101,6 +105,7 @@ bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor,
 #include "dynarmic/frontend/A64/translate/impl/simd_permute.cpp"
 #include "dynarmic/frontend/A64/translate/impl/simd_scalar_pairwise.cpp"
 #include "dynarmic/frontend/A64/translate/impl/simd_scalar_shift_by_immediate.cpp"
+#include "dynarmic/frontend/A64/translate/impl/simd_scalar_three_different.cpp"
 #include "dynarmic/frontend/A64/translate/impl/simd_scalar_three_same.cpp"
 #include "dynarmic/frontend/A64/translate/impl/simd_scalar_two_register_misc.cpp"
 #include "dynarmic/frontend/A64/translate/impl/simd_scalar_x_indexed_element.cpp"

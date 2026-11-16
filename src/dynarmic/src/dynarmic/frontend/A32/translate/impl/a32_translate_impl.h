@@ -9,6 +9,7 @@
 #pragma once
 
 #include "common/assert.h"
+#include "dynarmic/interface/A32/config.h"
 #include "dynarmic/mcl/bit.hpp"
 
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
@@ -25,12 +26,14 @@ enum class Exception;
 struct TranslatorVisitor final {
     using instruction_return_type = bool;
 
-    explicit TranslatorVisitor(IR::Block& block, LocationDescriptor descriptor, const TranslationOptions& options)
-            : ir(block, descriptor, options.arch_version), options(options) {}
+    explicit TranslatorVisitor(IR::Block& block, LocationDescriptor descriptor, const A32::UserConfig& conf)
+        : ir(block, descriptor, conf.arch_version)
+        , conf(conf)
+    {}
 
     A32::IREmitter ir;
     ConditionalState cond_state = ConditionalState::None;
-    TranslationOptions options;
+    A32::UserConfig const& conf;
 
     size_t current_instruction_size;
 
@@ -882,6 +885,10 @@ struct TranslatorVisitor final {
     bool asimd_VPMIN_float(bool D, bool sz, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
     bool asimd_VRECPS(bool D, bool sz, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
     bool asimd_VRSQRTS(bool D, bool sz, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
+    bool v8_SHA1C(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
+    bool v8_SHA1P(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
+    bool v8_SHA1M(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
+    bool v8_SHA1SU0(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
     bool v8_SHA256H(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
     bool v8_SHA256H2(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
     bool v8_SHA256SU1(bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm);
@@ -928,6 +935,8 @@ struct TranslatorVisitor final {
     bool v8_AESE(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
     bool v8_AESIMC(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
     bool v8_AESMC(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
+    bool v8_SHA1H(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
+    bool v8_SHA1SU1(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
     bool v8_SHA256SU0(bool D, size_t sz, size_t Vd, bool M, size_t Vm);
     bool asimd_VCLS(bool D, size_t sz, size_t Vd, bool Q, bool M, size_t Vm);
     bool asimd_VCLZ(bool D, size_t sz, size_t Vd, bool Q, bool M, size_t Vm);

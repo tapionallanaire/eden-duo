@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/common_types.h"
 
 namespace Shader {
@@ -20,6 +22,7 @@ struct HostTranslateInfo {
     u64 min_ssbo_alignment{};            ///< Minimum alignment supported by the device for SSBOs
     u32 max_per_stage_descriptor_sampled_images{}; ///< maximum sampled descriptors per stage
     u32 max_per_stage_resources{};                 ///< maximum resources per stage
+    u32 max_per_stage_descriptor_storage_buffers{}; ///< maximum storage buffers per stage
     u32 max_descriptor_set_samplers{};
     u32 max_descriptor_set_uniform_buffers{};
     u32 max_descriptor_set_uniform_buffers_dynamic{};
@@ -38,9 +41,15 @@ struct HostTranslateInfo {
     bool support_viewport_mask{};
     bool support_geometry_shader_passthrough{}; ///< True when the device supports geometry
                                                 ///< passthrough shaders
+    /// Handle tables (TextureDescriptor::count > 1), in the order the texture pass finds them:
+    /// log2 of the descriptor array size this pipeline variant binds, 0 for the default cap.
+    /// Set per pipeline variant from GraphicsPipelineCacheKey::table_buckets.
+    std::array<u8, 32> table_buckets{};
     bool support_conditional_barrier{}; ///< True when the device supports barriers in conditional
                                         ///< control flow
     bool single_lane_geometry_subgroups{};
+    bool support_attribute_texture_handle{}; ///< True when the host binds texture handles that
+                                             ///< arrive as vertex attributes
 
     void ApplyDescriptorLimitPolicy() noexcept {
         if (min_ssbo_alignment == 0) {
@@ -48,6 +57,7 @@ struct HostTranslateInfo {
         }
         ApplyDescriptorLimitFallback(max_per_stage_descriptor_sampled_images);
         ApplyDescriptorLimitFallback(max_per_stage_resources);
+        ApplyDescriptorLimitFallback(max_per_stage_descriptor_storage_buffers);
         ApplyDescriptorLimitFallback(max_descriptor_set_samplers);
         ApplyDescriptorLimitFallback(max_descriptor_set_uniform_buffers);
         ApplyDescriptorLimitFallback(max_descriptor_set_uniform_buffers_dynamic);

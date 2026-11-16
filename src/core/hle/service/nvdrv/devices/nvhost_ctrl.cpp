@@ -9,10 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <fmt/ranges.h>
+#include <format>
 #include "common/assert.h"
 #include "common/logging.h"
-#include "common/scope_exit.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_event.h"
 #include "core/hle/service/nvdrv/core/container.h"
@@ -93,14 +92,6 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
     LOG_DEBUG(Service_NVDRV, "syncpt_id={}, threshold={}, timeout={}, is_allocation={}",
               params.fence.id, params.fence.value, params.timeout, is_allocation);
 
-    bool must_unmark_fail = !is_allocation;
-    const u32 event_id = params.value.raw;
-    SCOPE_EXIT {
-        if (must_unmark_fail) {
-            events[event_id].fails = 0;
-        }
-    };
-
     const u32 fence_id = static_cast<u32>(params.fence.id);
 
     if (fence_id >= MaxSyncPoints) {
@@ -143,30 +134,12 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
         }
     }();
 
-    must_unmark_fail = false;
-
-    const auto check_failing = [&]() {
-        if (events[slot].fails > 2) {
-            {
-                auto lk = system.StallApplication();
-                host1x_syncpoint_manager.WaitHost(fence_id, target_value);
-                system.UnstallApplication();
-            }
-            params.value.raw = target_value;
-            return true;
-        }
-        return false;
-    };
-
     if (slot >= MaxNvEvents) {
         return NvResult::BadParameter;
     }
 
     if (params.timeout == 0) {
-        if (check_failing()) {
-            events[slot].fails = 0;
-            return NvResult::Success;
-        }
+        // A poll must not suspend the CPUs that can submit the work satisfying this fence.
         return NvResult::Timeout;
     }
 
@@ -176,13 +149,14 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
         return NvResult::BadParameter;
     }
 
-    if (event.IsBeingUsed()) {
+    // The host action wakes the guest before it marks the event Signalled, so a guest that
+    // re-arms the moment it wakes finds it still Signalling. Its wake has already happened, so
+    // the event is free to re-arm (the action won't overwrite the new wait, see below). Refused,
+    // the wait never armed and FINAL FANTASY RESONANCE's NVN aborted ("GPU interrupt wait
+    // returned TIMEOUT_EXPIRED") every few battles on the Retroid Pocket Flip 2.
+    if (const auto state = event.status.load(std::memory_order_acquire);
+        state == EventState::Waiting || state == EventState::Cancelling) {
         return NvResult::BadParameter;
-    }
-
-    if (check_failing()) {
-        event.fails = 0;
-        return NvResult::Success;
     }
 
     params.value.raw = 0;
@@ -205,7 +179,10 @@ NvResult nvhost_ctrl::IocCtrlEventWait(IocCtrlEventWaitParams& params, bool is_a
                 EventState::Waiting) {
                 event_.kevent->Signal(system.Kernel());
             }
-            event_.status.store(EventState::Signalled, std::memory_order_release);
+            // The woken guest may already have re-armed this event; leave its wait alone.
+            auto signalling = EventState::Signalling;
+            event_.status.compare_exchange_strong(signalling, EventState::Signalled,
+                                                  std::memory_order_acq_rel);
         });
     return NvResult::Timeout;
 }
@@ -290,7 +267,6 @@ NvResult nvhost_ctrl::IocCtrlClearEventWait(IocCtrlEventClearParams& params) {
         syncpoint_manager.UpdateMin(event.assigned_syncpt);
         event.wait_handle = {};
     }
-    event.fails++;
     event.status.store(EventState::Cancelled, std::memory_order_release);
     event.kevent->Clear(system.Kernel());
 
@@ -332,11 +308,10 @@ void nvhost_ctrl::CreateNvEvent(u32 event_id) {
     ASSERT(!event.kevent);
     ASSERT(!event.registered);
     ASSERT(!event.IsBeingUsed());
-    event.kevent = events_interface.CreateEvent(fmt::format("NVCTRL::NvEvent_{}", event_id));
+    event.kevent = events_interface.CreateEvent(std::format("NVCTRL::NvEvent_{}", event_id));
     event.status = EventState::Available;
     event.registered = true;
     const u64 mask = 1ULL << event_id;
-    event.fails = 0;
     events_mask |= mask;
     event.assigned_syncpt = 0;
 }

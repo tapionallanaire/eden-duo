@@ -60,7 +60,7 @@ SVCS = [
      [0x31, "Result GetResourceLimitCurrentValue(int64_t* out_current_value, Handle resource_limit_handle, LimitableResource which);"],
      [0x32, "Result SetThreadActivity(Handle thread_handle, ThreadActivity thread_activity);"],
      [0x33, "Result GetThreadContext3(Address out_context, Handle thread_handle);"],
-     [0x34, "Result WaitForAddress(Address address, ArbitrationType arb_type, int32_t value, int64_t timeout_ns);"],
+     [0x34, "Result WaitForAddress(Address address, ArbitrationType arb_type, AddressArbiterValue value, int64_t timeout_ns);"],
      [0x35, "Result SignalToAddress(Address address, SignalType signal_type, int32_t value, int32_t count);"],
      [0x36, "void SynchronizePreemptionState();"],
      [0x37, "Result GetResourceLimitPeakValue(int64_t* out_peak_value, Handle resource_limit_handle, LimitableResource which);"],
@@ -195,6 +195,8 @@ TYPE_SIZES = {
 
 TYPE_REPLACEMENTS = {
     "Address": ["uint32_t", "uint64_t"],
+    # Preserve the AArch32 register layout while retaining the native 64-bit value.
+    "AddressArbiterValue": ["int32_t", "int64_t"],
     "LastThreadContext": ["ilp32::LastThreadContext", "lp64::LastThreadContext"],
     "PhysicalAddress": ["uint64_t", "uint64_t"],
     "PhysicalMemoryInfo": ["ilp32::PhysicalMemoryInfo", "lp64::PhysicalMemoryInfo"],
@@ -552,7 +554,7 @@ static void SetArg64(std::span<uint64_t, 8> args, int n, uint64_t result) {
 // Like bit_cast, but handles the case when the source and dest
 // are differently-sized.
 template <typename To, typename From>
-    requires(std::is_trivial_v<To> && std::is_trivially_copyable_v<From>)
+    requires(std::is_trivially_default_constructible_v<To> && std::is_trivially_copyable_v<To> && std::is_trivially_copyable_v<From>)
 static To Convert(const From& from) {
     To to{};
     if constexpr (sizeof(To) >= sizeof(From))

@@ -54,6 +54,9 @@ public:
     bool BeginEmulationCycle();
     void EndEmulationCycle();
     void RequestDiskShaderCacheReload(u64 program_id);
+    // Eden Duo: the next run records the pipelines the game builds, or compiles the combinations
+    // its plan implies (see video_core/shader_modes.h).
+    void SetShaderRunMode(bool record, bool compile, bool compile_max);
 
     const Core::PerfStatsResults& PerfStats();
     int ShadersBuilding();

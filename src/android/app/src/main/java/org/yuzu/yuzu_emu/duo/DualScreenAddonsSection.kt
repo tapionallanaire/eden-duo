@@ -50,6 +50,10 @@ class DualScreenAddonsSection(
         }
 
     private fun installDualScreenPackage(uri: Uri? = null, release: DualScreenModRelease? = null) {
+        // Eden Duo: the OpenDocument launcher is registered regardless of screen count, so a file
+        // picker opened in a two-screen process can be re-delivered here after the process
+        // restarts single-screen; refuse to install on one screen.
+        if (DuoCapability.isSingleScreen(fragment.context)) return
         val activity = fragment.requireActivity()
         val game = game()
         // The installer writes through java.io.File; a linked (SAF) load folder cannot be written.
@@ -305,6 +309,9 @@ class DualScreenAddonsSection(
 
     /** Listens for the dual-screen entries of the content-type picker and the fetcher dialog. */
     fun registerResultListeners(owner: LifecycleOwner) {
+        // One screen: the content-type picker offers no dual-screen entry, and nothing else may
+        // open the fetcher or the installer.
+        if (DuoCapability.isSingleScreen(fragment.context)) return
         fragment.parentFragmentManager.setFragmentResultListener(
             ContentTypeSelectionDialogFragment.REQUEST_INSTALL_DUAL_SCREEN_MOD,
             owner

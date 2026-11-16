@@ -69,6 +69,8 @@ public:
     Core::Memory::Memory& m_memory;
     u64 m_tpidrro_el0{};
     u64 m_tpidr_el0{};
+    u64 m_last_cntpct{}; ///< The previous counter read (GetCNTPCT spin detection)
+    u64 m_spin_ticks{32}; ///< Reads closer than this (~1.7 us) count as a polling loop
     Kernel::KProcess* m_process{};
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};
@@ -89,6 +91,9 @@ public:
     HaltReason StepThread(Kernel::KThread* thread) override;
 
     void GetContext(Kernel::Svc::ThreadContext& ctx) const override;
+    u64 PeekPC() const override {
+        return m_jit ? m_jit->GetPC() : 0;
+    }
     void SetContext(const Kernel::Svc::ThreadContext& ctx) override;
     void SetTpidrroEl0(u64 value) override;
 

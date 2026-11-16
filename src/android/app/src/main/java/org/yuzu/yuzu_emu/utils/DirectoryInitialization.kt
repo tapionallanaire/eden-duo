@@ -46,9 +46,12 @@ object DirectoryInitialization {
                 throw IllegalStateException("Cannot recover previous Eden Duo data", e)
             }
             NativeLibrary.setAppDirectory(userPath!!)
-            NativeLibrary.setDualScreenCodeDirectory(
-                java.io.File(YuzuApplication.appContext.codeCacheDir, "dualscreen").canonicalPath
-            )
+            // Eden Duo: one screen loads no dual-screen code, so its cache is never swept.
+            if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(YuzuApplication.appContext)) {
+                NativeLibrary.setDualScreenCodeDirectory(
+                    java.io.File(YuzuApplication.appContext.codeCacheDir, "dualscreen").canonicalPath
+                )
+            }
         } catch (e: IOException) {
             e.printStackTrace()
         }

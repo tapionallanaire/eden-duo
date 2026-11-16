@@ -498,7 +498,7 @@
     <string name="user_data_import_failed_description">Make sure the user data folders are at the root of the zip folder and contain a config file at config/config.ini and try again.</string>
     <string name="discord_link" translatable="false">https://discord.gg/HstXbPch7X</string>
     <string name="stoat_link" translatable="false">https://stt.gg/qKgFEAbH</string>
-    <string name="x_link" translatable="false">https://nitter.poast.org/edenemuofficial</string>
+    <string name="x_link" translatable="false">https://x.com/edenemuofficial</string>
     <string name="website_link" translatable="false">https://eden-emu.dev</string>
     <string name="github_link" translatable="false">https://git.eden-emu.dev/eden-emu</string>
 
@@ -551,6 +551,12 @@
     <!-- Graphics settings strings -->
     <string name="renderer_resolution">Resolution (Handheld/Docked)</string>
     <string name="renderer_vsync">VSync mode</string>
+    <string name="renderer_dlss_replacement">DLSS replacement</string>
+    <string name="renderer_dlss_replacement_description">Upscaler for Switch 2 games that use DLSS. SGSR 2 is Qualcomm\'s temporal upscaler for Adreno.</string>
+    <string name="dlss_replacement_auto">Automatic</string>
+    <string name="dlss_replacement_sgsr2">SGSR 2</string>
+    <string name="dlss_replacement_fsr3">FSR 3.1</string>
+    <string name="dlss_replacement_standin">Simple temporal</string>
     <string name="renderer_scaling_filter">Window adapting filter</string>
     <string name="fsr_sharpness">FSR/SGSR sharpness</string>
     <string name="fsr_sharpness_description">Determines how sharpened the image will look while using FSR or SGSR filters</string>
@@ -593,10 +599,8 @@
     <string name="fast_gpu_time_description">Makes the game believe GPU work finishes faster than it does, so it stops lowering resolution and render distance to fit the Switch\'s clocks.</string>
     <string name="skip_cpu_inner_invalidation">Skip CPU Inner Invalidation</string>
     <string name="skip_cpu_inner_invalidation_description">Skips certain CPU-side cache invalidations during memory updates, reducing CPU usage and improving it\'s performance. This may cause glitches or crashes on some games.</string>
-    <string name="nce_runtime_nro_patch">Patch Runtime NROs for NCE</string>
-    <string name="nce_runtime_nro_patch_description">Temporary. Fix Biomutant boot. May impact performance. Improvement in progress.</string>
     <string name="fix_bloom_effects">Fix Bloom Effects</string>
-    <string name="fix_bloom_effects_description">Reduces bloom blur in LA/EOW (Adreno A6XX - A7XX/ Turnip), removes bloom in Burnout. Warning: may cause graphical artifacts in other games.</string>
+    <string name="fix_bloom_effects_description">Removes bloom in Burnout.</string>
     <string name="fix_fp16_denormals">Fix FP16 Denormals</string>
     <string name="fix_fp16_denormals_description">Keeps tiny half-precision values that Adreno A6XX - A7XX flushes to zero. Fixes white, blown-out characters and effects (Fire Emblem Engage, Dragon Quest VII Reimagined, where it is on automatically). Costs some GPU performance.</string>
     <string name="emulate_bgr565">Emulate BGR565</string>
@@ -844,6 +848,12 @@
     <string name="preferences_graphics">Graphics</string>
     <string name="preferences_graphics_description">Accuracy level, resolution, shader cache</string>
     <string name="quick_settings">Quick Settings</string>
+    <string name="cheats">Cheats</string>
+    <string name="enable_all_cheats">Enable All Cheats</string>
+    <string name="disable_all_cheats">Disable All Cheats</string>
+    <string name="unnamed_cheat">Unnamed Cheat</string>
+    <string name="enable_cheats_by_default">Enable cheats by default</string>
+    <string name="enable_cheats_by_default_description">Enable regular cheats when a game starts</string>
     <string name="enable_quick_settings">Enable Quick Settings</string>
     <string name="enable_quick_settings_description">Allow access to quick settings menu via swipe and menu button</string>
     <string name="preferences_audio">Audio</string>
@@ -904,6 +914,13 @@
     <string name="seconds_must_be_between_0_and_59">Seconds must be between 0 and 59</string>
     <string name="playtime_updated_successfully">Playtime updated successfully</string>
     <string name="clear_shader_cache">Clear shader cache</string>
+    <string name="apply_optimal_settings">Apply optimal settings for this game</string>
+    <string name="apply_optimal_settings_description">Use the settings tuned for this game</string>
+    <string name="apply_optimal_settings_warning">This replaces this game\'s own values for the tuned settings. Your other settings stay as they are.</string>
+    <string name="apply_optimal_settings_done">Optimal settings applied. They take effect the next time the game starts.</string>
+    <string name="apply_optimal_settings_no_driver">Optimal settings applied, but its GPU driver could not be downloaded. Connect to the internet and apply again.</string>
+    <string name="apply_optimal_settings_failed">Couldn\'t apply this game\'s optimal settings</string>
+    <string name="apply_optimal_settings_running">Quit the game first, then apply its optimal settings</string>
     <string name="clear_shader_cache_description">Removes all shaders built while playing this game</string>
     <string name="clear_shader_cache_warning_description">You will experience more stuttering as the shader cache regenerates</string>
     <string name="cleared_shaders_successfully">Cleared shaders successfully</string>
@@ -1174,6 +1191,7 @@
     <string name="scaling_filter_lanczos" translatable="false">Lanczos</string>
     <string name="scaling_filter_scale_force" translatable="false">ScaleForce</string>
     <string name="scaling_filter_fsr" translatable="false">AMD FidelityFX Super Resolution</string>
+    <string name="scaling_filter_fsr3" translatable="false">AMD FidelityFX Super Resolution 3</string>
     <string name="scaling_filter_area" translatable="false">Area</string>
     <string name="scaling_filter_zero_tangent" translatable="false">Zero-Tangent</string>
     <string name="scaling_filter_bspline" translatable="false">B-Spline</string>
@@ -1422,7 +1440,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
     </string>
     <string name="license_dynarmic" translatable="false">Dynarmic</string>
     <string name="license_dynarmic_description" translatable="false">An ARM dynamic recompiler</string>
-    <string name="license_dynarmic_link" translatable="false">https://github.com/merryhime/dynarmic</string>
+    <string name="license_dynarmic_link" translatable="false">https://git.eden-emu.dev/eden-emu/dynarmic</string>
     <string name="license_dynarmic_copyright" translatable="false">Copyright © 2017 merryhime</string>
     <string name="license_dynarmic_text" translatable="false">
 Permission to use, copy, modify, and/or distribute this software for
@@ -1889,4 +1907,77 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="add_folders">Add Folder</string>
     <string name="percent">%1$d%%</string>
 
+
+    <!-- Duet Plus: save sync with Syncthing on the PC (Calamansi shares the same folder) -->
+    <string name="save_sync">Save sync</string>
+    <string name="save_sync_description">Sync Switch saves with Syncthing on your PC, before and after every game</string>
+
+    <!-- Eden Duo: save transfer (copy Switch saves from other Eden apps into this one) -->
+    <string name="save_transfer">Save transfer</string>
+    <string name="save_transfer_description">Copy game saves from your other Eden apps into this app</string>
+    <string name="save_transfer_back">Back</string>
+    <string name="save_transfer_previous_app">Previous app</string>
+    <string name="save_transfer_next_app">Next app</string>
+    <string name="save_transfer_copy_from">Copy from</string>
+    <string name="save_transfer_copy_into">Copy into</string>
+    <string name="save_transfer_controls">Ⓧ Select   Ⓐ Transfer   Ⓑ Back   L1 / R1 Switch app</string>
+    <string name="save_transfer_button">Transfer</string>
+    <string name="save_transfer_give_access">Give access</string>
+    <string name="save_transfer_needs_access">%1$s needs to share its files once. On the next screen, choose Use this folder.</string>
+    <string name="save_transfer_lost_access">Couldn\'t read %1$s\'s saves. Give access again.</string>
+    <string name="save_transfer_wrong_folder">That isn\'t %1$s\'s folder. Pick %1$s on the next screen.</string>
+    <string name="save_transfer_no_sources">No other Eden apps are installed</string>
+    <string name="save_transfer_empty">No saves in %1$s</string>
+    <string name="save_transfer_shared">%1$s and this app use the same save folder, so their saves are already shared. Nothing to copy.</string>
+    <string name="save_transfer_needs_files_access">%1$s keeps its saves in %2$s. Give this app All files access to read them.</string>
+    <string name="save_transfer_no_saves_here">No saves yet</string>
+    <string name="save_transfer_state_new">Not here yet</string>
+    <string name="save_transfer_state_newer">Newer</string>
+    <string name="save_transfer_state_same">Same</string>
+    <string name="save_transfer_state_older">Older</string>
+    <string name="save_transfer_state_copied">Copied</string>
+    <string name="save_transfer_updated">Updated %1$s</string>
+    <string name="save_transfer_overwrite_title">Overwrite %1$s\'s save?</string>
+    <string name="save_transfer_overwrite_message">This replaces the save in this app. Its current save is backed up first.\n\nCopying: saved %1$s\nReplacing: saved %2$s</string>
+    <string name="save_transfer_overwrite_newer">The save in this app is newer than the one you\'re copying.\n\n</string>
+    <string name="save_transfer_overwrite">Overwrite</string>
+    <string name="save_transfer_skip">Skip</string>
+    <string name="save_transfer_running">Quit your game first. Saves can\'t be replaced while a game is running.</string>
+    <string name="save_transfer_failed_title">Some saves weren\'t copied</string>
+    <string name="save_transfer_failed">%1$s: %2$s</string>
+    <plurals name="save_transfer_done">
+        <item quantity="one">Copied %d save</item>
+        <item quantity="other">Copied %d saves</item>
+    </plurals>
+
+    <!-- Eden Duo: memory guard -->
+    <string name="memory_low_title">Low memory</string>
+    <string name="memory_low_message">Android is running out of memory (%1$s). Eden can be closed without warning while a game runs. Close other apps, or free what Eden is holding right now.</string>
+    <string name="memory_free_now">Free memory</string>
+    <string name="memory_close_game">Close Eden</string>
+    <string name="memory_recovered">Freed %1$d MB</string>
+    <string name="memory_already_clean">Nothing to reclaim right now (%1$s)</string>
+    <string name="menu_recover_memory">Recover memory</string>
+    <!-- Eden Duo: shader warm-up -->
+    <string name="warm_up_shaders">Warm up shaders</string>
+    <string name="warm_up_shaders_description">Run this game for a set time to build its shader cache, then put your saves back. Reaches the title screen and the first scenes only.</string>
+    <string name="warm_up_shader_count">%1$d shaders cached</string>
+    <string name="warm_up_duration_title">Warm up shaders for…</string>
+    <string name="warm_up_confirmation">The game runs on its own for this long; your save is backed up first and restored afterwards.</string>
+    <string name="warm_up_minutes">%1$d minutes</string>
+    <string name="warm_up_remaining">Warming up shaders · %1$s left</string>
+    <string name="warm_up_done">Warm-up finished: %1$d new shaders</string>
+    <!-- Eden Duo: record and compile shaders (ShaderRuns) -->
+    <string name="shader_record">Record shaders</string>
+    <string name="shader_record_description">Play with this on and every graphics pipeline the game builds for the first time is kept in a recording, so those effects can be compiled ahead of the next session.</string>
+    <string name="shader_record_last">%1$d pipelines in the last recording</string>
+    <string name="shader_record_none">No recording yet</string>
+    <string name="shader_record_started">Recording shaders: play the effects you want kept</string>
+    <string name="shader_record_done">Recorded %1$d pipelines</string>
+    <string name="shader_compile">Compile shaders</string>
+    <string name="shader_compile_description">Compiles the pipelines this title has already drawn, without playing it, and stops.</string>
+    <string name="shader_compile_max">Compile shaders (Max)</string>
+    <string name="shader_compile_max_description">Also builds every vertex and fragment shader combination the title knows, not only the pairs it has drawn. Takes longer and uses more disk, but should compile less while you play.</string>
+    <string name="shader_compile_done">Compiled %1$d of %2$d pipelines</string>
+    <string name="shader_compile_max_done">Compiled %1$d of %2$d pipelines, plus shader combinations</string>
 </resources>

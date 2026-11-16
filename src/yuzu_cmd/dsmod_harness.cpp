@@ -4,6 +4,8 @@
 // Eden Duo: the eden-cli test harness, see dsmod_harness.h. Moved out of yuzu.cpp so upstream's
 // frontend file only carries hook calls.
 
+#include <format>
+#include <optional>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -21,8 +23,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <fmt/format.h>
-
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/param_package.h"
@@ -32,6 +32,7 @@
 #include "common/stb.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/tools/renderdoc.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/registered_cache.h"
@@ -377,7 +378,7 @@ static int NativeButtonFromName(const std::string& name) {
     std::string upper = name;
     std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return std::toupper(c); });
     const auto it = kMap.find(upper);
-    return it == kMap.end() ? static_cast<int>(NB::A) : it->second;
+    return it == kMap.end() ? -1 : it->second;  // unknown name: no button, never a silent A
 }
 
 /// Returns the keyboard scancode bound to a player-1 button, or -1 when it is not a keyboard bind.
@@ -386,7 +387,11 @@ static int KeyCodeForButton(const std::string& name) {
     if (players.empty()) {
         return -1;
     }
-    const auto& binding = players[0].buttons[static_cast<size_t>(NativeButtonFromName(name))];
+    const int native = NativeButtonFromName(name);
+    if (native < 0) {
+        return -1;
+    }
+    const auto& binding = players[0].buttons[static_cast<size_t>(native)];
     Common::ParamPackage param{binding};
     if (param.Get("engine", std::string{}) != "keyboard") {
         return -1;
@@ -394,23 +399,26 @@ static int KeyCodeForButton(const std::string& name) {
     return param.Get("code", -1);
 }
 
-static InputCommon::VirtualGamepad::VirtualButton ButtonFromName(const std::string& name) {
+/// Route button name -> virtual pad button, case-insensitive ("DLeft", "DLEFT", "dleft").
+/// Unknown names return nullopt: a typo must not press A (it confirmed prompts in RE4 routes).
+static std::optional<InputCommon::VirtualGamepad::VirtualButton> ButtonFromName(
+    const std::string& name) {
     using VB = InputCommon::VirtualGamepad::VirtualButton;
-    if (name == "B") return VB::ButtonB;
-    if (name == "X") return VB::ButtonX;
-    if (name == "Y") return VB::ButtonY;
-    if (name == "Plus") return VB::ButtonPlus;
-    if (name == "Minus") return VB::ButtonMinus;
-    if (name == "DUp") return VB::ButtonUp;
-    if (name == "DDown") return VB::ButtonDown;
-    if (name == "DLeft") return VB::ButtonLeft;
-    if (name == "DRight") return VB::ButtonRight;
-    if (name == "L") return VB::TriggerL;
-    if (name == "R") return VB::TriggerR;
-    if (name == "ZL") return VB::TriggerZL;
-    if (name == "ZR") return VB::TriggerZR;
-    if (name == "Home") return VB::ButtonHome;
-    return VB::ButtonA;
+    static const std::unordered_map<std::string, VB> kMap{
+        {"A", VB::ButtonA},       {"B", VB::ButtonB},        {"X", VB::ButtonX},
+        {"Y", VB::ButtonY},       {"PLUS", VB::ButtonPlus},  {"MINUS", VB::ButtonMinus},
+        {"DUP", VB::ButtonUp},    {"DDOWN", VB::ButtonDown}, {"DLEFT", VB::ButtonLeft},
+        {"DRIGHT", VB::ButtonRight}, {"L", VB::TriggerL},    {"R", VB::TriggerR},
+        {"ZL", VB::TriggerZL},    {"ZR", VB::TriggerZR},     {"HOME", VB::ButtonHome},
+    };
+    std::string upper = name;
+    std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return std::toupper(c); });
+    const auto it = kMap.find(upper);
+    if (it == kMap.end()) {
+        LOG_WARNING(Frontend, "dsmod harness: unknown button name '{}' ignored", name);
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 struct BtnStep {
@@ -449,6 +457,15 @@ static void ServiceButtonRequests(Core::System& system,
         if (std::filesystem::exists(shot, shot_ec)) {
             std::filesystem::remove(shot, shot_ec);
             g_screenshot_requested.store(true);
+        }
+        // <prefix>.rdc: RenderDoc captures the next 3 presents, so a 30 fps game's own frame is in
+        // (run under renderdoccmd with renderdoc_hotkey on, which creates the API).
+        const std::filesystem::path rdc{g_screenshot_prefix + ".rdc"};
+        if (std::filesystem::exists(rdc, shot_ec)) {
+            std::filesystem::remove(rdc, shot_ec);
+            if (Settings::values.enable_renderdoc_hotkey.GetValue()) {
+                system.GetRenderdocAPI().TriggerCapture(3);
+            }
         }
     }
 
@@ -591,8 +608,10 @@ static void ServiceButtonRequests(Core::System& system,
             const std::string& which = step.arg;
             if (pad != nullptr && !which.empty()) {
                 const auto button = ButtonFromName(which);
-                for (const std::size_t player : {std::size_t{0}, std::size_t{8}}) {
-                    pad->SetButtonState(player, button, down);
+                if (button) {
+                    for (const std::size_t player : {std::size_t{0}, std::size_t{8}}) {
+                        pad->SetButtonState(player, *button, down);
+                    }
                 }
                 LOG_INFO(Frontend, "virtual button '{}' {}", which, down ? "held" : "released");
             }
@@ -652,7 +671,12 @@ static void ServiceButtonRequests(Core::System& system,
             const std::string name = step.name.substr(
                 start, plus == std::string::npos ? std::string::npos : plus - start);
             if (!name.empty()) {
-                const auto button = ButtonFromName(name);
+                const auto maybe_button = ButtonFromName(name);
+                if (!maybe_button) {
+                    start = plus == std::string::npos ? step.name.size() + 1 : plus + 1;
+                    continue;
+                }
+                const auto button = *maybe_button;
                 g_button_all.push_back(button);
                 // Both the handheld port and player 1, since which one the game reads depends
                 // on setup.
@@ -965,6 +989,26 @@ void OnGameLoaded(Session& session, Core::System& system) {
         Settings::values.vsync_mode.SetValue(static_cast<Settings::VSyncMode>(mode));
         LOG_INFO(Frontend, "vsync mode forced to {} by EDEN_VSYNC", mode);
     }
+    // Settings a title's defaults set at boot, forced afterwards for an A/B run (the config file
+    // cannot: title defaults replace global values). EDEN_FENCE 0-3 = Default/Immediate/Balanced/
+    // Accurate, EDEN_GPU_ACCURACY 0/1 = Low/High, EDEN_REACTIVE 0/1.
+    if (const char* const v = std::getenv("EDEN_FENCE"); v != nullptr) {
+        Settings::values.gpu_fence_behavior.SetValue(
+            static_cast<Settings::GpuFenceBehavior>(std::atoi(v)));
+        LOG_INFO(Frontend, "gpu fence behavior forced to {} by EDEN_FENCE", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_GPU_ACCURACY"); v != nullptr) {
+        Settings::values.gpu_accuracy.SetValue(static_cast<Settings::GpuAccuracy>(std::atoi(v)));
+        LOG_INFO(Frontend, "gpu accuracy forced to {} by EDEN_GPU_ACCURACY", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_BINDLESS_MAX"); v != nullptr) {
+        Settings::values.bindless_table_max_by_title = static_cast<u32>(std::atoi(v));
+        LOG_INFO(Frontend, "bindless table max forced to {} by EDEN_BINDLESS_MAX", std::atoi(v));
+    }
+    if (const char* const v = std::getenv("EDEN_REACTIVE"); v != nullptr) {
+        Settings::values.use_reactive_flushing.SetValue(std::atoi(v) != 0);
+        LOG_INFO(Frontend, "reactive flushing forced to {} by EDEN_REACTIVE", std::atoi(v));
+    }
     // Same reasoning for the video decoder: a title that dies inside a cutscene needs the CPU
     // path tried against the GPU one, and the config is not a reliable place to say so.
     // 0 = off, 1 = CPU, 2 = GPU.
@@ -1022,9 +1066,10 @@ void Iterate(Core::System& system, InputCommon::InputSubsystem& input_subsystem)
         next_perf = now + std::chrono::seconds(5);
         const auto results = system.GetAndResetPerfStats();
         if (results.average_game_fps > 0.0) {
-            LOG_INFO(Frontend, "perf: {:.1f} game fps, {:.0f}% speed, {:.2f} ms/frame",
+            LOG_INFO(Frontend,
+                     "perf: {:.1f} game fps, {:.0f}% speed, {:.2f} ms/frame, worst gap {:.0f} ms",
                      results.average_game_fps, results.emulation_speed * 100.0,
-                     results.frametime * 1000.0);
+                     results.frametime * 1000.0, results.worst_frame_gap * 1000.0);
         }
     }
     if (g_screenshot_requested.exchange(false)) {

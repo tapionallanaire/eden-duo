@@ -48,6 +48,7 @@ add_library(
     elf.h
     error.cpp
     error.h
+    event_wait.h
     fiber.cpp
     fiber.h
     fixed_point.h
@@ -72,6 +73,7 @@ add_library(
     input.h
     intrusive_red_black_tree.h
     literals.h
+    log_ring.h
     logging.cpp
     logging.h
     lz4_compression.cpp
@@ -81,6 +83,8 @@ add_library(
     memory_detect.h
     multi_level_page_table.cpp
     multi_level_page_table.h
+    nx2_sampler.cpp
+    nx2_sampler.h
     overflow.h
     page_table.cpp
     page_table.h
@@ -96,6 +100,7 @@ add_library(
     ${CMAKE_CURRENT_BINARY_DIR}/scm_rev.cpp
     scm_rev.h
     scope_exit.h
+    spin_recursive_mutex.h
     scratch_buffer.h
     settings.cpp
     settings.h
@@ -120,6 +125,8 @@ add_library(
     swap.h
     thread.cpp
     thread.h
+    driver_shader_cache.cpp
+    driver_shader_cache.h
     adpf.cpp
     adpf.h
     thread_queue_list.h
@@ -137,21 +144,22 @@ add_library(
     uuid.cpp
     uuid.h
     vector_math.h
-    zbic_compression.cpp
-    zbic_compression.h
     zstd_compression.cpp
     zstd_compression.h
     fs/ryujinx_compat.h fs/ryujinx_compat.cpp
     fs/symlink.h fs/symlink.cpp
     cpu_features.cpp
     cpu_features.h
-    httplib.h
     net/net.h net/net.cpp
     container/unordered_map.h container/unordered_set.h)
 
-set_source_files_properties(zbic_compression.cpp PROPERTIES
-    INCLUDE_DIRECTORIES "${ZBIC_INCLUDE_DIR}"
-    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>")
+add_library(zbic_compression STATIC zbic_compression.cpp zbic_compression.h)
+target_link_libraries(zbic_compression PRIVATE zbic::zbic)
+target_compile_options(zbic_compression PRIVATE
+    "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>"
+    "$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>")
+
+target_link_libraries(common PUBLIC zbic_compression)
 
 if(WIN32)
     target_sources(common PRIVATE windows/timer_resolution.cpp
@@ -234,18 +242,18 @@ if(CXX_CLANG)
 endif()
 
 if (BOOST_NO_HEADERS)
-    target_link_libraries(common PUBLIC Boost::algorithm Boost::heap Boost::icl Boost::pool)
+    target_link_libraries(common PUBLIC Boost::algorithm Boost::heap Boost::icl Boost::pool Boost::asio)
 else()
     target_link_libraries(common PUBLIC Boost::headers)
 endif()
-target_link_libraries(common PRIVATE OpenSSL::SSL)
-target_link_libraries(common PUBLIC Boost::filesystem Boost::context httplib::httplib nlohmann_json::nlohmann_json)
+target_link_libraries(common PRIVATE OpenSSL::SSL hydro::carbon jacinth::jacinth)
+target_link_libraries(common PUBLIC Boost::filesystem Boost::context)
 
 if (lz4_ADDED)
     target_include_directories(common PRIVATE ${lz4_SOURCE_DIR}/lib)
 endif()
 
-target_link_libraries(common PUBLIC fmt::fmt stb::headers Threads::Threads)
+target_link_libraries(common PUBLIC stb::headers Threads::Threads)
 target_link_libraries(common PRIVATE lz4::lz4 zstd::zstd)
 
 # Please refer to src/common/demangle.cpp

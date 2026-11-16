@@ -7,6 +7,7 @@ import android.annotation.SuppressLint
 import android.os.Build
 import android.widget.Toast
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.duo.DuoUpdates
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.activities.EmulationActivity
@@ -510,6 +511,7 @@ class SettingsFragmentPresenter(
             add(IntSetting.FAST_CPU_TIME.key)
             add(IntSetting.FAST_GPU_TIME.key)
             add(BooleanSetting.CORE_SYNC_CORE_SPEED.key)
+            add(BooleanSetting.ENABLE_CHEATS_BY_DEFAULT.key)
 
             add(IntSetting.MEMORY_LAYOUT.key)
             add(BooleanSetting.USE_CUSTOM_CPU_TICKS.key)
@@ -533,6 +535,7 @@ class SettingsFragmentPresenter(
                 add(IntSetting.FSR_SHARPENING_SLIDER.key)
             }
             add(IntSetting.RENDERER_ANTI_ALIASING.key)
+            add(IntSetting.RENDERER_DLSS_REPLACEMENT.key)
 
             add(HeaderSetting(R.string.advanced))
 
@@ -554,7 +557,6 @@ class SettingsFragmentPresenter(
             add(HeaderSetting(R.string.hacks))
 
             add(BooleanSetting.SKIP_CPU_INNER_INVALIDATION.key)
-            add(BooleanSetting.NCE_RUNTIME_NRO_PATCH.key)
             add(BooleanSetting.FIX_BLOOM_EFFECTS.key)
             add(BooleanSetting.FIX_FP16_DENORMALS.key)
             add(BooleanSetting.EMULATE_BGR565.key)
@@ -576,7 +578,10 @@ class SettingsFragmentPresenter(
             add(IntSetting.VERTICAL_ALIGNMENT.key)
             add(BooleanSetting.PICTURE_IN_PICTURE.key)
 
-            org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            // Eden Duo: Second Screen settings only exist on a device that has a second screen.
+            if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(context)) {
+                org.yuzu.yuzu_emu.duo.SecondScreenSettings.addTo(this, settingsViewModel.game, context)
+            }
         }
     }
 
@@ -1350,9 +1355,10 @@ class SettingsFragmentPresenter(
             add(HeaderSetting(R.string.app_settings))
             add(IntSetting.APP_LANGUAGE.key)
 
-            if (NativeLibrary.isUpdateCheckerEnabled()) {
+            if (NativeLibrary.isUpdateCheckerEnabled() || DuoUpdates.enabled(YuzuApplication.appContext)) {
                 add(BooleanSetting.ENABLE_UPDATE_CHECKS.key)
             }
+            org.yuzu.yuzu_emu.duo.DuoUpdater.addTo(this, activity) // Eden Duo's own releases
 
             add(BooleanSetting.ENABLE_QUICK_SETTINGS.key)
             add(BooleanSetting.INVERT_CONFIRM_BACK_CONTROLLER_BUTTONS.key)

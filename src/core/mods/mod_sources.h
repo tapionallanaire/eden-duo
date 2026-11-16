@@ -62,6 +62,13 @@ struct AssetSource {
     /// Directory source, runtime 16: when open_dir gave nothing, open again on an ask at least
     /// this many milliseconds later. Negative: never (the null root is kept for the session).
     s64 retry_ms{-1};
+    /// Runtime 23: byte sources only. Whether a module's read_romfs may read it (whole, then
+    /// sliced by offset). Off by default: "module:" is the module's own output, never its input.
+    bool module_readable{false};
+    /// Byte sources only (optional): bytes [offset, offset+size) of `src` into `out`, or the
+    /// whole size when `out` is null -- so a large byte source (a 20 MiB font) is not copied
+    /// whole for every chunk a module reads. Without it ReadRange reads whole and slices.
+    std::function<size_t(const std::string& src, u64 offset, void* out, size_t size)> read_range;
 };
 
 class AssetSources {
@@ -81,6 +88,8 @@ public:
     [[nodiscard]] bool Known(std::string_view src) const;
     /// Whether `src` names a registered directory source (one Open/Root can serve).
     [[nodiscard]] bool IsDirectorySource(std::string_view src) const;
+    /// Runtime 23: whether `src` names a byte source a module's read_romfs may read.
+    [[nodiscard]] bool IsModuleReadableByteSource(std::string_view src) const;
     /// Whether the source is usable: a byte source, or a directory source whose root opens.
     /// Opens the root on first ask. False for an unknown prefix.
     [[nodiscard]] bool Available(std::string_view src);

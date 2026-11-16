@@ -20,6 +20,7 @@ import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.DocumentFileAccess
 import org.yuzu.yuzu_emu.utils.DualScreenModRepository
 import org.yuzu.yuzu_emu.utils.DualScreenModStatus
+import org.yuzu.yuzu_emu.utils.Log
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,10 +58,12 @@ class DualScreenLibraryState(
         }
     }
 
+    /** The titles this APK shipped with; a GitHub answer never removes them. */
+    private val bundledTitleIds = YuzuApplication.appContext.resources
+        .getStringArray(R.array.dual_screen_supported_title_ids).toSet()
     private val _dualScreenTitleIds = MutableStateFlow(
-        preferences.getStringSet(DUAL_SCREEN_TITLE_IDS, null)?.toSet()
-            ?: YuzuApplication.appContext.resources
-                .getStringArray(R.array.dual_screen_supported_title_ids).toSet()
+        (preferences.getStringSet(DUAL_SCREEN_TITLE_IDS, null)?.toSet() ?: emptySet()) +
+            bundledTitleIds
     )
     val dualScreenTitleIds = _dualScreenTitleIds.asStateFlow()
     private val _dualScreenInstallStates = MutableStateFlow(emptyMap<String, DualScreenModStatus.State>())
@@ -71,6 +74,8 @@ class DualScreenLibraryState(
     }.getOrDefault(emptyMap())
 
     fun refreshInstalledCompanions() {
+        // One screen: no companion to install, so no add-on folder scans.
+        if (DuoCapability.isSingleScreen(YuzuApplication.appContext)) return
         scope.launch {
             statusJob?.cancel()
             statusJob = scope.launch {
@@ -95,6 +100,10 @@ class DualScreenLibraryState(
                     }
                 }
                 _dualScreenInstallStates.value = states
+                Log.info(
+                    "[DualScreen] install states: ${states.size} supported of ${library.size} " +
+                        "games; " + states.entries.groupingBy { it.value }.eachCount()
+                )
             }
         }
     }
@@ -104,6 +113,8 @@ class DualScreenLibraryState(
 
     /** Show cached support immediately and refresh once per minute when the library opens. */
     fun refreshDualScreenSupport(force: Boolean = false) {
+        // One screen: no badges, filter or section to feed, so no GitHub catalog request.
+        if (DuoCapability.isSingleScreen(YuzuApplication.appContext)) return
         refreshInstalledCompanions()
         val now = android.os.SystemClock.elapsedRealtime()
         if ((!force && lastCatalogAttempt != 0L && now - lastCatalogAttempt < 60_000L) ||
@@ -113,11 +124,33 @@ class DualScreenLibraryState(
         }
         lastCatalogAttempt = now
         scope.launch {
+            // Names/covers for "not in your library": independent of the release list, so a
+            // failed release fetch does not hold back a new companion's tile.
+            withContext(Dispatchers.IO) {
+                runCatching { CompanionCatalog.refreshOnline() }.onFailure {
+                    Log.warning("[DualScreen] online catalog refresh failed: ${it.message}")
+                }
+            }
             try {
                 val releases = withContext(Dispatchers.IO) { DualScreenModRepository.fetchAll() }
                 val latest = releases.groupBy { DualScreenModRepository.titleIdForAsset(it.assetName) }
                     .filterKeys { it != null }.mapValues { it.value.first() }
-                val ids = latest.keys.filterNotNull().toSet()
+                val fetched = latest.keys.filterNotNull().toSet()
+                // GitHub's unauthenticated release list sometimes answers 200 with an empty
+                // page; taking that as "no companions" cleared every badge and the "not in
+                // your library" section, so an empty answer keeps the last catalog.
+                if (fetched.isEmpty()) {
+                    Log.warning(
+                        "[DualScreen] GitHub returned ${releases.size} releases and no companion; " +
+                            "keeping ${_dualScreenTitleIds.value.size} cached titles"
+                    )
+                    return@launch
+                }
+                val ids = fetched + bundledTitleIds
+                Log.info(
+                    "[DualScreen] catalog: ${releases.size} releases, ${fetched.size} titles " +
+                        "online, ${ids.size} with the bundled list"
+                )
                 latestVersions = latest.entries.mapNotNull { (id, release) ->
                     DualScreenModStatus.releaseVersion(release)?.let { id!! to it }
                 }.toMap()
@@ -127,8 +160,9 @@ class DualScreenLibraryState(
                 refreshInstalledCompanions()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // Keep the last successful catalog when offline or GitHub is unavailable.
+                Log.warning("[DualScreen] catalog refresh failed: ${e.message}")
             } finally {
                 catalogRefreshing.set(false)
             }

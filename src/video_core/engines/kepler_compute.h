@@ -7,18 +7,30 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
+#include <memory>
 #include <optional>
+#include <span>
+#include <unordered_set>
 #include <vector>
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/engine_upload.h"
+#include "video_core/game_dlss_status.h"
+#include "video_core/macro.h"
+#include "video_core/native_qmd.h"
+#include "video_core/split_write_tracker.h"
 #include "video_core/textures/texture.h"
 
 namespace Core {
 class System;
+}
+
+namespace VideoCommon {
+class GpuSplit;
 }
 
 namespace Tegra {
@@ -30,6 +42,14 @@ class RasterizerInterface;
 }
 
 namespace Tegra::Engines {
+
+/// Draws left to trace after an upscale fallback (debug aid).
+extern std::atomic<u32> g_nx2_trace_draws_after_upscale;
+
+/// Colour target 0 of the latest depth-tested 3D draw to a float target (the scene image), and its
+/// size as width << 32 | height. Star Fox's cutscene network reads the frame drawn there.
+extern std::atomic<u64> g_nx2_scene_target;
+extern std::atomic<u64> g_nx2_scene_target_size;
 
 /**
  * This Engine is known as GK104_Compute. Documentation can be found in:
@@ -50,6 +70,34 @@ public:
 
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
+
+    /// The channel's MME data RAM, shared with its 3D engine.
+    void SetNativeDataRam(std::array<u32, 0xc00>* data_ram) {
+        native_data_ram = data_ram;
+    }
+    void SetNativeMacroMode(MacroEngine* shared_macro, std::span<u32> positions,
+                            NativeMacroContext* context = nullptr) {
+        if (native_context != context)
+            native_compute_uploaded = false;
+        native_context = context;
+        native_mode = shared_macro != nullptr;
+        upload_state.SetNativePartialTransfers(native_mode);
+        native_macro = shared_macro;
+        native_macro_positions = positions;
+        if (native_mode) {
+            execution_mask.set();
+            for (u32 m = 0; m < native_plain_methods.size(); ++m) {
+                if (native_plain_methods[m]) {
+                    execution_mask[m] = false;
+                }
+            }
+        } else {
+            execution_mask.reset();
+            execution_mask[KEPLER_COMPUTE_REG_INDEX(exec_upload)] = true;
+            execution_mask[KEPLER_COMPUTE_REG_INDEX(data_upload)] = true;
+            execution_mask[KEPLER_COMPUTE_REG_INDEX(launch)] = true;
+        }
+    }
 
     static constexpr std::size_t NumConstBuffers = 8;
 
@@ -202,16 +250,183 @@ public:
                   "KeplerCompute LaunchParams has wrong size");
 
     /// Write the value to the register identified by method.
-    void CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) override;
+    void CallMethod(Core::System& system, u32 method, u32 method_argument,
+                    bool is_last_call) override;
+
+    void CallStateMethod(Core::System& system, u32 method, u32 method_argument) override;
 
     /// Write multiple values to the register identified by method.
-    void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount, u32 methods_pending) override;
+    void CallMultiMethod(Core::System& system, u32 method, const u32* base_start, u32 amount,
+                         u32 methods_pending) override;
 
     std::optional<GPUVAddr> GetIndirectComputeAddress() const {
         return indirect_compute;
     }
 
+    bool IsNativeMode() const {
+        return native_mode;
+    }
+    /// NVIDIA DLSS (DLAA and Super Resolution) in place of Ocarina of Time's post-tonemap
+    /// anti-aliasing / upscaling (ocarina_upscale.h), when the setting is on: true when it
+    /// replaced this dispatch (the network's last pass).
+    bool ProcessOcarinaUpscale(u64 program_id, u64 native_key, u64 shader_hash);
+    /// Whether the current native dispatch belongs to a recognized game DLSS evaluation.
+    bool IsDlssDispatch() const {
+        return native_mode && dlss_chain.active;
+    }
+    /// Whether the matrix multiplies (tensor-core instructions) of the program being dispatched
+    /// are emulated: in a game DLSS evaluation when the game's own network may draw, and always
+    /// for Donkey Kong Bananza and Ocarina of Time.
+    [[nodiscard]] bool EmulatesNativeTensorPrograms() const;
+    /// Whether those matrix multiplies use the compact software form (one shared helper per
+    /// program) instead of the inline expansion: Ocarina of Time's network.
+    [[nodiscard]] bool UsesCompactTensorPrograms() const;
+
+    /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
+    /// the front instead of CallMethod for native compute engines: runs their macros and macro
+    /// uploads against a copy of the registers and sends the register writes to the back.
+    bool FrontRunsMacros() const {
+        return native_mode;
+    }
+    void FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                         u32 argument, bool is_last_call, const GPUVAddr* segment);
+    void FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit& split, u32 method,
+                              const u32* base_start, u32 amount, u32 methods_pending,
+                              const GPUVAddr* segment);
+
 private:
+    struct FrontState;
+    FrontState& Front(VideoCommon::GpuSplit& split);
+    void ReleaseFront();
+    void FrontApply(FrontState& state, u32 method, u32 argument);
+    MacroEngine& FrontMacroEngine(FrontState& state);
+    std::span<u32> FrontMacroPositions(FrontState& state);
+    void FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split, FrontState& state);
+    /// What a method sent from the front may write on the back (GpuSplit::Effect).
+    VideoCommon::SplitWriteTracker::Effect FrontEffect(u32 method) const;
+    /// After sending it: the memory it writes, for the front's reads.
+    void FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& state, u32 method);
+    // shared_ptr: FrontState is defined after the constructor in the .cpp (libc++ needs it complete)
+    std::shared_ptr<FrontState> front;
+    bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
+
+    bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
+    void ProcessNativeReportSemaphore(u32 argument);
+    void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
+    bool RememberDlssMotionVectors();
+    bool IsDlssOutputPass();
+    bool FinishDlssEvaluation();
+    void CheckDlssNetwork();
+    [[nodiscard]] VideoCore::GameDlssReason GameDlssBlocker() const;
+    void UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReason blocker);
+    const std::pair<std::vector<u32>, std::vector<u32>>& NativeImageHandles(GPUVAddr program);
+    bool UpscaleInsteadOfNativeProgram();
+    void RememberNativeUpscaleInput();
+    bool ReadConstBufferWords(u32 slot, std::vector<u32>& words) const;
+    void FollowPhotoUpscale();
+    bool UpscaleFromConstBuffers();
+    bool CopySceneForStarFoxCutsceneNetwork();
+
+    /// This frame's DLSS evaluation (Fortune's Weave): whether its passes all ran, and whether
+    /// the game's own network output is shown instead of the replacement upscale.
+    struct DlssChain {
+        bool active{};
+        u32 rejected{};
+        u32 clean_evaluations{};
+        bool native{};
+        /// Health checks of the network's output against its input (CheckDlssNetwork): whether
+        /// this backend has them, good and bad results in a row, and why the network failed them
+        /// (None while it hasn't; then the replacement upscale draws the output for the session).
+        bool checked{};
+        u32 good_checks{};
+        u32 bad_checks{};
+        VideoCore::GameDlssReason failure{};
+        /// Programs of evaluations that reached their output pass; they no longer run while the
+        /// network can't be shown.
+        std::unordered_set<GPUVAddr> programs;
+        /// This evaluation's programs and dispatches so far. Its programs join `programs` only
+        /// at its output pass, so compute work after a look-alike first pass keeps running.
+        std::unordered_set<GPUVAddr> pending;
+        u32 dispatches{};
+        u32 evaluations{};
+        /// What the Graphics tab was last told.
+        VideoCore::GameDlssStatus status{};
+    } dlss_chain;
+
+    /// Ocarina of Time's movie network: a pass that reads one colour image and stores none
+    /// retains its input here; the pass that stores an image upscaling it is replaced by a plain
+    /// copy (the network's matrix passes cost seconds per frame on Pascal-class GPUs). Cleared
+    /// after the copy.
+    std::optional<Texture::TICEntry> native_upscale_input;
+    /// Native dispatches left to skip while a retained network is being replaced (bounded, so a
+    /// non-network pass cannot silence the engine forever).
+    u32 network_skip_remaining{};
+    /// The tonemapped frame Ocarina of Time's anti-aliasing reads (ProcessOcarinaUpscale).
+    std::optional<Texture::TICEntry> ocarina_input;
+    /// The dispatch after the input pass is taken for the output pass.
+    bool ocarina_expect_output{};
+
+    /// Mario Kart World's docked photo mode upscales 2560x1440 to 3840x2160 with a tensor-core
+    /// network whose passes can't run. After its first rejected pass the next dispatches are
+    /// searched for a pass that has both images in its constant buffers.
+    struct PhotoUpscale {
+        u32 window_left{};
+        u32 evaluations{};
+        GPUVAddr last_input{};
+        GPUVAddr last_output{};
+        /// The pass that has both images and where in its constant buffer, once found.
+        GPUVAddr output_program{};
+        u32 slot{};
+        u32 input_offset{};
+        u32 output_offset{};
+    } photo_upscale;
+
+    /// Motion vectors and depth of Fire Emblem: Fortune's Weave's DLSS evaluation, from its first
+    /// pass (run earlier in the frame than the network pass the stand-in replaces), with the input
+    /// colour image and camera jitter they go with.
+    std::optional<Texture::TICEntry> dlss_motion_vectors;
+    std::optional<Texture::TICEntry> dlss_depth;
+    GPUVAddr dlss_motion_color{};
+    std::array<f32, 2> dlss_jitter{};
+    struct RejectedComputeProgram {
+        std::string message;
+        bool emulates_tensor{};
+        bool matrix_multiply{};
+        u32 upscale_failures{};
+    };
+    std::unordered_map<GPUVAddr, RejectedComputeProgram> rejected_compute_programs;
+    bool ProcessNativeMethod(Core::System& system, u32 method, u32 argument, bool is_last_call);
+    NativeQmdScheduler native_qmd;
+    std::array<u32, 0xc00>* native_data_ram{};
+    bool native_mme_dumped{};
+    std::optional<u32> native_executing_macro_logged;
+    bool native_mode{};
+
+public:
+    /// Whether this method may write guest memory: dispatches, uploads and reports. Plain native
+    /// state does not.
+    [[nodiscard]] bool MayWriteMemory(u32 method) const {
+        if (method >= native_plain_methods.size()) {
+            return true;
+        }
+        return native_mode ? !native_plain_methods[method]
+                           : method < execution_mask.size() && execution_mask[method];
+    }
+
+private:
+    NativeMacroContext* native_context{};
+    bool native_compute_uploaded{};
+    MacroEngine* native_macro{};
+    std::array<u32, 0x1000> native_registers{};
+    /// Native methods that only store their value (no macro, QMD, upload, semaphore or code
+    /// side effect): CallMethod writes those directly.
+    std::bitset<0xe00> native_plain_methods;
+    std::span<u32> native_macro_positions;
+    std::vector<u32> native_parameters;
+    std::vector<u32> native_memo_parameters; ///< The current call's parameters, for the memo
+    std::optional<u32> native_executing_macro;
+    u32 native_bind_pointer{};
+
     void ProcessLaunch();
 
     void ConsumeSinkImpl(Core::System& system) override;

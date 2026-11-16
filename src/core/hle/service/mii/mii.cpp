@@ -22,25 +22,51 @@
 
 namespace Service::Mii {
 
-std::optional<ServiceFrameworkBase::FunctionInfoBase> IStaticService::FindRequest(u32 key) {
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, D<&IStaticService::GetDatabaseService>, "GetDatabaseService"}
-    );
-    return HandlerTableGenerateWithFind(key, functions);
-}
-
 class IDatabaseService final : public ServiceFramework<IDatabaseService> {
 public:
-    explicit IDatabaseService(Core::System& system_, std::shared_ptr<MiiManager> mii_manager, bool is_system_)
-        : ServiceFramework{system_, "IDatabaseService"}
-        , manager{mii_manager}
-        , is_system{is_system_} {
-        m_set_sys = system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>("set:sys", true);
-        manager->Initialize(metadata);
-    }
+    explicit IDatabaseService(Core::System& system_, std::shared_ptr<MiiManager> mii_manager,
+                              bool is_system_)
+        : ServiceFramework{system_, "IDatabaseService"}, manager{mii_manager}, is_system{
+                                                                                   is_system_} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, D<&IDatabaseService::IsUpdated>, "IsUpdated"},
+            {1, D<&IDatabaseService::IsFullDatabase>, "IsFullDatabase"},
+            {2, D<&IDatabaseService::GetCount>, "GetCount"},
+            {3, D<&IDatabaseService::Get>, "Get"},
+            {4, D<&IDatabaseService::Get1>, "Get1"},
+            {5, D<&IDatabaseService::UpdateLatest>, "UpdateLatest"},
+            {6, D<&IDatabaseService::BuildRandom>, "BuildRandom"},
+            {7, D<&IDatabaseService::BuildDefault>, "BuildDefault"},
+            {8, D<&IDatabaseService::Get2>, "Get2"},
+            {9, D<&IDatabaseService::Get3>, "Get3"},
+            {10, D<&IDatabaseService::UpdateLatest1>, "UpdateLatest1"},
+            {11, D<&IDatabaseService::FindIndex>, "FindIndex"},
+            {12, D<&IDatabaseService::Move>, "Move"},
+            {13, D<&IDatabaseService::AddOrReplace>, "AddOrReplace"},
+            {14, D<&IDatabaseService::Delete>, "Delete"},
+            {15, D<&IDatabaseService::DestroyFile>, "DestroyFile"},
+            {16, D<&IDatabaseService::DeleteFile>, "DeleteFile"},
+            {17, D<&IDatabaseService::Format>, "Format"},
+            {18, &IDatabaseService::StubReplyZeroed, "Import"},
+            {19, &IDatabaseService::StubReplyZeroed, "Export"},
+            {20, D<&IDatabaseService::IsBrokenDatabaseWithClearFlag>, "IsBrokenDatabaseWithClearFlag"},
+            {21, D<&IDatabaseService::GetIndex>, "GetIndex"},
+            {22, D<&IDatabaseService::SetInterfaceVersion>, "SetInterfaceVersion"},
+            {23, D<&IDatabaseService::Convert>, "Convert"},
+            {24, D<&IDatabaseService::ConvertCoreDataToCharInfo>, "ConvertCoreDataToCharInfo"},
+            {25, D<&IDatabaseService::ConvertCharInfoToCoreData>, "ConvertCharInfoToCoreData"},
+            {26,  D<&IDatabaseService::Append>, "Append"},
+            {27, &IDatabaseService::StubReplyZeroed, "Unknown27"},
+            {28, &IDatabaseService::StubReplyZeroed, "Unknown28"},
+        };
+        // clang-format on
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
+        RegisterHandlers(functions);
+
+        m_set_sys = system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>(
+            "set:sys", true);
+        manager->Initialize(metadata);
     }
 
 private:
@@ -97,14 +123,16 @@ private:
         R_RETURN(manager->UpdateLatest(metadata, *out_char_info, char_info, source_flag));
     }
 
-    Result BuildRandom(Out<CharInfo> out_char_info, Age age, Gender gender, Race race) {
+    // Age, Gender and Race are u8 enums, but the request passes each one as a 32-bit word.
+    Result BuildRandom(Out<CharInfo> out_char_info, u32 age, u32 gender, u32 race) {
         LOG_DEBUG(Service_Mii, "called with age={}, gender={}, race={}", age, gender, race);
 
-        R_UNLESS(age <= Age::All, ResultInvalidArgument);
-        R_UNLESS(gender <= Gender::All, ResultInvalidArgument);
-        R_UNLESS(race <= Race::All, ResultInvalidArgument);
+        R_UNLESS(age <= static_cast<u32>(Age::All), ResultInvalidArgument);
+        R_UNLESS(gender <= static_cast<u32>(Gender::All), ResultInvalidArgument);
+        R_UNLESS(race <= static_cast<u32>(Race::All), ResultInvalidArgument);
 
-        manager->BuildRandom(*out_char_info, age, gender, race);
+        manager->BuildRandom(*out_char_info, static_cast<Age>(age), static_cast<Gender>(gender),
+                             static_cast<Race>(race));
 
         R_SUCCEED();
     }
@@ -264,45 +292,23 @@ private:
         R_RETURN(manager->Append(metadata, char_info));
     }
 
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, D<&IDatabaseService::IsUpdated>, "IsUpdated"},
-        FunctionInfo{1, D<&IDatabaseService::IsFullDatabase>, "IsFullDatabase"},
-        FunctionInfo{2, D<&IDatabaseService::GetCount>, "GetCount"},
-        FunctionInfo{3, D<&IDatabaseService::Get>, "Get"},
-        FunctionInfo{4, D<&IDatabaseService::Get1>, "Get1"},
-        FunctionInfo{5, D<&IDatabaseService::UpdateLatest>, "UpdateLatest"},
-        FunctionInfo{6, D<&IDatabaseService::BuildRandom>, "BuildRandom"},
-        FunctionInfo{7, D<&IDatabaseService::BuildDefault>, "BuildDefault"},
-        FunctionInfo{8, D<&IDatabaseService::Get2>, "Get2"},
-        FunctionInfo{9, D<&IDatabaseService::Get3>, "Get3"},
-        FunctionInfo{10, D<&IDatabaseService::UpdateLatest1>, "UpdateLatest1"},
-        FunctionInfo{11, D<&IDatabaseService::FindIndex>, "FindIndex"},
-        FunctionInfo{12, D<&IDatabaseService::Move>, "Move"},
-        FunctionInfo{13, D<&IDatabaseService::AddOrReplace>, "AddOrReplace"},
-        FunctionInfo{14, D<&IDatabaseService::Delete>, "Delete"},
-        FunctionInfo{15, D<&IDatabaseService::DestroyFile>, "DestroyFile"},
-        FunctionInfo{16, D<&IDatabaseService::DeleteFile>, "DeleteFile"},
-        FunctionInfo{17, D<&IDatabaseService::Format>, "Format"},
-        FunctionInfo{18, nullptr, "Import"},
-        FunctionInfo{19, nullptr, "Export"},
-        FunctionInfo{20, D<&IDatabaseService::IsBrokenDatabaseWithClearFlag>, "IsBrokenDatabaseWithClearFlag"},
-        FunctionInfo{21, D<&IDatabaseService::GetIndex>, "GetIndex"},
-        FunctionInfo{22, D<&IDatabaseService::SetInterfaceVersion>, "SetInterfaceVersion"},
-        FunctionInfo{23, D<&IDatabaseService::Convert>, "Convert"},
-        FunctionInfo{24, D<&IDatabaseService::ConvertCoreDataToCharInfo>, "ConvertCoreDataToCharInfo"},
-        FunctionInfo{25, D<&IDatabaseService::ConvertCharInfoToCoreData>, "ConvertCharInfoToCoreData"},
-        FunctionInfo{26,  D<&IDatabaseService::Append>, "Append"}
-    );
-
     std::shared_ptr<MiiManager> manager = nullptr;
     DatabaseSessionMetadata metadata{};
     bool is_system{};
+
     std::shared_ptr<Service::Set::ISystemSettingsServer> m_set_sys;
 };
 
 IStaticService::IStaticService(Core::System& system_, const char* name_,
                                std::shared_ptr<MiiManager> mii_manager, bool is_system_)
     : ServiceFramework{system_, name_}, manager{mii_manager}, is_system{is_system_} {
+    // clang-format off
+    static const FunctionInfo functions[] = {
+        {0, D<&IStaticService::GetDatabaseService>, "GetDatabaseService"},
+    };
+    // clang-format on
+
+    RegisterHandlers(functions);
 }
 
 IStaticService::~IStaticService() = default;
@@ -322,10 +328,27 @@ std::shared_ptr<MiiManager> IStaticService::GetMiiManager() {
 
 class IImageDatabaseService final : public ServiceFramework<IImageDatabaseService> {
 public:
-    explicit IImageDatabaseService(Core::System& system_) : ServiceFramework{system_, "miiimg"} {}
+    explicit IImageDatabaseService(Core::System& system_) : ServiceFramework{system_, "miiimg"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, D<&IImageDatabaseService::Initialize>, "Initialize"},
+            {10, nullptr, "Reload"},
+            {11, D<&IImageDatabaseService::GetCount>, "GetCount"},
+            {12, nullptr, "IsEmpty"},
+            {13, nullptr, "IsFull"},
+            {14, nullptr, "GetAttribute"},
+            {15, nullptr, "LoadImage"},
+            {16, nullptr, "AddOrUpdateImage"},
+            {17, nullptr, "DeleteImages"},
+            {100, nullptr, "DeleteFile"},
+            {101, nullptr, "DestroyFile"},
+            {102, nullptr, "ImportFile"},
+            {103, nullptr, "ExportFile"},
+            {104, nullptr, "ForceInitialize"},
+        };
+        // clang-format on
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
+        RegisterHandlers(functions);
     }
 
 private:
@@ -342,23 +365,6 @@ private:
 
         R_SUCCEED();
     }
-
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, D<&IImageDatabaseService::Initialize>, "Initialize"},
-        FunctionInfo{10, nullptr, "Reload"},
-        FunctionInfo{11, D<&IImageDatabaseService::GetCount>, "GetCount"},
-        FunctionInfo{12, nullptr, "IsEmpty"},
-        FunctionInfo{13, nullptr, "IsFull"},
-        FunctionInfo{14, nullptr, "GetAttribute"},
-        FunctionInfo{15, nullptr, "LoadImage"},
-        FunctionInfo{16, nullptr, "AddOrUpdateImage"},
-        FunctionInfo{17, nullptr, "DeleteImages"},
-        FunctionInfo{100, nullptr, "DeleteFile"},
-        FunctionInfo{101, nullptr, "DestroyFile"},
-        FunctionInfo{102, nullptr, "ImportFile"},
-        FunctionInfo{103, nullptr, "ExportFile"},
-        FunctionInfo{104, nullptr, "ForceInitialize"}
-    );
 };
 
 void LoopProcess(Core::System& system) {

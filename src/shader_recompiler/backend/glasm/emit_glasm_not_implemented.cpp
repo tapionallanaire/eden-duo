@@ -97,4 +97,25 @@ void EmitGetInBoundsFromOp(EmitContext& ctx) {
     NotImplemented();
 }
 
+void EmitIsbeRead(EmitContext& ctx) {
+    NotImplemented();
+}
+
+void EmitIsbeWriteAttribute(EmitContext& ctx) {
+    NotImplemented();
+}
+
+void EmitIsbeWriteMapU8(EmitContext& ctx) {
+    NotImplemented();
+}
+
+void EmitIsbeWriteMapU32(EmitContext& ctx) {
+    NotImplemented();
+}
+
+void EmitTensorMulAdd(EmitContext& ctx, IR::Inst& inst, const IR::Value& a, const IR::Value& b,
+                      const IR::Value& c) {
+    NotImplemented();
+}
+
 } // namespace Shader::Backend::GLASM

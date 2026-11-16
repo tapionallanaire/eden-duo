@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <mutex>
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -42,207 +44,250 @@
 
 namespace Service::HID {
 
-std::optional<ServiceFrameworkBase::FunctionInfoBase> IHidServer::FindRequest(u32 key) {
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, C<&IHidServer::CreateAppletResource>, "CreateAppletResource"},
-        FunctionInfo{1, C<&IHidServer::ActivateDebugPad>, "ActivateDebugPad"},
-        FunctionInfo{11, C<&IHidServer::ActivateTouchScreen>, "ActivateTouchScreen"},
-        FunctionInfo{21, C<&IHidServer::ActivateMouse>, "ActivateMouse"},
-        FunctionInfo{26, C<&IHidServer::ActivateDebugMouse>, "ActivateDebugMouse"},
-        FunctionInfo{31, C<&IHidServer::ActivateKeyboard>, "ActivateKeyboard"},
-        FunctionInfo{32, C<&IHidServer::SendKeyboardLockKeyEvent>, "SendKeyboardLockKeyEvent"},
-        FunctionInfo{40, C<&IHidServer::AcquireXpadIdEventHandle>, "AcquireXpadIdEventHandle"},
-        FunctionInfo{41, C<&IHidServer::ReleaseXpadIdEventHandle>, "ReleaseXpadIdEventHandle"},
-        FunctionInfo{51, C<&IHidServer::ActivateXpad>, "ActivateXpad"},
-        FunctionInfo{55, C<&IHidServer::GetXpadIds>, "GetXpadIds"},
-        FunctionInfo{56, C<&IHidServer::ActivateJoyXpad>, "ActivateJoyXpad"},
-        FunctionInfo{58, C<&IHidServer::GetJoyXpadLifoHandle>, "GetJoyXpadLifoHandle"},
-        FunctionInfo{59, C<&IHidServer::GetJoyXpadIds>, "GetJoyXpadIds"},
-        FunctionInfo{60, C<&IHidServer::ActivateSixAxisSensor>, "ActivateSixAxisSensor"},
-        FunctionInfo{61, C<&IHidServer::DeactivateSixAxisSensor>, "DeactivateSixAxisSensor"},
-        FunctionInfo{62, C<&IHidServer::GetSixAxisSensorLifoHandle>, "GetSixAxisSensorLifoHandle"},
-        FunctionInfo{63, C<&IHidServer::ActivateJoySixAxisSensor>, "ActivateJoySixAxisSensor"},
-        FunctionInfo{64, C<&IHidServer::DeactivateJoySixAxisSensor>, "DeactivateJoySixAxisSensor"},
-        FunctionInfo{65, C<&IHidServer::GetJoySixAxisSensorLifoHandle>, "GetJoySixAxisSensorLifoHandle"},
-        FunctionInfo{66, C<&IHidServer::StartSixAxisSensor>, "StartSixAxisSensor"},
-        FunctionInfo{67, C<&IHidServer::StopSixAxisSensor>, "StopSixAxisSensor"},
-        FunctionInfo{68, C<&IHidServer::IsSixAxisSensorFusionEnabled>, "IsSixAxisSensorFusionEnabled"},
-        FunctionInfo{69, C<&IHidServer::EnableSixAxisSensorFusion>, "EnableSixAxisSensorFusion"},
-        FunctionInfo{70, C<&IHidServer::SetSixAxisSensorFusionParameters>, "SetSixAxisSensorFusionParameters"},
-        FunctionInfo{71, C<&IHidServer::GetSixAxisSensorFusionParameters>, "GetSixAxisSensorFusionParameters"},
-        FunctionInfo{72, C<&IHidServer::ResetSixAxisSensorFusionParameters>, "ResetSixAxisSensorFusionParameters"},
-        FunctionInfo{73, nullptr, "SetAccelerometerParameters"},
-        FunctionInfo{74, nullptr, "GetAccelerometerParameters"},
-        FunctionInfo{75, nullptr, "ResetAccelerometerParameters"},
-        FunctionInfo{76, nullptr, "SetAccelerometerPlayMode"},
-        FunctionInfo{77, nullptr, "GetAccelerometerPlayMode"},
-        FunctionInfo{78, nullptr, "ResetAccelerometerPlayMode"},
-        FunctionInfo{79, C<&IHidServer::SetGyroscopeZeroDriftMode>, "SetGyroscopeZeroDriftMode"},
-        FunctionInfo{80, C<&IHidServer::GetGyroscopeZeroDriftMode>, "GetGyroscopeZeroDriftMode"},
-        FunctionInfo{81, C<&IHidServer::ResetGyroscopeZeroDriftMode>, "ResetGyroscopeZeroDriftMode"},
-        FunctionInfo{82, C<&IHidServer::IsSixAxisSensorAtRest>, "IsSixAxisSensorAtRest"},
-        FunctionInfo{83, C<&IHidServer::IsFirmwareUpdateAvailableForSixAxisSensor>, "IsFirmwareUpdateAvailableForSixAxisSensor"},
-        FunctionInfo{84, C<&IHidServer::EnableSixAxisSensorUnalteredPassthrough>, "EnableSixAxisSensorUnalteredPassthrough"},
-        FunctionInfo{85, C<&IHidServer::IsSixAxisSensorUnalteredPassthroughEnabled>, "IsSixAxisSensorUnalteredPassthroughEnabled"},
-        FunctionInfo{86, nullptr, "StoreSixAxisSensorCalibrationParameter"},
-        FunctionInfo{87, C<&IHidServer::LoadSixAxisSensorCalibrationParameter>, "LoadSixAxisSensorCalibrationParameter"},
-        FunctionInfo{88, C<&IHidServer::GetSixAxisSensorIcInformation>, "GetSixAxisSensorIcInformation"},
-        FunctionInfo{89, C<&IHidServer::ResetIsSixAxisSensorDeviceNewlyAssigned>, "ResetIsSixAxisSensorDeviceNewlyAssigned"},
-        FunctionInfo{91, C<&IHidServer::ActivateGesture>, "ActivateGesture"},
-        FunctionInfo{92, C<&IHidServer::SetGestureOutputRanges>, "SetGestureOutputRanges"},
-        FunctionInfo{100, C<&IHidServer::SetSupportedNpadStyleSet>, "SetSupportedNpadStyleSet"},
-        FunctionInfo{101, C<&IHidServer::GetSupportedNpadStyleSet>, "GetSupportedNpadStyleSet"},
-        FunctionInfo{102, C<&IHidServer::SetSupportedNpadIdType>, "SetSupportedNpadIdType"},
-        FunctionInfo{103, C<&IHidServer::ActivateNpad>, "ActivateNpad"},
-        FunctionInfo{104, C<&IHidServer::DeactivateNpad>, "DeactivateNpad"},
-        FunctionInfo{106, C<&IHidServer::AcquireNpadStyleSetUpdateEventHandle>, "AcquireNpadStyleSetUpdateEventHandle"},
-        FunctionInfo{107, C<&IHidServer::DisconnectNpad>, "DisconnectNpad"},
-        FunctionInfo{108, C<&IHidServer::GetPlayerLedPattern>, "GetPlayerLedPattern"},
-        FunctionInfo{109, C<&IHidServer::ActivateNpadWithRevision>, "ActivateNpadWithRevision"},
-        FunctionInfo{120, C<&IHidServer::SetNpadJoyHoldType>, "SetNpadJoyHoldType"},
-        FunctionInfo{121, C<&IHidServer::GetNpadJoyHoldType>, "GetNpadJoyHoldType"},
-        FunctionInfo{122, C<&IHidServer::SetNpadJoyAssignmentModeSingleByDefault>, "SetNpadJoyAssignmentModeSingleByDefault"},
-        FunctionInfo{123, C<&IHidServer::SetNpadJoyAssignmentModeSingle>, "SetNpadJoyAssignmentModeSingle"},
-        FunctionInfo{124, C<&IHidServer::SetNpadJoyAssignmentModeDual>, "SetNpadJoyAssignmentModeDual"},
-        FunctionInfo{125, C<&IHidServer::MergeSingleJoyAsDualJoy>, "MergeSingleJoyAsDualJoy"},
-        FunctionInfo{126, C<&IHidServer::StartLrAssignmentMode>, "StartLrAssignmentMode"},
-        FunctionInfo{127, C<&IHidServer::StopLrAssignmentMode>, "StopLrAssignmentMode"},
-        FunctionInfo{128, C<&IHidServer::SetNpadHandheldActivationMode>, "SetNpadHandheldActivationMode"},
-        FunctionInfo{129, C<&IHidServer::GetNpadHandheldActivationMode>, "GetNpadHandheldActivationMode"},
-        FunctionInfo{130, C<&IHidServer::SwapNpadAssignment>, "SwapNpadAssignment"},
-        FunctionInfo{131, C<&IHidServer::IsUnintendedHomeButtonInputProtectionEnabled>, "IsUnintendedHomeButtonInputProtectionEnabled"},
-        FunctionInfo{132, C<&IHidServer::EnableUnintendedHomeButtonInputProtection>, "EnableUnintendedHomeButtonInputProtection"},
-        FunctionInfo{133, C<&IHidServer::SetNpadJoyAssignmentModeSingleWithDestination>, "SetNpadJoyAssignmentModeSingleWithDestination"},
-        FunctionInfo{134, C<&IHidServer::SetNpadAnalogStickUseCenterClamp>, "SetNpadAnalogStickUseCenterClamp"},
-        FunctionInfo{135, C<&IHidServer::SetNpadCaptureButtonAssignment>, "SetNpadCaptureButtonAssignment"},
-        FunctionInfo{136, C<&IHidServer::ClearNpadCaptureButtonAssignment>, "ClearNpadCaptureButtonAssignment"},
-        FunctionInfo{200, C<&IHidServer::GetVibrationDeviceInfo>, "GetVibrationDeviceInfo"},
-        FunctionInfo{201, C<&IHidServer::SendVibrationValue>, "SendVibrationValue"},
-        FunctionInfo{202, C<&IHidServer::GetActualVibrationValue>, "GetActualVibrationValue"},
-        FunctionInfo{203, C<&IHidServer::CreateActiveVibrationDeviceList>, "CreateActiveVibrationDeviceList"},
-        FunctionInfo{204, C<&IHidServer::PermitVibration>, "PermitVibration"},
-        FunctionInfo{205, C<&IHidServer::IsVibrationPermitted>, "IsVibrationPermitted"},
-        FunctionInfo{206, C<&IHidServer::SendVibrationValues>, "SendVibrationValues"},
-        FunctionInfo{207, C<&IHidServer::SendVibrationGcErmCommand>, "SendVibrationGcErmCommand"},
-        FunctionInfo{208, C<&IHidServer::GetActualVibrationGcErmCommand>, "GetActualVibrationGcErmCommand"},
-        FunctionInfo{209, C<&IHidServer::BeginPermitVibrationSession>, "BeginPermitVibrationSession"},
-        FunctionInfo{210, C<&IHidServer::EndPermitVibrationSession>, "EndPermitVibrationSession"},
-        FunctionInfo{211, C<&IHidServer::IsVibrationDeviceMounted>, "IsVibrationDeviceMounted"},
-        FunctionInfo{212, C<&IHidServer::SendVibrationValueInBool>, "SendVibrationValueInBool"},
-        FunctionInfo{300, C<&IHidServer::ActivateConsoleSixAxisSensor>, "ActivateConsoleSixAxisSensor"},
-        FunctionInfo{301, C<&IHidServer::StartConsoleSixAxisSensor>, "StartConsoleSixAxisSensor"},
-        FunctionInfo{302, C<&IHidServer::StopConsoleSixAxisSensor>, "StopConsoleSixAxisSensor"},
-        FunctionInfo{303, C<&IHidServer::ActivateSevenSixAxisSensor>, "ActivateSevenSixAxisSensor"},
-        FunctionInfo{304, C<&IHidServer::StartSevenSixAxisSensor>, "StartSevenSixAxisSensor"},
-        FunctionInfo{305, C<&IHidServer::StopSevenSixAxisSensor>, "StopSevenSixAxisSensor"},
-        FunctionInfo{306, C<&IHidServer::InitializeSevenSixAxisSensor>, "InitializeSevenSixAxisSensor"},
-        FunctionInfo{307, C<&IHidServer::FinalizeSevenSixAxisSensor>, "FinalizeSevenSixAxisSensor"},
-        FunctionInfo{308, nullptr, "SetSevenSixAxisSensorFusionStrength"},
-        FunctionInfo{309, nullptr, "GetSevenSixAxisSensorFusionStrength"},
-        FunctionInfo{310, C<&IHidServer::ResetSevenSixAxisSensorTimestamp>, "ResetSevenSixAxisSensorTimestamp"},
-        FunctionInfo{320, nullptr, "EnableNpadImu", MakeVersionGate({21,0,0})},
-        FunctionInfo{321, nullptr, "DisableNpadImu", MakeVersionGate({21,0,0})},
-        FunctionInfo{400, C<&IHidServer::IsUsbFullKeyControllerEnabled>, "IsUsbFullKeyControllerEnabled"},
-        FunctionInfo{401, nullptr, "EnableUsbFullKeyController"},
-        FunctionInfo{402, nullptr, "IsUsbFullKeyControllerConnected"},
-        FunctionInfo{403, nullptr, "HasBattery"},
-        FunctionInfo{404, nullptr, "HasLeftRightBattery"},
-        FunctionInfo{405, nullptr, "GetNpadInterfaceType"},
-        FunctionInfo{406, nullptr, "GetNpadLeftRightInterfaceType"},
-        FunctionInfo{407, nullptr, "GetNpadOfHighestBatteryLevel"},
-        FunctionInfo{408, nullptr, "GetNpadOfHighestBatteryLevelForJoyRight"},
-        FunctionInfo{500, C<&IHidServer::GetPalmaConnectionHandle>, "GetPalmaConnectionHandle"},
-        FunctionInfo{501, C<&IHidServer::InitializePalma>, "InitializePalma"},
-        FunctionInfo{502, C<&IHidServer::AcquirePalmaOperationCompleteEvent>, "AcquirePalmaOperationCompleteEvent"},
-        FunctionInfo{503, C<&IHidServer::GetPalmaOperationInfo>, "GetPalmaOperationInfo"},
-        FunctionInfo{504, C<&IHidServer::PlayPalmaActivity>, "PlayPalmaActivity"},
-        FunctionInfo{505, C<&IHidServer::SetPalmaFrModeType>, "SetPalmaFrModeType"},
-        FunctionInfo{506, C<&IHidServer::ReadPalmaStep>, "ReadPalmaStep"},
-        FunctionInfo{507, C<&IHidServer::EnablePalmaStep>, "EnablePalmaStep"},
-        FunctionInfo{508, C<&IHidServer::ResetPalmaStep>, "ResetPalmaStep"},
-        FunctionInfo{509, C<&IHidServer::ReadPalmaApplicationSection>, "ReadPalmaApplicationSection"},
-        FunctionInfo{510, C<&IHidServer::WritePalmaApplicationSection>, "WritePalmaApplicationSection"},
-        FunctionInfo{511, C<&IHidServer::ReadPalmaUniqueCode>, "ReadPalmaUniqueCode"},
-        FunctionInfo{512, C<&IHidServer::SetPalmaUniqueCodeInvalid>, "SetPalmaUniqueCodeInvalid"},
-        FunctionInfo{513, C<&IHidServer::WritePalmaActivityEntry>, "WritePalmaActivityEntry"},
-        FunctionInfo{514, C<&IHidServer::WritePalmaRgbLedPatternEntry>, "WritePalmaRgbLedPatternEntry"},
-        FunctionInfo{515, C<&IHidServer::WritePalmaWaveEntry>, "WritePalmaWaveEntry"},
-        FunctionInfo{516, C<&IHidServer::SetPalmaDataBaseIdentificationVersion>, "SetPalmaDataBaseIdentificationVersion"},
-        FunctionInfo{517, C<&IHidServer::GetPalmaDataBaseIdentificationVersion>, "GetPalmaDataBaseIdentificationVersion"},
-        FunctionInfo{518, C<&IHidServer::SuspendPalmaFeature>, "SuspendPalmaFeature"},
-        FunctionInfo{519, C<&IHidServer::GetPalmaOperationResult>, "GetPalmaOperationResult"},
-        FunctionInfo{520, C<&IHidServer::ReadPalmaPlayLog>, "ReadPalmaPlayLog"},
-        FunctionInfo{521, C<&IHidServer::ResetPalmaPlayLog>, "ResetPalmaPlayLog"},
-        FunctionInfo{522, C<&IHidServer::SetIsPalmaAllConnectable>, "SetIsPalmaAllConnectable"},
-        FunctionInfo{523, C<&IHidServer::SetIsPalmaPairedConnectable>, "SetIsPalmaPairedConnectable"},
-        FunctionInfo{524, C<&IHidServer::PairPalma>, "PairPalma"},
-        FunctionInfo{525, C<&IHidServer::SetPalmaBoostMode>, "SetPalmaBoostMode"},
-        FunctionInfo{526, C<&IHidServer::CancelWritePalmaWaveEntry>, "CancelWritePalmaWaveEntry"},
-        FunctionInfo{527, C<&IHidServer::EnablePalmaBoostMode>, "EnablePalmaBoostMode"},
-        FunctionInfo{528, C<&IHidServer::GetPalmaBluetoothAddress>, "GetPalmaBluetoothAddress"},
-        FunctionInfo{529, C<&IHidServer::SetDisallowedPalmaConnection>, "SetDisallowedPalmaConnection"},
-        FunctionInfo{1000, C<&IHidServer::SetNpadCommunicationMode>, "SetNpadCommunicationMode"},
-        FunctionInfo{1001, C<&IHidServer::GetNpadCommunicationMode>, "GetNpadCommunicationMode"},
-        FunctionInfo{1002, C<&IHidServer::SetTouchScreenConfiguration>, "SetTouchScreenConfiguration"},
-        FunctionInfo{1003, C<&IHidServer::IsFirmwareUpdateNeededForNotification>, "IsFirmwareUpdateNeededForNotification"},
-        FunctionInfo{1004, C<&IHidServer::SetTouchScreenResolution>, "SetTouchScreenResolution"},
-        FunctionInfo{1270, nullptr, "DeleteButtonConfigStorageRight"},
-        FunctionInfo{1271, nullptr, "IsUsingCustomButtonConfig"},
-        FunctionInfo{1272, nullptr, "IsAnyCustomButtonConfigEnabled"},
-        FunctionInfo{1273, nullptr, "SetAllCustomButtonConfigEnabled"},
-        FunctionInfo{1274, nullptr, "SetDefaultButtonConfig"},
-        FunctionInfo{1275, nullptr, "SetAllDefaultButtonConfig"},
-        FunctionInfo{1276, nullptr, "SetHidButtonConfigEmbedded"},
-        FunctionInfo{1277, nullptr, "SetHidButtonConfigFull"},
-        FunctionInfo{1278, nullptr, "SetHidButtonConfigLeft"},
-        FunctionInfo{1279, nullptr, "SetHidButtonConfigRight"},
-        FunctionInfo{1280, nullptr, "GetHidButtonConfigEmbedded"},
-        FunctionInfo{1281, nullptr, "GetHidButtonConfigFull"},
-        FunctionInfo{1282, nullptr, "GetHidButtonConfigLeft"},
-        FunctionInfo{1283, nullptr, "GetHidButtonConfigRight"},
-        FunctionInfo{1284, nullptr, "GetButtonConfigStorageEmbedded"},
-        FunctionInfo{1285, nullptr, "GetButtonConfigStorageFull"},
-        FunctionInfo{1286, nullptr, "GetButtonConfigStorageLeft"},
-        FunctionInfo{1287, nullptr, "GetButtonConfigStorageRight"},
-        FunctionInfo{1288, nullptr, "SetButtonConfigStorageEmbedded"},
-        FunctionInfo{1289, nullptr, "SetButtonConfigStorageFull"},
-        FunctionInfo{1290, nullptr, "SetButtonConfigStorageLeft"},
-        FunctionInfo{1291, nullptr, "SetButtonConfigStorageRight"},
-        FunctionInfo{1308, nullptr, "SetButtonConfigVisible"},
-        FunctionInfo{1309, nullptr, "IsButtonConfigVisible"},
-        FunctionInfo{1320, nullptr, "WakeTouchScreenUp"},
-        FunctionInfo{1321, nullptr, "PutTouchScreenToSleep"},
-        FunctionInfo{1322, nullptr, "AcquireTouchScreenAsyncWakeCompletedEvent"},
-        FunctionInfo{1323, nullptr, "StartTouchScreenAutoTuneForSystemSettings"},
-        FunctionInfo{1324, nullptr, "AcquireTouchScreenAutoTuneCompletedEvent"},
-        FunctionInfo{1325, nullptr, "IsTouchScreenAutoTuneRequiredForRepairProviderReplacement"},
-        FunctionInfo{1420, nullptr, "GetAppletResourceProperty"},
-        FunctionInfo{2000, nullptr, "ActivateDigitizer"},
-        FunctionInfo{3000, nullptr, "GetDebugPadGenericPadMap"},
-        FunctionInfo{3001, nullptr, "SetDebugPadGenericPadMap"},
-        FunctionInfo{3002, nullptr, "ResetDebugPadGenericPadMap"},
-        FunctionInfo{3003, nullptr, "GetDebugPadKeyboardMap"},
-        FunctionInfo{3004, nullptr, "SetDebugPadKeyboardMap"},
-        FunctionInfo{3005, nullptr, "ResetDebugPadKeyboardMap"},
-        FunctionInfo{3006, nullptr, "GetFullKeyGenericPadMap"},
-        FunctionInfo{3007, nullptr, "SetFullKeyGenericPadMap"},
-        FunctionInfo{3008, nullptr, "ResetFullKeyGenericPadMap"},
-        FunctionInfo{3009, nullptr, "GetFullKeyKeyboardMap"},
-        FunctionInfo{3010, nullptr, "SetFullKeyKeyboardMap"},
-        FunctionInfo{3011, nullptr, "ResetFullKeyKeyboardMap"},
-        FunctionInfo{3012, nullptr, "GetDebugPadGenericPadMap", MakeVersionGate({21,0,0})},
-        FunctionInfo{3013, nullptr, "SetDebugPadGenericPadMap", MakeVersionGate({21,0,0})},
-        FunctionInfo{3014, nullptr, "GetDebugPadKeyboardMap", MakeVersionGate({21,0,0})},
-        FunctionInfo{3015, nullptr, "SetDebugPadKeyboardMap", MakeVersionGate({21,0,0})},
-        FunctionInfo{3150, C<&IHidServer::SetMouseLibraryVersion>, "SetMouseLibraryVersion", MakeVersionGate({21,0,0})}
-        // What? -- {12010, nullptr, "SetButtonConfigLeft"},
-    );
-    return HandlerTableGenerateWithFind(key, functions);
-}
-
 IHidServer::IHidServer(Core::System& system_, std::shared_ptr<ResourceManager> resource,
                        std::shared_ptr<HidFirmwareSettings> settings)
     : ServiceFramework{system_, "hid"}, resource_manager{resource}, firmware_settings{settings} {
+    // clang-format off
+    static const FunctionInfo functions[] = {
+        {0, C<&IHidServer::CreateAppletResource>, "CreateAppletResource"},
+        {1, C<&IHidServer::ActivateDebugPad>, "ActivateDebugPad"},
+        {11, C<&IHidServer::ActivateTouchScreen>, "ActivateTouchScreen"},
+        {21, C<&IHidServer::ActivateMouse>, "ActivateMouse"},
+        {26, C<&IHidServer::ActivateDebugMouse>, "ActivateDebugMouse"},
+        {31, C<&IHidServer::ActivateKeyboard>, "ActivateKeyboard"},
+        {32, C<&IHidServer::SendKeyboardLockKeyEvent>, "SendKeyboardLockKeyEvent"},
+        {40, C<&IHidServer::AcquireXpadIdEventHandle>, "AcquireXpadIdEventHandle"},
+        {41, C<&IHidServer::ReleaseXpadIdEventHandle>, "ReleaseXpadIdEventHandle"},
+        {51, C<&IHidServer::ActivateXpad>, "ActivateXpad"},
+        {55, C<&IHidServer::GetXpadIds>, "GetXpadIds"},
+        {56, C<&IHidServer::ActivateJoyXpad>, "ActivateJoyXpad"},
+        {58, C<&IHidServer::GetJoyXpadLifoHandle>, "GetJoyXpadLifoHandle"},
+        {59, C<&IHidServer::GetJoyXpadIds>, "GetJoyXpadIds"},
+        {60, C<&IHidServer::ActivateSixAxisSensor>, "ActivateSixAxisSensor"},
+        {61, C<&IHidServer::DeactivateSixAxisSensor>, "DeactivateSixAxisSensor"},
+        {62, C<&IHidServer::GetSixAxisSensorLifoHandle>, "GetSixAxisSensorLifoHandle"},
+        {63, C<&IHidServer::ActivateJoySixAxisSensor>, "ActivateJoySixAxisSensor"},
+        {64, C<&IHidServer::DeactivateJoySixAxisSensor>, "DeactivateJoySixAxisSensor"},
+        {65, C<&IHidServer::GetJoySixAxisSensorLifoHandle>, "GetJoySixAxisSensorLifoHandle"},
+        {66, C<&IHidServer::StartSixAxisSensor>, "StartSixAxisSensor"},
+        {67, C<&IHidServer::StopSixAxisSensor>, "StopSixAxisSensor"},
+        {68, C<&IHidServer::IsSixAxisSensorFusionEnabled>, "IsSixAxisSensorFusionEnabled"},
+        {69, C<&IHidServer::EnableSixAxisSensorFusion>, "EnableSixAxisSensorFusion"},
+        {70, C<&IHidServer::SetSixAxisSensorFusionParameters>, "SetSixAxisSensorFusionParameters"},
+        {71, C<&IHidServer::GetSixAxisSensorFusionParameters>, "GetSixAxisSensorFusionParameters"},
+        {72, C<&IHidServer::ResetSixAxisSensorFusionParameters>, "ResetSixAxisSensorFusionParameters"},
+        {73, &IHidServer::StubReplyZeroed, "SetAccelerometerParameters"},
+        {74, &IHidServer::StubReplyZeroed, "GetAccelerometerParameters"},
+        {75, &IHidServer::StubReplyZeroed, "ResetAccelerometerParameters"},
+        {76, &IHidServer::StubReplyZeroed, "SetAccelerometerPlayMode"},
+        {77, &IHidServer::StubReplyZeroed, "GetAccelerometerPlayMode"},
+        {78, &IHidServer::StubReplyZeroed, "ResetAccelerometerPlayMode"},
+        {79, C<&IHidServer::SetGyroscopeZeroDriftMode>, "SetGyroscopeZeroDriftMode"},
+        {80, C<&IHidServer::GetGyroscopeZeroDriftMode>, "GetGyroscopeZeroDriftMode"},
+        {81, C<&IHidServer::ResetGyroscopeZeroDriftMode>, "ResetGyroscopeZeroDriftMode"},
+        {82, C<&IHidServer::IsSixAxisSensorAtRest>, "IsSixAxisSensorAtRest"},
+        {83, C<&IHidServer::IsFirmwareUpdateAvailableForSixAxisSensor>, "IsFirmwareUpdateAvailableForSixAxisSensor"},
+        {84, C<&IHidServer::EnableSixAxisSensorUnalteredPassthrough>, "EnableSixAxisSensorUnalteredPassthrough"},
+        {85, C<&IHidServer::IsSixAxisSensorUnalteredPassthroughEnabled>, "IsSixAxisSensorUnalteredPassthroughEnabled"},
+        {86, &IHidServer::StubReplyZeroed, "StoreSixAxisSensorCalibrationParameter"},
+        {87, C<&IHidServer::LoadSixAxisSensorCalibrationParameter>, "LoadSixAxisSensorCalibrationParameter"},
+        {88, C<&IHidServer::GetSixAxisSensorIcInformation>, "GetSixAxisSensorIcInformation"},
+        {89, C<&IHidServer::ResetIsSixAxisSensorDeviceNewlyAssigned>, "ResetIsSixAxisSensorDeviceNewlyAssigned"},
+        {91, C<&IHidServer::ActivateGesture>, "ActivateGesture"},
+        {92, C<&IHidServer::SetGestureOutputRanges>, "SetGestureOutputRanges"},
+        {100, C<&IHidServer::SetSupportedNpadStyleSet>, "SetSupportedNpadStyleSet"},
+        {101, C<&IHidServer::GetSupportedNpadStyleSet>, "GetSupportedNpadStyleSet"},
+        {102, C<&IHidServer::SetSupportedNpadIdType>, "SetSupportedNpadIdType"},
+        {103, C<&IHidServer::ActivateNpad>, "ActivateNpad"},
+        {104, C<&IHidServer::DeactivateNpad>, "DeactivateNpad"},
+        {106, C<&IHidServer::AcquireNpadStyleSetUpdateEventHandle>, "AcquireNpadStyleSetUpdateEventHandle"},
+        {107, C<&IHidServer::DisconnectNpad>, "DisconnectNpad"},
+        {108, C<&IHidServer::GetPlayerLedPattern>, "GetPlayerLedPattern"},
+        {109, C<&IHidServer::ActivateNpadWithRevision>, "ActivateNpadWithRevision"},
+        {120, C<&IHidServer::SetNpadJoyHoldType>, "SetNpadJoyHoldType"},
+        {121, C<&IHidServer::GetNpadJoyHoldType>, "GetNpadJoyHoldType"},
+        {122, C<&IHidServer::SetNpadJoyAssignmentModeSingleByDefault>, "SetNpadJoyAssignmentModeSingleByDefault"},
+        {123, C<&IHidServer::SetNpadJoyAssignmentModeSingle>, "SetNpadJoyAssignmentModeSingle"},
+        {124, C<&IHidServer::SetNpadJoyAssignmentModeDual>, "SetNpadJoyAssignmentModeDual"},
+        {125, C<&IHidServer::MergeSingleJoyAsDualJoy>, "MergeSingleJoyAsDualJoy"},
+        {126, C<&IHidServer::StartLrAssignmentMode>, "StartLrAssignmentMode"},
+        {127, C<&IHidServer::StopLrAssignmentMode>, "StopLrAssignmentMode"},
+        {128, C<&IHidServer::SetNpadHandheldActivationMode>, "SetNpadHandheldActivationMode"},
+        {129, C<&IHidServer::GetNpadHandheldActivationMode>, "GetNpadHandheldActivationMode"},
+        {130, C<&IHidServer::SwapNpadAssignment>, "SwapNpadAssignment"},
+        {131, C<&IHidServer::IsUnintendedHomeButtonInputProtectionEnabled>, "IsUnintendedHomeButtonInputProtectionEnabled"},
+        {132, C<&IHidServer::EnableUnintendedHomeButtonInputProtection>, "EnableUnintendedHomeButtonInputProtection"},
+        {133, C<&IHidServer::SetNpadJoyAssignmentModeSingleWithDestination>, "SetNpadJoyAssignmentModeSingleWithDestination"},
+        {134, C<&IHidServer::SetNpadAnalogStickUseCenterClamp>, "SetNpadAnalogStickUseCenterClamp"},
+        {135, C<&IHidServer::SetNpadCaptureButtonAssignment>, "SetNpadCaptureButtonAssignment"},
+        {136, C<&IHidServer::ClearNpadCaptureButtonAssignment>, "ClearNpadCaptureButtonAssignment"},
+        {137, &IHidServer::StubReplyZeroed, "SetNpadGcAnalogStick8bitRawValue"},
+        {138, C<&IHidServer::SetSceneIdForPrivateApp>, "SetSceneIdForPrivateApp"},
+        {139, C<&IHidServer::GetSceneIdForPrivateApp>, "GetSceneIdForPrivateApp"},
+        {140, &IHidServer::StubReplyZeroed, "IsFirmwareUpdateAvailableForDebug"},
+        {150, &IHidServer::StubReplyZeroed, "GetSixAxisSensorIcSettings"},
+        {151, &IHidServer::StubReplyZeroed, "SetSixAxisSensorIcSettings"},
+        {160, &IHidServer::StubReplyZeroed, "GetSixAxisSensorIcAccelerationOffset"},
+        {200, C<&IHidServer::GetVibrationDeviceInfo>, "GetVibrationDeviceInfo"},
+        {201, C<&IHidServer::SendVibrationValue>, "SendVibrationValue"},
+        {202, C<&IHidServer::GetActualVibrationValue>, "GetActualVibrationValue"},
+        {203, C<&IHidServer::CreateActiveVibrationDeviceList>, "CreateActiveVibrationDeviceList"},
+        {204, C<&IHidServer::PermitVibration>, "PermitVibration"},
+        {205, C<&IHidServer::IsVibrationPermitted>, "IsVibrationPermitted"},
+        {206, C<&IHidServer::SendVibrationValues>, "SendVibrationValues"},
+        {207, C<&IHidServer::SendVibrationGcErmCommand>, "SendVibrationGcErmCommand"},
+        {208, C<&IHidServer::GetActualVibrationGcErmCommand>, "GetActualVibrationGcErmCommand"},
+        {209, C<&IHidServer::BeginPermitVibrationSession>, "BeginPermitVibrationSession"},
+        {210, C<&IHidServer::EndPermitVibrationSession>, "EndPermitVibrationSession"},
+        {211, C<&IHidServer::IsVibrationDeviceMounted>, "IsVibrationDeviceMounted"},
+        {212, C<&IHidServer::SendVibrationValueInBool>, "SendVibrationValueInBool"},
+        {213, &IHidServer::SendVibrationValueInMode, "SendVibrationValueInMode"},
+        {214, C<&IHidServer::SendVibrationValuesInMode>, "SendVibrationValuesInMode"},
+        {220, C<&IHidServer::IsOunceVibrationDeviceMounted>, "IsOunceVibrationDeviceMounted"},
+        {300, C<&IHidServer::ActivateConsoleSixAxisSensor>, "ActivateConsoleSixAxisSensor"},
+        {301, C<&IHidServer::StartConsoleSixAxisSensor>, "StartConsoleSixAxisSensor"},
+        {302, C<&IHidServer::StopConsoleSixAxisSensor>, "StopConsoleSixAxisSensor"},
+        {303, C<&IHidServer::ActivateSevenSixAxisSensor>, "ActivateSevenSixAxisSensor"},
+        {304, C<&IHidServer::StartSevenSixAxisSensor>, "StartSevenSixAxisSensor"},
+        {305, C<&IHidServer::StopSevenSixAxisSensor>, "StopSevenSixAxisSensor"},
+        {306, C<&IHidServer::InitializeSevenSixAxisSensor>, "InitializeSevenSixAxisSensor"},
+        {307, C<&IHidServer::FinalizeSevenSixAxisSensor>, "FinalizeSevenSixAxisSensor"},
+        {308, &IHidServer::StubReplyZeroed, "SetSevenSixAxisSensorFusionStrength"},
+        {309, &IHidServer::StubReplyZeroed, "GetSevenSixAxisSensorFusionStrength"},
+        {310, C<&IHidServer::ResetSevenSixAxisSensorTimestamp>, "ResetSevenSixAxisSensorTimestamp"},
+        {311, &IHidServer::StubReplyZeroed, "ForceActivateConsoleSixAxisSensor"},
+        {312, &IHidServer::StubReplyZeroed, "ForceDeactivateConsoleSixAxisSensor"},
+        {320, &IHidServer::StubReplyZeroed, "EnableNpadImu"}, //21.0.0+
+        {321, &IHidServer::StubReplyZeroed, "DisableNpadImu"}, //21.0.0+
+        {322, &IHidServer::StubReplyZeroed, "SetNpadImuSupportedFeatures"},
+        {323, &IHidServer::StubReplyZeroed, "EnableNpadImuHandle"},
+        {324, &IHidServer::StubReplyZeroed, "DisableNpadImuHandle"},
+        {400, C<&IHidServer::IsUsbFullKeyControllerEnabled>, "IsUsbFullKeyControllerEnabled"},
+        {401, &IHidServer::StubReplyZeroed, "EnableUsbFullKeyController"},
+        {402, &IHidServer::StubReplyZeroed, "IsUsbFullKeyControllerConnected"},
+        {403, &IHidServer::StubReplyZeroed, "HasBattery"},
+        {404, &IHidServer::StubReplyZeroed, "HasLeftRightBattery"},
+        {405, &IHidServer::StubReplyZeroed, "GetNpadInterfaceType"},
+        {406, &IHidServer::StubReplyZeroed, "GetNpadLeftRightInterfaceType"},
+        {407, &IHidServer::StubReplyZeroed, "GetNpadOfHighestBatteryLevel"},
+        {408, nullptr, "GetNpadOfHighestBatteryLevelForJoyRight"},
+        {500, C<&IHidServer::GetPalmaConnectionHandle>, "GetPalmaConnectionHandle"},
+        {501, C<&IHidServer::InitializePalma>, "InitializePalma"},
+        {502, C<&IHidServer::AcquirePalmaOperationCompleteEvent>, "AcquirePalmaOperationCompleteEvent"},
+        {503, C<&IHidServer::GetPalmaOperationInfo>, "GetPalmaOperationInfo"},
+        {504, C<&IHidServer::PlayPalmaActivity>, "PlayPalmaActivity"},
+        {505, C<&IHidServer::SetPalmaFrModeType>, "SetPalmaFrModeType"},
+        {506, C<&IHidServer::ReadPalmaStep>, "ReadPalmaStep"},
+        {507, C<&IHidServer::EnablePalmaStep>, "EnablePalmaStep"},
+        {508, C<&IHidServer::ResetPalmaStep>, "ResetPalmaStep"},
+        {509, C<&IHidServer::ReadPalmaApplicationSection>, "ReadPalmaApplicationSection"},
+        {510, C<&IHidServer::WritePalmaApplicationSection>, "WritePalmaApplicationSection"},
+        {511, C<&IHidServer::ReadPalmaUniqueCode>, "ReadPalmaUniqueCode"},
+        {512, C<&IHidServer::SetPalmaUniqueCodeInvalid>, "SetPalmaUniqueCodeInvalid"},
+        {513, C<&IHidServer::WritePalmaActivityEntry>, "WritePalmaActivityEntry"},
+        {514, C<&IHidServer::WritePalmaRgbLedPatternEntry>, "WritePalmaRgbLedPatternEntry"},
+        {515, C<&IHidServer::WritePalmaWaveEntry>, "WritePalmaWaveEntry"},
+        {516, C<&IHidServer::SetPalmaDataBaseIdentificationVersion>, "SetPalmaDataBaseIdentificationVersion"},
+        {517, C<&IHidServer::GetPalmaDataBaseIdentificationVersion>, "GetPalmaDataBaseIdentificationVersion"},
+        {518, C<&IHidServer::SuspendPalmaFeature>, "SuspendPalmaFeature"},
+        {519, C<&IHidServer::GetPalmaOperationResult>, "GetPalmaOperationResult"},
+        {520, C<&IHidServer::ReadPalmaPlayLog>, "ReadPalmaPlayLog"},
+        {521, C<&IHidServer::ResetPalmaPlayLog>, "ResetPalmaPlayLog"},
+        {522, C<&IHidServer::SetIsPalmaAllConnectable>, "SetIsPalmaAllConnectable"},
+        {523, C<&IHidServer::SetIsPalmaPairedConnectable>, "SetIsPalmaPairedConnectable"},
+        {524, C<&IHidServer::PairPalma>, "PairPalma"},
+        {525, C<&IHidServer::SetPalmaBoostMode>, "SetPalmaBoostMode"},
+        {526, C<&IHidServer::CancelWritePalmaWaveEntry>, "CancelWritePalmaWaveEntry"},
+        {527, C<&IHidServer::EnablePalmaBoostMode>, "EnablePalmaBoostMode"},
+        {528, C<&IHidServer::GetPalmaBluetoothAddress>, "GetPalmaBluetoothAddress"},
+        {529, C<&IHidServer::SetDisallowedPalmaConnection>, "SetDisallowedPalmaConnection"},
+        {550, &IHidServer::StubReplyZeroed, "GetGlGrButtonConfigState"},
+        {1000, C<&IHidServer::SetNpadCommunicationMode>, "SetNpadCommunicationMode"},
+        {1001, C<&IHidServer::GetNpadCommunicationMode>, "GetNpadCommunicationMode"},
+        {1002, C<&IHidServer::SetTouchScreenConfiguration>, "SetTouchScreenConfiguration"},
+        {1003, C<&IHidServer::IsFirmwareUpdateNeededForNotification>, "IsFirmwareUpdateNeededForNotification"},
+        {1004, C<&IHidServer::SetTouchScreenResolution>, "SetTouchScreenResolution"},
+        {1005, &IHidServer::StubReplyZeroed, "EnableNxTouchScreenEmulationForTouchEnter"},
+        {1270, nullptr, "DeleteButtonConfigStorageRight"},
+        {1271, nullptr, "IsUsingCustomButtonConfig"},
+        {1272, nullptr, "IsAnyCustomButtonConfigEnabled"},
+        {1273, nullptr, "SetAllCustomButtonConfigEnabled"},
+        {1274, nullptr, "SetDefaultButtonConfig"},
+        {1275, nullptr, "SetAllDefaultButtonConfig"},
+        {1276, nullptr, "SetHidButtonConfigEmbedded"},
+        {1277, nullptr, "SetHidButtonConfigFull"},
+        {1278, nullptr, "SetHidButtonConfigLeft"},
+        {1279, nullptr, "SetHidButtonConfigRight"},
+        {1280, nullptr, "GetHidButtonConfigEmbedded"},
+        {1281, nullptr, "GetHidButtonConfigFull"},
+        {1282, nullptr, "GetHidButtonConfigLeft"},
+        {1283, nullptr, "GetHidButtonConfigRight"},
+        {1284, nullptr, "GetButtonConfigStorageEmbedded"},
+        {1285, nullptr, "GetButtonConfigStorageFull"},
+        {1286, nullptr, "GetButtonConfigStorageLeft"},
+        {1287, nullptr, "GetButtonConfigStorageRight"},
+        {1288, nullptr, "SetButtonConfigStorageEmbedded"},
+        {1289, nullptr, "SetButtonConfigStorageFull"},
+        {1290, nullptr, "SetButtonConfigStorageLeft"},
+        {1291, nullptr, "SetButtonConfigStorageRight"},
+        {1308, nullptr, "SetButtonConfigVisible"},
+        {1309, nullptr, "IsButtonConfigVisible"},
+        {1320, nullptr, "WakeTouchScreenUp"},
+        {1321, nullptr, "PutTouchScreenToSleep"},
+        {1322, nullptr, "AcquireTouchScreenAsyncWakeCompletedEvent"},
+        {1323, nullptr, "StartTouchScreenAutoTuneForSystemSettings"},
+        {1324, nullptr, "AcquireTouchScreenAutoTuneCompletedEvent"},
+        {1325, nullptr, "IsTouchScreenAutoTuneRequiredForRepairProviderReplacement"},
+        {1420, nullptr, "GetAppletResourceProperty"},
+        {2000, nullptr, "ActivateDigitizer"},
+        {3000, &IHidServer::StubReplyZeroed, "GetDebugPadGenericPadMap"},
+        {3001, &IHidServer::StubReplyZeroed, "SetDebugPadGenericPadMap"},
+        {3002, &IHidServer::StubReplyZeroed, "ResetDebugPadGenericPadMap"},
+        {3003, &IHidServer::StubReplyZeroed, "GetDebugPadKeyboardMap"},
+        {3004, &IHidServer::StubReplyZeroed, "SetDebugPadKeyboardMap"},
+        {3005, &IHidServer::StubReplyZeroed, "ResetDebugPadKeyboardMap"},
+        {3006, &IHidServer::StubReplyZeroed, "GetFullKeyGenericPadMap"},
+        {3007, &IHidServer::StubReplyZeroed, "SetFullKeyGenericPadMap"},
+        {3008, &IHidServer::StubReplyZeroed, "ResetFullKeyGenericPadMap"},
+        {3009, &IHidServer::StubReplyZeroed, "GetFullKeyKeyboardMap"},
+        {3010, &IHidServer::StubReplyZeroed, "SetFullKeyKeyboardMap"},
+        {3011, &IHidServer::StubReplyZeroed, "ResetFullKeyKeyboardMap"},
+        {3012, &IHidServer::StubReplyZeroed, "GetDebugPadGenericPadMap"}, //21.0.0+
+        {3013, &IHidServer::StubReplyZeroed, "SetDebugPadGenericPadMap"}, //21.0.0+
+        {3014, &IHidServer::StubReplyZeroed, "GetDebugPadKeyboardMap"}, //21.0.0+
+        {3015, &IHidServer::StubReplyZeroed, "SetDebugPadKeyboardMap"}, //21.0.0+
+        {3110, &IHidServer::StubReplyZeroed, "InitializeJcms"},
+        {3111, &IHidServer::StubReplyZeroed, "FinalizeJcms"},
+        {3112, &IHidServer::StubReplyZeroed, "StartJcms"},
+        {3113, &IHidServer::StubReplyZeroed, "StopJcms"},
+        {3114, &IHidServer::StubReplyZeroed, "Unknown3114"},
+        {3130, &IHidServer::StubReplyZeroed, "InitializeNmouse"},
+        {3131, &IHidServer::StubReplyZeroed, "FinalizeNmouse"},
+        {3132, C<&IHidServer::SetNmousePointerRanges>, "SetNmousePointerRanges"},
+        {3133, C<&IHidServer::GetNmousePointerRanges>, "GetNmousePointerRanges"},
+        {3134, &IHidServer::StubReplyZeroed, "Unknown3134"},
+        {3135, &IHidServer::StubReplyZeroed, "EnableShowingCursor"},
+        {3136, &IHidServer::StubReplyZeroed, "SetNmouseButtonConfigJoyLeftJcms"},
+        {3137, &IHidServer::StubReplyZeroed, "SetNmouseButtonConfigJoyRightJcms"},
+        {3138, &IHidServer::StubReplyZeroed, "SetMergedNmouseSourceTypes"},
+        {3139, C<&IHidServer::InitializeNmouse2>, "InitializeNmouse2"},
+        {3140, &IHidServer::StubReplyZeroed, "SetNmousePointerPosition"},
+        {3141, &IHidServer::StubReplyZeroed, "EnableNmousePointer"},
+        {3142, &IHidServer::StubReplyZeroed, "RestrictNmousePointer"},
+        {3143, &IHidServer::StubReplyZeroed, "Unknown3143"},
+        {3144, &IHidServer::StubReplyZeroed, "Unknown3144"},
+        {3145, &IHidServer::StubReplyZeroed, "Unknown3145"},
+        {3146, &IHidServer::StubReplyZeroed, "Unknown3146"},
+        {3147, &IHidServer::StubReplyZeroed, "Unknown3147"},
+        {3148, &IHidServer::StubReplyZeroed, "Unknown3148"},
+        {3149, &IHidServer::StubReplyZeroed, "Unknown3149"},
+        {3150, C<&IHidServer::SetMouseLibraryVersion>, "SetMouseLibraryVersion"}, //21.0.0+
+        {5000, &IHidServer::StubReplyZeroed, "Unknown5000"},
+        // What? -- {12010, nullptr, "SetButtonConfigLeft"},
+    };
+    // clang-format on
+
+    RegisterHandlers(functions);
 }
 
 IHidServer::~IHidServer() = default;
@@ -1066,6 +1111,108 @@ Result IHidServer::IsVibrationDeviceMounted(
         *out_is_mounted = device->IsVibrationMounted();
     }
 
+    R_SUCCEED();
+}
+
+Result IHidServer::SendVibrationValuesInMode(
+    u64 unknown, AppletResourceUserId aruid,
+    InArray<Core::HID::VibrationDeviceHandle, BufferAttr_HipcPointer> vibration_handles,
+    InArray<Core::HID::VibrationValue, BufferAttr_HipcPointer> vibration_values) {
+    LOG_DEBUG(Service_HID, "called, unknown={}, applet_resource_user_id={}", unknown, aruid.pid);
+
+    // Unlike 206 this never fails: rumble is best effort and the command is only known from
+    // captures, so an unexpected handle or layout shouldn't return an error a game may treat as
+    // fatal.
+    const auto count = (std::min)(vibration_handles.size(), vibration_values.size());
+    for (std::size_t i = 0; i < count; i++) {
+        const auto result = GetResourceManager()->SendVibrationValue(
+            aruid.pid, vibration_handles[i], vibration_values[i]);
+        if (result.IsError()) {
+            LOG_DEBUG(Service_HID, "failed to send vibration {}, result={:#x}", i, result.raw);
+        }
+    }
+
+    R_SUCCEED();
+}
+
+void IHidServer::SendVibrationValueInMode(HLERequestContext& ctx) {
+    // Switchbrew names 213 but gives no layout, and two fit its 32 bytes (the mode before the
+    // handle, or after the value as in 206's padding). Log the first request so a run shows which.
+    static std::once_flag logged;
+    std::call_once(logged, [&ctx] {
+        IPC::RequestParser rp{ctx};
+        const auto w = rp.PopRaw<std::array<u32, 8>>();
+        LOG_INFO(Service_HID,
+                 "(STUBBED) first request: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
+                 w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+    });
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(ResultSuccess);
+}
+
+Result IHidServer::IsOunceVibrationDeviceMounted(
+    Out<bool> out_is_mounted, Core::HID::VibrationDeviceHandle vibration_device_handle,
+    ClientAppletResourceUserId aruid) {
+    LOG_DEBUG(Service_HID,
+              "called, npad_type={}, npad_id={}, device_index={}, applet_resource_user_id={}",
+              vibration_device_handle.npad_type, vibration_device_handle.npad_id,
+              vibration_device_handle.device_index, aruid.pid);
+
+    // Like IsVibrationDeviceMounted, but a handle this doesn't recognise reads as not mounted
+    // instead of failing: the Switch 2 handle layout is only known from captures (see 214).
+    *out_is_mounted = false;
+    if (IsVibrationHandleValid(vibration_device_handle).IsSuccess()) {
+        const NpadVibrationBase* device =
+            GetResourceManager()->GetVibrationDevice(vibration_device_handle);
+        if (device != nullptr) {
+            *out_is_mounted = device->IsVibrationMounted();
+        }
+    }
+
+    R_SUCCEED();
+}
+
+Result IHidServer::SetSceneIdForPrivateApp(ClientAppletResourceUserId aruid, u64 scene_id) {
+    LOG_DEBUG(Service_HID, "called, scene_id={:#x}, applet_resource_user_id={}", scene_id, aruid.pid);
+    scene_ids_for_private_app[aruid.pid] = scene_id;
+    R_SUCCEED();
+}
+
+Result IHidServer::GetSceneIdForPrivateApp(Out<u64> out_scene_id,
+                                           ClientAppletResourceUserId aruid) {
+    LOG_DEBUG(Service_HID, "called, applet_resource_user_id={}", aruid.pid);
+    const auto it = scene_ids_for_private_app.find(aruid.pid);
+    *out_scene_id = it != scene_ids_for_private_app.end() ? it->second : 0;
+    R_SUCCEED();
+}
+
+Result IHidServer::InitializeNmouse2(u32 pointer_type, s32 width, s32 height, u32 unknown,
+                                     ClientAppletResourceUserId aruid, u64 t_mem_size,
+                                     InCopyHandle<Kernel::KTransferMemory> t_mem) {
+    LOG_WARNING(Service_HID,
+                "(STUBBED) called, pointer_type={}, width={}, height={}, unknown={:#x}, "
+                "applet_resource_user_id={}, t_mem_size={:#x}",
+                pointer_type, width, height, unknown, aruid.pid, t_mem_size);
+    nmouse_pointer_ranges[aruid.pid] = {width, height};
+    R_SUCCEED();
+}
+
+Result IHidServer::SetNmousePointerRanges(s32 width, s32 height,
+                                          ClientAppletResourceUserId aruid) {
+    LOG_DEBUG(Service_HID, "called, width={}, height={}, applet_resource_user_id={}", width,
+              height, aruid.pid);
+    nmouse_pointer_ranges[aruid.pid] = {width, height};
+    R_SUCCEED();
+}
+
+Result IHidServer::GetNmousePointerRanges(Out<s32> out_width, Out<s32> out_height,
+                                          ClientAppletResourceUserId aruid) {
+    LOG_DEBUG(Service_HID, "called, applet_resource_user_id={}", aruid.pid);
+    const auto it = nmouse_pointer_ranges.find(aruid.pid);
+    const NmousePointerRanges ranges =
+        it != nmouse_pointer_ranges.end() ? it->second : NmousePointerRanges{};
+    *out_width = ranges.width;
+    *out_height = ranges.height;
     R_SUCCEED();
 }
 

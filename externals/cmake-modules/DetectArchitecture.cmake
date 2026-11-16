@@ -36,12 +36,17 @@ This file is based off of Yuzu and Dynarmic.
 # should NOT be too dependent on the architecture
 # otherwise, you may end up with duplicate code
 if (CMAKE_OSX_ARCHITECTURES)
-    set(MULTIARCH_BUILD 1)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES architecture_count)
+    if (architecture_count GREATER 1)
+        set(MULTIARCH_BUILD 1)
+    else()
+        set(MULTIARCH_BUILD 0)
+    endif()
     set(ARCHITECTURE "${CMAKE_OSX_ARCHITECTURES}")
 
     # hope and pray the architecture names match
-    foreach(ARCH IN ${CMAKE_OSX_ARCHITECTURES})
-        set(ARCHITECTURE_${ARCH} 1 PARENT_SCOPE)
+    foreach(ARCH IN LISTS CMAKE_OSX_ARCHITECTURES)
+        set(ARCHITECTURE_${ARCH} 1)
         add_definitions(-DARCHITECTURE_${ARCH}=1)
     endforeach()
 
@@ -100,6 +105,11 @@ endfunction()
 # sparc is uh
 # ia64 exists
 # the rest exist, but are probably less popular than ia64
+
+detect_architecture_symbols(
+    ARCH wasm
+    SYMBOLS
+        "__EMSCRIPTEN__")
 
 detect_architecture_symbols(
     ARCH arm64
@@ -202,11 +212,6 @@ detect_architecture_symbols(
     SYMBOLS
         "__loongarch__"
         "__loongarch64")
-
-detect_architecture_symbols(
-    ARCH wasm
-    SYMBOLS
-        "__EMSCRIPTEN__")
 
 # "generic" target
 # If you have reached this point, you're on some as-of-yet unsupported architecture.

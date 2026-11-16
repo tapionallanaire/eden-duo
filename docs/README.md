@@ -21,14 +21,14 @@ This contains documentation created by developers, build instructions, guideline
 - Subsystems:
   - **[Design Overview](./DesignOverview.md)**
   - **[Dynarmic](./dynarmic/README.md)**
-  - **[Subsystem: HLE](./SubsystemHLE.md)**
+  - **[HOS Kernel](./HosKernel.md)**
   - **[Settings](./Settings.md)**
 
 ## Policies
 
 Policies and information on development.
 
-- **[AI and LLM Usage](./policies/AI.md)**
+- **[AI and LLM Usage](./CONTRIBUTING.md#policies)**
 - **[Coding guidelines](./policies/Coding.md)**
 - **[Contributing](../CONTRIBUTING.md)**
 

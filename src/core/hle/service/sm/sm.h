@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 #include "common/container/unordered_map.h"
 #include <concepts>
 
@@ -33,7 +34,29 @@ class SessionRequestHandler;
 namespace Service::SM {
 
 class Controller;
-class SM;
+
+/// Interface to "sm:" service
+class SM final : public ServiceFramework<SM> {
+public:
+    explicit SM(ServiceManager& service_manager_, Core::System& system_);
+    ~SM() override;
+
+private:
+    void Initialize(HLERequestContext& ctx);
+    void GetServiceCmif(HLERequestContext& ctx);
+    void GetServiceTipc(HLERequestContext& ctx);
+    void RegisterServiceCmif(HLERequestContext& ctx);
+    void RegisterServiceTipc(HLERequestContext& ctx);
+    void UnregisterService(HLERequestContext& ctx);
+    void AtmosphereHasService(HLERequestContext& ctx);
+
+    Result GetServiceImpl(Kernel::KClientSession** out_client_session, HLERequestContext& ctx);
+    void RegisterServiceImpl(HLERequestContext& ctx, std::string name, u32 max_session_count,
+                             bool is_light);
+
+    ServiceManager& service_manager;
+    Kernel::KernelCore& kernel;
+};
 
 class ServiceManager {
 public:
@@ -67,6 +90,17 @@ public:
     }
 
     void InvokeControlRequest(HLERequestContext& context);
+
+    /// Names of the registered services (for debugging tools), unsorted.
+    std::vector<std::string> GetRegisteredServiceNames() const {
+        std::scoped_lock l{lock};
+        std::vector<std::string> names;
+        names.reserve(registered_services.size());
+        for (const auto& [name, factory] : registered_services) {
+            names.push_back(name);
+        }
+        return names;
+    }
 
     void SetDeferralEvent(Kernel::KEvent* deferral_event_) {
         deferral_event = deferral_event_;

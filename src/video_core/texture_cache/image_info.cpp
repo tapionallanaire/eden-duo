@@ -4,9 +4,14 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <fmt/ranges.h>
+#include <algorithm>
+#include <array>
+#include <vector>
+#include <format>
+#include <format>
 
 #include "common/assert.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/format_lookup_table.h"
@@ -109,14 +114,23 @@ ImageInfo::ImageInfo(const TICEntry& config) noexcept {
         size.height = config.Height();
         resources.layers = config.BaseLayer() + config.Depth() * 6;
         break;
-    case TextureType::Texture3D:
+    case TextureType::Texture3D: {
         ASSERT(config.BaseLayer() == 0);
         type = ImageType::e3D;
         size.width = config.Width();
         size.height = config.Height();
         size.depth = config.Depth();
         resources.layers = 1;
+        // A few distinct 3D descriptors, raw (to check Switch 2 volume fields).
+        static std::vector<std::array<u64, 4>> logged;
+        if (logged.size() < 16 && std::find(logged.begin(), logged.end(), config.raw) == logged.end()) {
+            logged.push_back(config.raw);
+            LOG_INFO(HW_GPU, "3D TIC {:016x} {:016x} {:016x} {:016x}: {}x{}x{} block_depth {} levels {}",
+                     config.raw[0], config.raw[1], config.raw[2], config.raw[3], size.width, size.height,
+                     size.depth, config.block_depth.Value(), config.max_mip_level.Value() + 1);
+        }
         break;
+    }
     case TextureType::Texture1DBuffer:
         type = ImageType::Buffer;
         size.width = config.Width();
@@ -165,6 +179,12 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::RenderTargetConfig& ct,
     layer_stride = ct.array_pitch * 4;
     maybe_unaligned_layer_stride = layer_stride;
     num_samples = NumSamples(msaa_mode);
+    if (num_samples > 1 && Settings::values.msaa_single_sample_by_title) {
+        const auto [samples_x, samples_y] = SamplesLog2(static_cast<int>(num_samples));
+        unroll_x = static_cast<u8>(samples_x);
+        unroll_y = static_cast<u8>(samples_y);
+        num_samples = 1;
+    }
     block = Extent3D{
         .width = ct.tile_mode.block_width,
         .height = ct.tile_mode.block_height,
@@ -195,6 +215,12 @@ ImageInfo::ImageInfo(const Maxwell3D::Regs::Zeta& zt, const Maxwell3D::Regs::Zet
     layer_stride = zt.array_pitch * 4;
     maybe_unaligned_layer_stride = layer_stride;
     num_samples = NumSamples(msaa_mode);
+    if (num_samples > 1 && Settings::values.msaa_single_sample_by_title) {
+        const auto [samples_x, samples_y] = SamplesLog2(static_cast<int>(num_samples));
+        unroll_x = static_cast<u8>(samples_x);
+        unroll_y = static_cast<u8>(samples_y);
+        num_samples = 1;
+    }
     block = Extent3D{
         .width = zt.tile_mode.block_width,
         .height = zt.tile_mode.block_height,

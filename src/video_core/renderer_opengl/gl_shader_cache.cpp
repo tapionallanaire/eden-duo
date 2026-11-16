@@ -54,7 +54,7 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 15;
+constexpr u32 CACHE_VERSION = 28;
 
 template <typename Container>
 auto MakeSpan(Container& container) {
@@ -285,7 +285,7 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
         return;
     }
     const auto shader_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir)};
-    const auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
+    const auto base_dir{shader_dir / std::format("{:016x}", title_id)};
     if (!Common::FS::CreateDir(shader_dir) || !Common::FS::CreateDir(base_dir)) {
         LOG_ERROR(Common_Filesystem, "Failed to create shader cache directories");
         return;
@@ -415,6 +415,11 @@ GraphicsPipeline* ShaderCache::BuiltPipeline(GraphicsPipeline* pipeline) const n
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    // If something is using depth, we can assume that games are not rendering anything which
+    // will be used one time.
+    if (maxwell3d->regs.zeta_enable) {
+        return nullptr;
+    }
     // If games are using a small index count, we can assume these are full screen quads.
     // Usually these shaders are only used once for building textures so we can assume they
     // can't be built async
@@ -512,7 +517,7 @@ std::unique_ptr<GraphicsPipeline> ShaderCache::CreateGraphicsPipeline(
             auto& program_va{programs[0]};
             auto program_vb{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
             total_storage_buffers += Shader::NumDescriptors(program_vb.info.storage_buffers_descriptors);
-            programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
+            programs[index] = MergeDualVertexPrograms(program_va, program_vb, env, host_info);
         }
 
         if (programs[index].info.requires_layer_emulation) {
@@ -574,7 +579,8 @@ std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
     const ComputePipelineKey& key, const VideoCommon::ShaderInfo* shader) {
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
-    ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+    ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
+                           shader->lowered_native};
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();

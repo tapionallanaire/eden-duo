@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <vector>
 
 #include "common/common_types.h"
@@ -38,7 +41,8 @@ public:
         u32 height);
 
     /// Acquires the next image in the swapchain, waits as needed.
-    bool AcquireNextImage();
+    /// `may_flush`: false on the async present thread (see Scheduler::Wait).
+    bool AcquireNextImage(bool may_flush = true);
 
     /// Presents the rendered image to the swapchain.
     void Present(VkSemaphore render_semaphore);
@@ -110,12 +114,34 @@ public:
         return extent;
     }
 
+    /// The panel's real refresh rate in Hz, measured from the times presents were shown; 0 until
+    /// the driver reports them (Android main screen with VK_GOOGLE_display_timing).
+    f32 PanelRefreshHz() const {
+        return panel_refresh_hz.load(std::memory_order_relaxed);
+    }
+
 private:
     void CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
 
     /// The DSMod second screen: stamp every present slightly ahead (see Present).
     bool explicit_present_time{};
     u32 present_id{};
+    /// Main screen on Android: presents stamped on an even grid of the guest's frame period.
+    std::chrono::steady_clock::time_point paced_target{};
+    std::chrono::steady_clock::time_point last_present_call{};
+    std::array<double, 9> call_intervals_ms{};
+    size_t call_interval_index{};
+    /// The panel's real refresh, measured from the driver's reported present times.
+    double refresh_ms{1000.0 / 120.0};
+    std::atomic<f32> panel_refresh_hz{};
+    /// Where on the vsync grid presents are aimed, in refreshes after a vsync.
+    double grid_phase{0.25};
+    double shown_min_ms{1e9};
+    double shown_max_ms{-1e9};
+    u32 shown_count{};
+    u64 last_actual_present{};
+    u32 last_actual_id{};
+    void UpdateRefreshEstimate();
     void CreateSemaphores();
     void CreateImageViews();
 

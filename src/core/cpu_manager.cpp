@@ -4,7 +4,12 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
 #include "common/fiber.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
 #include "common/settings.h"
@@ -96,7 +101,7 @@ void CpuManager::MultiCoreRunIdleThread(Kernel::KernelCore& kernel) {
     while (true) {
         auto& physical_core = kernel.CurrentPhysicalCore();
         if (!physical_core.IsInterrupted()) {
-            physical_core.Idle();
+            physical_core.Idle(kernel);
         }
         HandleInterrupt(kernel);
     }
@@ -178,6 +183,21 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
     Common::SetCurrentThreadName(name.c_str());
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
+    // EDEN_NX2_CORE_AFFINITY=<hex mask>[,<hex mask>...]: the logical CPUs each emulated core's
+    // host thread may run on (the last mask for the remaining cores), e.g. one CCD of a Ryzen
+    // so guest hand-offs and their shared cache lines stay in one L3.
+    if (const char* text = std::getenv("EDEN_NX2_CORE_AFFINITY"); text != nullptr) {
+        std::string_view list{text};
+        for (size_t i = 0; i < core && list.find(',') != std::string_view::npos; ++i) {
+            list.remove_prefix(list.find(',') + 1);
+        }
+        const u64 mask = std::strtoull(std::string{list.substr(0, list.find(','))}.c_str(),
+                                       nullptr, 16);
+        if (mask != 0) {
+            Common::SetCurrentThreadAffinity(mask);
+            LOG_INFO(Core, "CPU core {} host thread limited to CPUs {:#x}", core, mask);
+        }
+    }
     auto& data = core_data[core];
 #ifdef __ANDROID__
     // Eden Duo: attach to the JVM here, on this thread's own stack. HLE service code running on

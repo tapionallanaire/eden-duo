@@ -317,6 +317,13 @@ abstract class SettingsItem(
                 )
             )
             put(
+                SwitchSetting(
+                    BooleanSetting.ENABLE_CHEATS_BY_DEFAULT,
+                    titleId = R.string.enable_cheats_by_default,
+                    descriptionId = R.string.enable_cheats_by_default_description
+                )
+            )
+            put(
                 SingleChoiceSetting(
                     IntSetting.REGION_INDEX,
                     titleId = R.string.emulated_region,
@@ -630,6 +637,15 @@ abstract class SettingsItem(
                 )
             )
             put(
+                SingleChoiceSetting(
+                    IntSetting.RENDERER_DLSS_REPLACEMENT,
+                    titleId = R.string.renderer_dlss_replacement,
+                    descriptionId = R.string.renderer_dlss_replacement_description,
+                    choicesId = R.array.rendererDlssReplacementNames,
+                    valuesId = R.array.rendererDlssReplacementValues
+                )
+            )
+            put(
                 SliderSetting(
                     IntSetting.FSR_SHARPENING_SLIDER,
                     titleId = R.string.fsr_sharpness,
@@ -857,13 +873,6 @@ abstract class SettingsItem(
                     BooleanSetting.SKIP_CPU_INNER_INVALIDATION,
                     titleId = R.string.skip_cpu_inner_invalidation,
                     descriptionId = R.string.skip_cpu_inner_invalidation_description
-                )
-            )
-            put(
-                SwitchSetting(
-                    BooleanSetting.NCE_RUNTIME_NRO_PATCH,
-                    titleId = R.string.nce_runtime_nro_patch,
-                    descriptionId = R.string.nce_runtime_nro_patch_description
                 )
             )
             put(

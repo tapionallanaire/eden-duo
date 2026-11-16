@@ -122,7 +122,8 @@ s64 Conductor::GetNextTicks() const {
     }
 
     const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
-    return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+    return static_cast<s64>(speed_scale * Settings::host_vsync_scale.load(std::memory_order_relaxed) *
+                            (1000000000.f / effective_fps));
 }
 
 s64 Conductor::GetFramePeriodNs() const {

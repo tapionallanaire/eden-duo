@@ -32,7 +32,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <fmt/format.h>
+#include <format>
 
 #include "common/logging.h"
 #include "core/mods/mod_ui.h"
@@ -54,7 +54,7 @@ std::string FadeBindSignature(const StateSnapshot& snapshot, const std::string& 
         return t->second;
     }
     if (const auto n = SnapshotNumber(snapshot, bind)) {
-        return fmt::format("{}", *n);
+        return std::format("{}", *n);
     }
     return {};
 }
@@ -532,10 +532,15 @@ void DrawValue(const WidgetDrawContext& ctx) {
     canvas.SetColorMarkup(widget.color_markup);
     canvas.SetOutlineCopy(widget.outline_copy);
     canvas.SetIconSilhouette(widget.color_markup && widget.icon_silhouette);
+    // text_center_h centres the line in that height, as on a label (one line, scale * 5 tall).
+    s32 ty = y;
+    if (widget.text_center_h > 0) {
+        ty += (widget.text_center_h - widget.text_scale * 5) / 2;
+    }
     if (widget.suffix.empty()) {
-        canvas.DrawTextAligned(x, y, buf, widget.text_scale, widget.color, widget.align);
+        canvas.DrawTextAligned(x, ty, buf, widget.text_scale, widget.color, widget.align);
     } else {
-        canvas.DrawTextAligned(x, y, std::string{buf} + widget.suffix, widget.text_scale,
+        canvas.DrawTextAligned(x, ty, std::string{buf} + widget.suffix, widget.text_scale,
                                widget.color, widget.align);
     }
     canvas.SetIconSilhouette(false);
@@ -1484,7 +1489,7 @@ bool RenderPage(Canvas& canvas, const Manifest& manifest, const Page& page,
             ++cost.calls;
             if (cost.what.empty()) {
                 const std::string& src = widget.src;
-                cost.what = fmt::format("type {} id '{}' rect {}x{} src '{}'",
+                cost.what = std::format("type {} id '{}' rect {}x{} src '{}'",
                                         static_cast<int>(widget.type), widget.id, rw, rh,
                                         src.substr(src.find_last_of('#') == std::string::npos
                                                        ? 0

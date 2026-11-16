@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <format>
 #include <limits>
 
 #include <nlohmann/json.hpp>
@@ -19,6 +20,7 @@
 #include "core/memory.h"
 #include "core/mods/mod_package_io.h"
 #include "core/mods/mod_runtime.h"
+#include "video_core/dsmod/duo_switch.h"
 
 namespace Core::Mods {
 namespace {
@@ -356,6 +358,12 @@ struct SelectedLoadPlanPackage {
 // no package, it needs a newer runtime or it deliberately has no load_plan. JSON type errors
 // propagate to the caller.
 std::optional<SelectedLoadPlanPackage> SelectLoadPlanPackage(System& system, u64 title_id) {
+    // A single-screen device runs no load plan. This is the one shared boundary for every load-plan
+    // entry point (LoadPlanTargetModule, and DiscoverModLoadPlan via PeekLoadPlanMailboxSize /
+    // LoadModule), so none of them walks the dualscreen folder or parses a manifest when disabled.
+    if (!VideoCore::DSMod::DuoEnabled()) {
+        return std::nullopt;
+    }
     auto root = system.GetFileSystemController().GetModificationLoadRoot(title_id);
     if (!root) {
         return std::nullopt;
@@ -385,7 +393,7 @@ std::optional<SelectedLoadPlanPackage> SelectLoadPlanPackage(System& system, u64
             std::ranges::transform(manifest_title, manifest_title.begin(), [](unsigned char c) {
                 return static_cast<char>(std::toupper(c));
             });
-            if (manifest_title != fmt::format("{:016X}", title_id)) {
+            if (manifest_title != std::format("{:016X}", title_id)) {
                 continue;
             }
         }
@@ -507,7 +515,7 @@ LoadPlanDiscovery ReadModLoadPlan(const FileSys::VirtualDir& assets,
         }
         const u32 format = json->value("format", 0u);
         if ((format != 1u && format != 2u) ||
-            json->value("title_id", std::string{}) != fmt::format("{:016X}", title_id) ||
+            json->value("title_id", std::string{}) != std::format("{:016X}", title_id) ||
             json->value("build_id", std::string{}) != build) {
             return fail(Unsupported, "load plan is for another title or build");
         }

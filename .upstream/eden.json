@@ -1,8 +1,16 @@
 {
   "repository": "https://git.eden-emu.dev/eden-emu/eden",
   "channel": "nightly",
-  "source_commit": "a594c8d60ef79280adc046760561912207e16e17",
+  "source_commit": "6a767ac43a089fe988526bf7f8477ccc43277fb1",
   "original_base": "d9336ce6ce4c043a20862e567711c7b0bc1e11b6",
-  "release_tag": "v1791929232.a594c8d60e",
-  "release_url": "https://git.eden-emu.dev/eden-ci/nightly/releases/tag/v1791929232.a594c8d60e"
+  "release_tag": "v1794272405.6a767ac43a",
+  "release_url": "https://git.eden-emu.dev/eden-ci/nightly/releases/tag/v1794272405.6a767ac43a",
+  "backports": [
+    {
+      "commit": "989768aa46",
+      "pr": "#4548",
+      "title": "Fix [core, gpu, threads] Multithreading refactor (#4254)",
+      "date": "2026-10-23"
+    }
+  ]
 }

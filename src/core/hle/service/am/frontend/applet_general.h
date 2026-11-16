@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -41,6 +44,8 @@ private:
     u8 arg0 = 0;
     u8 arg1 = 0;
     u8 arg2 = 0;
+
+    void unimplementedLog();
 };
 
 enum class PhotoViewerAppletMode : u8 {

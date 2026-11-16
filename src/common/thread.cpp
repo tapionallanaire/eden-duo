@@ -6,14 +6,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "common/adpf.h"
 #include "common/error.h"
+#include "common/event_wait.h"
 #include "common/logging.h"
 #include "common/assert.h"
+#include "common/settings.h"
 #include "common/thread.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -44,6 +50,7 @@
 #ifdef __linux__
 #include <sys/resource.h>
 #include <algorithm>
+#include <fstream>
 
 namespace {
 constexpr int NICE_AUDIO = -16;
@@ -105,6 +112,10 @@ enum class CoreGroup {
     Unrestricted,
     Performance,
     Efficiency,
+    /// The performance cores, including one kept for this group alone (see performance_shared).
+    Critical,
+    /// The one core Critical keeps for itself (EDEN_NX2_BACK_CORE=prime).
+    Prime,
 };
 
 struct ThreadPolicy {
@@ -124,6 +135,10 @@ struct CpuTopologyState {
     std::mutex topology_mutex;
     cpu_set_t allowed{};
     cpu_set_t performance{};
+    /// The performance cores other threads use: all but a strictly fastest one (Snapdragon 865's
+    /// prime core), which is left to the critical group.
+    cpu_set_t performance_shared{};
+    cpu_set_t prime{};
     cpu_set_t efficiency{};
     bool separated = false;
     bool initialized = false;
@@ -204,6 +219,48 @@ u64 ReadCpuMidr(s32 cpu) {
     return midr;
 }
 
+/// The affinity mask of [tid] in this process (0: the main thread). sched_getaffinity reports only
+/// the CPUs active at that moment: Qualcomm's core_ctl parks idle big and prime cores, so at launch
+/// a Snapdragon 865 reported 0-5 and the GPU and CPU threads ran on two big and two little cores
+/// for the whole session, the prime core unused. Cpus_allowed_list is the mask itself.
+bool ReadAllowedCpus(pid_t tid, cpu_set_t& mask) {
+    std::ifstream file(tid == 0 ? std::string("/proc/self/status")
+                                : "/proc/self/task/" + std::to_string(tid) + "/status");
+    constexpr std::string_view key = "Cpus_allowed_list:";
+    std::string line;
+    while (file && std::getline(file, line)) {
+        if (!line.starts_with(key)) {
+            continue;
+        }
+        CPU_ZERO(&mask);
+        const char* cursor = line.c_str() + key.size();
+        while (*cursor != '\0') {
+            char* end = nullptr;
+            const s64 first = std::strtol(cursor, &end, 10);
+            if (end == cursor) {
+                break;
+            }
+            s64 last = first;
+            if (*end == '-') {
+                cursor = end + 1;
+                last = std::strtol(cursor, &end, 10);
+                if (end == cursor) {
+                    break;
+                }
+            }
+            for (s64 cpu = first; cpu <= last && cpu < CPU_SETSIZE; ++cpu) {
+                CPU_SET(cpu, &mask);
+            }
+            cursor = *end == ',' ? end + 1 : end;
+        }
+        if (CPU_COUNT(&mask) > 0) {
+            return true;
+        }
+        break;
+    }
+    return sched_getaffinity(tid == 0 ? getpid() : tid, sizeof(mask), &mask) == 0;
+}
+
 std::vector<CoreInfo> CollectCores(const cpu_set_t& allowed, s32 total, const char* node,
                                    bool require_all) {
     std::vector<CoreInfo> cores;
@@ -242,9 +299,11 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     state.separated = false;
     CPU_ZERO(&state.allowed);
     CPU_ZERO(&state.performance);
+    CPU_ZERO(&state.performance_shared);
+    CPU_ZERO(&state.prime);
     CPU_ZERO(&state.efficiency);
 
-    if (sched_getaffinity(getpid(), sizeof(state.allowed), &state.allowed) != 0) {
+    if (!ReadAllowedCpus(0, state.allowed)) {
         LOG_WARNING(Common, "Could not query process CPU affinity: {}",
                     ::Common::GetLastErrorMsg());
         return;
@@ -294,6 +353,11 @@ void ComputeTopologyLocked(CpuTopologyState& state) {
     if (taken == 0) {
         return;
     }
+    state.performance_shared = state.performance;
+    if (taken >= 3 && cores[0].weight > cores[1].weight) {
+        CPU_CLR(cores[0].cpu, &state.performance_shared);
+        CPU_SET(cores[0].cpu, &state.prime);
+    }
 
     for (s32 cpu = 0; cpu < total; ++cpu) {
         if (CPU_ISSET(cpu, &state.allowed) && !CPU_ISSET(cpu, &state.performance)) {
@@ -320,7 +384,7 @@ void RefreshTopologyLocked(CpuTopologyState& state) {
     }
     cpu_set_t current;
     CPU_ZERO(&current);
-    if (sched_getaffinity(getpid(), sizeof(current), &current) != 0) {
+    if (!ReadAllowedCpus(0, current)) {
         return;
     }
     if (std::memcmp(&current, &state.allowed, sizeof(current)) != 0) {
@@ -333,7 +397,11 @@ bool ApplyCoreGroupLocked(CpuTopologyState& state, pid_t tid, CoreGroup group,
     const bool restrict_group = group != CoreGroup::Unrestricted && state.separated;
     const cpu_set_t* mask = &state.allowed;
     if (restrict_group) {
-        mask = group == CoreGroup::Performance ? &state.performance : &state.efficiency;
+        mask = group == CoreGroup::Critical      ? &state.performance
+               : group == CoreGroup::Prime       ? (CPU_COUNT(&state.prime) > 0 ? &state.prime
+                                                                              : &state.performance)
+               : group == CoreGroup::Performance ? &state.performance_shared
+                                                 : &state.efficiency;
     }
     if (CPU_COUNT(mask) == 0) {
         return false;
@@ -374,7 +442,7 @@ void SnapshotCanaryLocked(CpuTopologyState& state) {
         }
         cpu_set_t mask;
         CPU_ZERO(&mask);
-        if (sched_getaffinity(policy.tid, sizeof(mask), &mask) != 0) {
+        if (!ReadAllowedCpus(policy.tid, mask)) {
             continue;
         }
         state.canary_tid = policy.tid;
@@ -447,7 +515,417 @@ void RememberCurrentThreadNice(pid_t tid, s32 nice_value) {
 #include "common/x64/rdtsc.h"
 #endif
 
+#ifdef _WIN32
+namespace {
+// Hybrid CPUs (Intel P/E cores): Windows alone may run the emulator's time-critical threads on an
+// efficiency core, where a frame takes much longer. Keep them on the fastest cores with CPU sets
+// (a soft affinity the power manager respects) and background workers on the slower ones.
+// EDEN_HYBRID_CORES=0 turns this off.
+struct WindowsCpuSets {
+    std::vector<ULONG> performance;
+    std::vector<ULONG> efficiency;
+    bool hybrid = false;
+};
+
+const WindowsCpuSets& CpuSets() {
+    static const WindowsCpuSets sets = [] {
+        WindowsCpuSets result;
+        if (const char* text = std::getenv("EDEN_HYBRID_CORES");
+            text != nullptr && std::strtol(text, nullptr, 10) == 0) {
+            LOG_INFO(Common, "Hybrid core placement off (EDEN_HYBRID_CORES=0)");
+            return result;
+        }
+        using PFN_GetSystemCpuSetInformation = BOOL(WINAPI*)(PSYSTEM_CPU_SET_INFORMATION, ULONG,
+                                                             PULONG, HANDLE, ULONG);
+        const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        const auto get = reinterpret_cast<PFN_GetSystemCpuSetInformation>(
+            reinterpret_cast<void*>(GetProcAddress(kernel32, "GetSystemCpuSetInformation")));
+        if (get == nullptr) {
+            return result;
+        }
+        ULONG length = 0;
+        get(nullptr, 0, &length, GetCurrentProcess(), 0);
+        if (length == 0) {
+            return result;
+        }
+        std::vector<u8> buffer(length);
+        if (!get(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length,
+                 GetCurrentProcess(), 0)) {
+            return result;
+        }
+        struct Entry {
+            ULONG id;
+            u8 efficiency_class;
+        };
+        std::vector<Entry> entries;
+        u8 best = 0;
+        for (ULONG offset = 0; offset + sizeof(SYSTEM_CPU_SET_INFORMATION) <= length;) {
+            const auto* info =
+                reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
+            if (info->Size == 0) {
+                break;
+            }
+            if (info->Type == CpuSetInformation) {
+                entries.push_back({info->CpuSet.Id, info->CpuSet.EfficiencyClass});
+                best = (std::max)(best, static_cast<u8>(info->CpuSet.EfficiencyClass));
+            }
+            offset += info->Size;
+        }
+        for (const Entry& entry : entries) {
+            (entry.efficiency_class == best ? result.performance : result.efficiency)
+                .push_back(entry.id);
+        }
+        result.hybrid = !result.efficiency.empty() && result.performance.size() >= 2;
+        if (result.hybrid) {
+            LOG_INFO(Common,
+                     "Hybrid CPU: {} performance and {} efficiency logical processors, "
+                     "time-critical threads stay on the performance cores",
+                     result.performance.size(), result.efficiency.size());
+        }
+        return result;
+    }();
+    return sets;
+}
+
+void SelectCurrentThreadCpuSets(const std::vector<ULONG>& ids) {
+    using PFN_SetThreadSelectedCpuSets = BOOL(WINAPI*)(HANDLE, const ULONG*, ULONG);
+    static const auto set = reinterpret_cast<PFN_SetThreadSelectedCpuSets>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadSelectedCpuSets")));
+    if (set == nullptr) {
+        return;
+    }
+    if (!set(GetCurrentThread(), ids.empty() ? nullptr : ids.data(),
+             static_cast<ULONG>(ids.size()))) {
+        LOG_WARNING(Common, "SetThreadSelectedCpuSets failed: {}", Common::GetLastErrorMsg());
+    }
+}
+} // Anonymous namespace
+#endif
+
 namespace Common {
+
+#ifdef _WIN32
+namespace {
+
+struct Win32CacheTopology {
+    DWORD_PTR process_mask = 0;
+    DWORD_PTR performance_mask = 0;
+    DWORD_PTR efficiency_mask = 0;
+    bool asymmetric = false;
+};
+
+const Win32CacheTopology& GetWin32CacheTopology() {
+    static const Win32CacheTopology topology = [] {
+        Win32CacheTopology result{};
+        DWORD_PTR system_mask = 0;
+        if (!GetProcessAffinityMask(GetCurrentProcess(), &result.process_mask, &system_mask) ||
+            result.process_mask == 0) {
+            return result;
+        }
+        DWORD length = 0;
+        GetLogicalProcessorInformationEx(RelationCache, nullptr, &length);
+        if (length == 0) {
+            return result;
+        }
+        std::vector<u8> buffer(length);
+        auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+        if (!GetLogicalProcessorInformationEx(RelationCache, info, &length)) {
+            return result;
+        }
+        DWORD max_l3_size = 0;
+        DWORD min_l3_size = (std::numeric_limits<DWORD>::max)();
+        struct L3Domain {
+            DWORD size;
+            DWORD_PTR mask;
+        };
+        std::vector<L3Domain> domains;
+        for (DWORD offset = 0; offset < length;) {
+            const auto* entry =
+                reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+            if (entry->Size == 0) {
+                break;
+            }
+            if (entry->Relationship == RelationCache && entry->Cache.Level == 3 &&
+                (entry->Cache.Type == CacheUnified || entry->Cache.Type == CacheData)) {
+                DWORD_PTR domain_mask = 0;
+                const WORD group_count = entry->Cache.GroupCount > 0 ? entry->Cache.GroupCount : 1;
+                for (WORD g = 0; g < group_count; ++g) {
+                    if (entry->Cache.GroupMasks[g].Group == 0) {
+                        domain_mask |= entry->Cache.GroupMasks[g].Mask & result.process_mask;
+                    }
+                }
+                if (domain_mask != 0 && entry->Cache.CacheSize > 0) {
+                    max_l3_size = (std::max)(max_l3_size, entry->Cache.CacheSize);
+                    min_l3_size = (std::min)(min_l3_size, entry->Cache.CacheSize);
+                    domains.push_back({entry->Cache.CacheSize, domain_mask});
+                }
+            }
+            offset += entry->Size;
+        }
+        if (domains.size() >= 2 && max_l3_size > min_l3_size) {
+            for (const auto& domain : domains) {
+                if (domain.size == max_l3_size) {
+                    result.performance_mask |= domain.mask;
+                } else {
+                    result.efficiency_mask |= domain.mask;
+                }
+            }
+            result.efficiency_mask &= ~result.performance_mask;
+            result.asymmetric = result.performance_mask != 0 && result.efficiency_mask != 0;
+            if (result.asymmetric) {
+                LOG_INFO(Common,
+                         "Detected asymmetric L3 cache ({} MiB vs {} MiB): 3D V-Cache mask={:#x}, "
+                         "secondary CCD mask={:#x}",
+                         max_l3_size >> 20, min_l3_size >> 20, result.performance_mask,
+                         result.efficiency_mask);
+            }
+        }
+        return result;
+    }();
+    return topology;
+}
+
+bool IsVCachePinningEnabled() {
+    static const int env_override = [] {
+        if (const char* env = std::getenv("EDEN_NX2_VCACHE")) {
+            return env[0] == '0' ? 0 : 1;
+        }
+        return -1;
+    }();
+    if (env_override >= 0) {
+        return env_override != 0;
+    }
+    return Settings::values.prefer_3d_vcache.GetValue();
+}
+
+enum class Win32CoreGroup {
+    Unrestricted,
+    Performance,
+    Efficiency,
+};
+
+struct Win32ThreadPolicy {
+    DWORD tid;
+    HANDLE handle;
+    Win32CoreGroup group;
+};
+
+struct Win32PolicyState {
+    std::mutex mutex;
+    std::vector<Win32ThreadPolicy> policies;
+};
+
+Win32PolicyState& GetWin32PolicyState() {
+    static Win32PolicyState* const state = new Win32PolicyState();
+    return *state;
+}
+
+DWORD_PTR MaskForWin32Group(const Win32CacheTopology& topology, Win32CoreGroup group,
+                            bool vcache_enabled) {
+    if (!vcache_enabled || group == Win32CoreGroup::Unrestricted) {
+        return topology.process_mask;
+    }
+    return group == Win32CoreGroup::Performance ? topology.performance_mask
+                                                : topology.efficiency_mask;
+}
+
+struct Win32PolicyRegistration {
+    ~Win32PolicyRegistration() {
+        const DWORD tid = GetCurrentThreadId();
+        Win32PolicyState& state = GetWin32PolicyState();
+        std::scoped_lock lock{state.mutex};
+        for (auto it = state.policies.begin(); it != state.policies.end(); ++it) {
+            if (it->tid == tid) {
+                if (it->handle != nullptr) {
+                    CloseHandle(it->handle);
+                }
+                state.policies.erase(it);
+                break;
+            }
+        }
+    }
+};
+
+thread_local Win32PolicyRegistration t_win32_policy_registration;
+
+void SetCurrentThreadWin32Group(Win32CoreGroup group) {
+    const auto& topology = GetWin32CacheTopology();
+    if (!topology.asymmetric) {
+        return;
+    }
+    (void)&t_win32_policy_registration;
+    const DWORD tid = GetCurrentThreadId();
+    SetThreadAffinityMask(GetCurrentThread(),
+                          MaskForWin32Group(topology, group, IsVCachePinningEnabled()));
+
+    Win32PolicyState& state = GetWin32PolicyState();
+    std::scoped_lock lock{state.mutex};
+    for (auto& policy : state.policies) {
+        if (policy.tid == tid) {
+            policy.group = group;
+            return;
+        }
+    }
+    HANDLE dup_handle = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &dup_handle,
+                        THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, 0)) {
+        state.policies.push_back(Win32ThreadPolicy{tid, dup_handle, group});
+    }
+}
+
+} // Anonymous namespace
+#elif defined(__linux__) && !defined(__ANDROID__)
+namespace {
+
+enum class LinuxCoreGroup {
+    Unrestricted,
+    Performance,
+    Efficiency,
+};
+
+struct LinuxCacheTopology {
+    cpu_set_t process_mask{};
+    cpu_set_t performance_mask{};
+    cpu_set_t efficiency_mask{};
+    bool asymmetric = false;
+};
+
+u64 ReadLinuxL3CacheSize(s32 cpu) {
+    std::ifstream file("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cache/index3/size");
+    std::string text;
+    if (!file || !(file >> text) || text.empty()) {
+        return 0;
+    }
+    char* end = nullptr;
+    u64 value = std::strtoull(text.c_str(), &end, 10);
+    if (end != nullptr) {
+        if (*end == 'K' || *end == 'k') {
+            value <<= 10;
+        } else if (*end == 'M' || *end == 'm') {
+            value <<= 20;
+        }
+    }
+    return value;
+}
+
+const LinuxCacheTopology& GetLinuxCacheTopology() {
+    static const LinuxCacheTopology topology = [] {
+        LinuxCacheTopology result{};
+        CPU_ZERO(&result.process_mask);
+        CPU_ZERO(&result.performance_mask);
+        CPU_ZERO(&result.efficiency_mask);
+        if (sched_getaffinity(0, sizeof(result.process_mask), &result.process_mask) != 0) {
+            return result;
+        }
+        u64 max_l3 = 0;
+        u64 min_l3 = (std::numeric_limits<u64>::max)();
+        std::vector<std::pair<s32, u64>> cpu_l3;
+        for (s32 cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+            if (!CPU_ISSET(cpu, &result.process_mask)) {
+                continue;
+            }
+            const u64 l3 = ReadLinuxL3CacheSize(cpu);
+            if (l3 > 0) {
+                max_l3 = (std::max)(max_l3, l3);
+                min_l3 = (std::min)(min_l3, l3);
+                cpu_l3.emplace_back(cpu, l3);
+            }
+        }
+        if (cpu_l3.size() >= 2 && max_l3 > min_l3) {
+            for (const auto& [cpu, l3] : cpu_l3) {
+                if (l3 == max_l3) {
+                    CPU_SET(cpu, &result.performance_mask);
+                } else {
+                    CPU_SET(cpu, &result.efficiency_mask);
+                }
+            }
+            result.asymmetric =
+                CPU_COUNT(&result.performance_mask) > 0 && CPU_COUNT(&result.efficiency_mask) > 0;
+            if (result.asymmetric) {
+                LOG_INFO(Common,
+                         "Detected asymmetric L3 cache ({} MiB vs {} MiB): {} 3D V-Cache threads, "
+                         "{} secondary threads",
+                         max_l3 >> 20, min_l3 >> 20, CPU_COUNT(&result.performance_mask),
+                         CPU_COUNT(&result.efficiency_mask));
+            }
+        }
+        return result;
+    }();
+    return topology;
+}
+
+bool IsVCachePinningEnabled() {
+    static const int env_override = [] {
+        if (const char* env = std::getenv("EDEN_NX2_VCACHE")) {
+            return env[0] == '0' ? 0 : 1;
+        }
+        return -1;
+    }();
+    if (env_override >= 0) {
+        return env_override != 0;
+    }
+    return Settings::values.prefer_3d_vcache.GetValue();
+}
+
+struct LinuxThreadPolicy {
+    pid_t tid;
+    LinuxCoreGroup group;
+};
+
+struct LinuxPolicyState {
+    std::mutex mutex;
+    std::vector<LinuxThreadPolicy> policies;
+};
+
+LinuxPolicyState& GetLinuxPolicyState() {
+    static LinuxPolicyState* const state = new LinuxPolicyState();
+    return *state;
+}
+
+const cpu_set_t& MaskForLinuxGroup(const LinuxCacheTopology& topology, LinuxCoreGroup group,
+                                   bool vcache_enabled) {
+    if (!vcache_enabled || group == LinuxCoreGroup::Unrestricted) {
+        return topology.process_mask;
+    }
+    return group == LinuxCoreGroup::Performance ? topology.performance_mask
+                                                : topology.efficiency_mask;
+}
+
+struct LinuxPolicyRegistration {
+    ~LinuxPolicyRegistration() {
+        const pid_t tid = gettid();
+        LinuxPolicyState& state = GetLinuxPolicyState();
+        std::scoped_lock lock{state.mutex};
+        std::erase_if(state.policies,
+                      [tid](const LinuxThreadPolicy& policy) { return policy.tid == tid; });
+    }
+};
+
+thread_local LinuxPolicyRegistration t_linux_policy_registration;
+
+void SetCurrentThreadLinuxGroup(LinuxCoreGroup group) {
+    const auto& topology = GetLinuxCacheTopology();
+    if (!topology.asymmetric) {
+        return;
+    }
+    (void)&t_linux_policy_registration;
+    const pid_t tid = gettid();
+    const auto& mask = MaskForLinuxGroup(topology, group, IsVCachePinningEnabled());
+    sched_setaffinity(tid, sizeof(mask), &mask);
+
+    LinuxPolicyState& state = GetLinuxPolicyState();
+    std::scoped_lock lock{state.mutex};
+    for (auto& policy : state.policies) {
+        if (policy.tid == tid) {
+            policy.group = group;
+            return;
+        }
+    }
+    state.policies.push_back(LinuxThreadPolicy{tid, group});
+}
+
+} // Anonymous namespace
+#endif
 
 void SetCurrentThreadPriority(ThreadPriority new_priority) {
 #ifdef _WIN32
@@ -504,12 +982,22 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 }
 
 void SetCurrentThreadName(const char* name) {
-#ifdef _MSC_VER
+#ifdef _WIN32
     // Sets the debugger-visible name of the current thread.
     if (auto pf = (decltype(&SetThreadDescription))(void*)GetProcAddress(GetModuleHandle(TEXT("KernelBase.dll")), "SetThreadDescription"); pf)
         pf(GetCurrentThread(), UTF8ToUTF16W(name).data()); // Windows 10+
     else
         ; // No-op
+    // EDEN_NX2_OTHER_AFFINITY=<hex mask>: the logical CPUs every other named emulator thread may
+    // use, to keep them off the CPUs EDEN_NX2_CORE_AFFINITY gives the emulated cores (those set
+    // their own mask after naming themselves).
+    static const u64 other_mask = [] {
+        const char* text = std::getenv("EDEN_NX2_OTHER_AFFINITY");
+        return text != nullptr ? std::strtoull(text, nullptr, 16) : 0ULL;
+    }();
+    if (other_mask != 0) {
+        SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(other_mask));
+    }
 #elif  defined(__APPLE__)
     pthread_setname_np(name);
 #elif defined(__HAIKU__)
@@ -541,11 +1029,40 @@ void SetCurrentThreadName(const char* name) {
 
 void SetCurrentThreadToPerformanceCores() {
 #if defined(__ANDROID__)
-    if (ADPF::AddCurrentThread(ADPF::Session::Render)) {
-        SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
-        return;
-    }
+    // The core group applies with or without a performance hint session. Left unrestricted
+    // under ADPF, the scheduler put a guest thread and the GPU thread on the one prime core
+    // and did not preempt between them for 20-27 ms at a time: one frame in ~150 of FINAL
+    // FANTASY RESONANCE shown a refresh late on the Odin 2. Guest threads on the shared
+    // performance cores and the GPU thread on all of them gave 0 late frames in 3 minutes.
+    ADPF::AddCurrentThread(ADPF::Session::Render);
     SetCurrentThreadCoreGroup(CoreGroup::Performance);
+#elif defined(_WIN32)
+    SetCurrentThreadWin32Group(Win32CoreGroup::Performance);
+    if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
+        SelectCurrentThreadCpuSets(sets.performance);
+    }
+#elif defined(__linux__)
+    SetCurrentThreadLinuxGroup(LinuxCoreGroup::Performance);
+#endif
+}
+
+void SetCurrentThreadAffinity([[maybe_unused]] u64 mask) {
+#ifdef _WIN32
+    SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask));
+#endif
+}
+
+void SetCurrentThreadToCriticalCores() {
+#if defined(__ANDROID__)
+    ADPF::AddCurrentThread(ADPF::Session::Render);
+    SetCurrentThreadCoreGroup(CoreGroup::Critical);
+#endif
+}
+
+void SetCurrentThreadToPrimeCore() {
+#if defined(__ANDROID__)
+    ADPF::AddCurrentThread(ADPF::Session::Render);
+    SetCurrentThreadCoreGroup(CoreGroup::Prime);
 #endif
 }
 
@@ -556,6 +1073,13 @@ void SetCurrentThreadToEfficiencyCores() {
         return;
     }
     SetCurrentThreadCoreGroup(CoreGroup::Efficiency);
+#elif defined(_WIN32)
+    SetCurrentThreadWin32Group(Win32CoreGroup::Efficiency);
+    if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
+        SelectCurrentThreadCpuSets(sets.efficiency);
+    }
+#elif defined(__linux__)
+    SetCurrentThreadLinuxGroup(LinuxCoreGroup::Efficiency);
 #endif
 }
 
@@ -563,6 +1087,13 @@ void SetCurrentThreadToBackgroundWork() {
 #if defined(__ANDROID__)
     ADPF::AddCurrentThread(ADPF::Session::Background);
     SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
+#elif defined(_WIN32)
+    SetCurrentThreadWin32Group(Win32CoreGroup::Efficiency);
+    if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
+        SelectCurrentThreadCpuSets({});
+    }
+#elif defined(__linux__)
+    SetCurrentThreadLinuxGroup(LinuxCoreGroup::Efficiency);
 #endif
 }
 
@@ -570,6 +1101,13 @@ void SetCurrentThreadToAllCores() {
 #if defined(__ANDROID__)
     ADPF::RemoveCurrentThread();
     SetCurrentThreadCoreGroup(CoreGroup::Unrestricted);
+#elif defined(_WIN32)
+    SetCurrentThreadWin32Group(Win32CoreGroup::Unrestricted);
+    if (const WindowsCpuSets& sets = CpuSets(); sets.hybrid) {
+        SelectCurrentThreadCpuSets({});
+    }
+#elif defined(__linux__)
+    SetCurrentThreadLinuxGroup(LinuxCoreGroup::Unrestricted);
 #endif
 }
 
@@ -593,6 +1131,32 @@ void RefreshThreadPolicies() {
         return gone;
     });
     SnapshotCanaryLocked(state);
+#elif defined(_WIN32)
+    const auto& topology = GetWin32CacheTopology();
+    if (!topology.asymmetric) {
+        return;
+    }
+    const bool vcache_enabled = IsVCachePinningEnabled();
+    Win32PolicyState& state = GetWin32PolicyState();
+    std::scoped_lock lock{state.mutex};
+    for (const auto& policy : state.policies) {
+        if (policy.handle != nullptr) {
+            SetThreadAffinityMask(policy.handle,
+                                  MaskForWin32Group(topology, policy.group, vcache_enabled));
+        }
+    }
+#elif defined(__linux__)
+    const auto& topology = GetLinuxCacheTopology();
+    if (!topology.asymmetric) {
+        return;
+    }
+    const bool vcache_enabled = IsVCachePinningEnabled();
+    LinuxPolicyState& state = GetLinuxPolicyState();
+    std::scoped_lock lock{state.mutex};
+    for (const auto& policy : state.policies) {
+        const auto& mask = MaskForLinuxGroup(topology, policy.group, vcache_enabled);
+        sched_setaffinity(policy.tid, sizeof(mask), &mask);
+    }
 #endif
 }
 
@@ -621,7 +1185,7 @@ void PollThreadPolicies() {
 
     cpu_set_t current;
     CPU_ZERO(&current);
-    if (sched_getaffinity(tid, sizeof(current), &current) == 0 &&
+    if (ReadAllowedCpus(tid, current) &&
         std::memcmp(&current, &expected, sizeof(current)) == 0) {
         return;
     }
@@ -646,31 +1210,30 @@ __attribute__((target("waitpkg,mwaitx")))
 #endif
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
-    auto const start = Common::X64::FencedRDTSC();
     auto const& caps = Common::g_cpu_caps;
-    [[maybe_unused]] auto const end = start + Common::g_wall_clock.NsToTicks(time);
+    const auto deadline = EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()), time);
+    const auto remaining = [deadline] {
+        return deadline - std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch());
+    };
+    const u64 ticks_per_second = Common::g_wall_clock.NsToTicks(std::chrono::seconds{1});
     if (caps.monitorx) {
         while (true) {
             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
             // to prevent a race condition.
             _mm_monitorx(reinterpret_cast<u64*>(std::addressof(is_set)), 0, 0);
             if (!is_set.load()) {
-                // RDTSC may be fenced here due to atomic load
-#ifdef _MSC_VER
-                auto const now = __rdtsc();
-#else
-                auto const now = _rdtsc();
-#endif
-                if (end > now) {
-                    u32 const cycles = std::min<u32>((std::numeric_limits<u32>::max)(), s64(end) - s64(now));
+                const u32 cycles = MwaitxTimeoutCycles(remaining(), ticks_per_second);
+                if (cycles != 0) {
                     // See here: https://github.com/torvalds/linux/blob/948a64995aca6820abefd17f1a4258f5835c5ad9/arch/x86/lib/delay.c#L93
                     // MWAITX accepts a 32-bit input timer which determines the total number of cycles to wait for
                     // NOT THE TOTAL ABSOLUTE TSC VALUE, it's just a delta
                     // BIT[1] = use a timer
                     // Hint = 0: Use C1 state when sleepy (means slower wakeup but better savings)
                     _mm_mwaitx(1 << 1, 0u, cycles);
-                    if (!is_set.load())
-                        return false;
+                    continue;
                 } else
                     return false; //timeout
             }
@@ -678,31 +1241,36 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
             if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
                 return true;
         }
-    } else if (caps.waitpkg) {
+    }
+    if (caps.waitpkg) {
         // #UD If CPUID.7.0:ECX.WAITPKG[bit 5]=0.
         while (true) {
             _umonitor(std::addressof(is_set));
-            if (!is_set.load() && !_umwait(0, end)) //umwait is absolute time!!!
-                return false;
+            if (!is_set.load()) {
+                // UMWAIT also wakes early on interrupts, and its result (CF) only reports the OS
+                // limit (IA32_UMWAIT_CONTROL). Wait again until the deadline, as for MWAITX. The
+                // bounded budget keeps the absolute TSC deadline from wrapping.
+                const u32 cycles = MwaitxTimeoutCycles(remaining(), ticks_per_second);
+                if (cycles == 0)
+                    return false; // timeout
+                _umwait(0, Common::X64::FencedRDTSC() + cycles); // umwait is absolute time!!!
+                continue;
+            }
             bool expected = true;
             if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
                 return true;
         }
-    } else {
-#ifdef _MSC_VER
-        while (!is_set.load() && end > __rdtsc())
-            Common::Windows::SleepForOneTick();
-#else
-        while (!is_set.load() && end > _rdtsc())
-            Common::Windows::SleepForOneTick();
-#endif
-        if (is_set.load())
-            Reset();
-        return true;
     }
+    while (!is_set.load() && remaining() > std::chrono::nanoseconds::zero())
+        Common::Windows::SleepForOneTick();
+    bool expected = true;
+    return is_set.compare_exchange_strong(expected, false, std::memory_order_release);
 #else
     std::unique_lock lk{mutex};
-    if (!condvar.wait_for(lk, time, [this] { return is_set.load(); }))
+    const auto now = std::chrono::steady_clock::now();
+    const auto deadline = std::chrono::steady_clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    if (!condvar.wait_until(lk, deadline, [this] { return is_set.load(); }))
         return false;
     is_set = false;
     return true;
@@ -719,7 +1287,10 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
     return true;
 #else
     std::unique_lock lk{mutex};
-    if (!condvar.wait_for(lk, time, [this] { return is_set.load(); }))
+    const auto now = std::chrono::steady_clock::now();
+    const auto deadline = std::chrono::steady_clock::time_point{EventWaitDeadline(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()), time)};
+    if (!condvar.wait_until(lk, deadline, [this] { return is_set.load(); }))
         return false;
     is_set = false;
     return true;

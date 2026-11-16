@@ -197,7 +197,7 @@ enum class LanguageCode : u64 {
     ZH_HANS = 0x00736E61482D687A,
     ZH_HANT = 0x00746E61482D687A,
     PT_BR = 0x00000052422D7470,
-    PL = 0x000000000000706C,
+    PL = 0x0000000000006C70,
     TH = 0x0000000000006874,
 };
 
@@ -447,7 +447,7 @@ struct FirmwareVersionFormat {
     std::array<char, 0x80> display_title;
 };
 static_assert(sizeof(FirmwareVersionFormat) == 0x100, "FirmwareVersionFormat is an invalid size");
-static_assert(std::is_trivial_v<FirmwareVersionFormat>,
+static_assert(std::is_trivially_default_constructible_v<FirmwareVersionFormat> && std::is_trivially_copyable_v<FirmwareVersionFormat>,
               "FirmwareVersionFormat type must be trivially copyable.");
 
 /// This is nn::settings::system::HomeMenuScheme

@@ -455,10 +455,19 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             Log.warning("[EmulationFragment] Failed to load Freedreno config: ${e.message}")
         }
 
-        emulationState = EmulationState(game!!.path, game!!.programId) {
-            return@EmulationState driverViewModel.isInteractionAllowed.value &&
-                !isStoppingForRomSwap
-        }
+        emulationState = EmulationState(
+            game!!.path,
+            game!!.programId,
+            {
+                driverViewModel.isInteractionAllowed.value && !isStoppingForRomSwap
+            },
+            {
+                finishWarmUpIfAny()
+                finishShaderRunIfAny()
+            },
+            // Eden Duo: this launch records shaders or compiles them (see ShaderRuns).
+            { NativeLibrary.setShaderRunMode(recordShaders, compileShaders, compileMax) }
+        )
     }
 
     /**
@@ -715,6 +724,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         if (requireActivity().isFinishing) {
             return
         }
+        // Eden Duo: a warm-up launch carries its length, save backup and shader count.
+        readWarmUpRequest()
 
         if (args.overlayGamelessEditMode) {
             setupOverlayGamelessEditMode()
@@ -773,8 +784,9 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         gpuModel = GpuDriverHelper.hookLibPath?.let { GpuDriverHelper.getGpuModel(hookLibPath = it).toString() } ?: "Unknown"
         fwVersion = NativeLibrary.firmwareVersion()
 
-        // Eden Duo: a release is named by its version in the overlay (DuoBuildLabel).
+        // Eden Duo: a release is named by the app's name and version in the overlay (DuoBuildLabel).
         buildId = org.yuzu.yuzu_emu.duo.DuoBuildLabel.overlay(
+            getString(R.string.app_name),
             org.yuzu.yuzu_emu.BuildConfig.VERSION_NAME,
             NativeLibrary.getBuildVersion()
         )
@@ -805,6 +817,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 binding.inGameMenu.requestFocus()
                 emulationViewModel.setDrawerOpen(true)
                 updateQuickOverlayMenuEntry(BooleanSetting.SHOW_INPUT_OVERLAY.getBoolean())
+                updateCompanionMenuEntry() // Eden Duo
                 if (drawerView == binding.inGameMenu) {
                     binding.drawerLayout.closeDrawer(binding.quickSettingsSheet)
                 } else if (drawerView == binding.quickSettingsSheet) {
@@ -834,6 +847,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         binding.inGameMenu.menu.findItem(R.id.menu_quick_settings)?.isVisible =
             BooleanSetting.ENABLE_QUICK_SETTINGS.getBoolean()
+        binding.inGameMenu.menu.findItem(R.id.menu_cheats)?.isVisible = false
 
         binding.pausedIcon.setOnClickListener {
             if (this::emulationState.isInitialized && emulationState.isPaused) {
@@ -915,7 +929,26 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                     true
                 }
 
+                // Eden Duo: give back what the renderer caches when the device is short on memory.
+                R.id.menu_recover_memory -> {
+                    org.yuzu.yuzu_emu.utils.MemoryGuard.recoverWithToast(requireContext())
+                    true
+                }
+
+                // Eden Duo: hide / show the second-screen companion (CompanionToggle).
+                R.id.menu_toggle_companion -> {
+                    org.yuzu.yuzu_emu.duo.CompanionToggle.toggle(requireContext())
+                    updateCompanionMenuEntry()
+                    true
+                }
+
                 R.id.menu_load_amiibo -> handleLoadAmiiboSelection()
+
+                R.id.menu_cheats -> {
+                    binding.drawerLayout.closeDrawer(binding.inGameMenu)
+                    showRuntimeCheatDialog()
+                    true
+                }
 
                 R.id.menu_controls -> {
                     val action = HomeNavigationDirections.actionGlobalSettingsActivity(
@@ -1062,7 +1095,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
                 emulationState.updateSurface()
                 dualScreen.onEmulationStarted()
+                startWarmUpIfRequested()
+                startRecordingIfRequested()
 
+                binding.inGameMenu.menu.findItem(R.id.menu_cheats)?.isVisible =
+                    NativeLibrary.getRuntimeCheats().isNotEmpty()
                 updateShowStatsOverlay()
                 updateSocOverlay()
 
@@ -1088,6 +1125,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
         emulationViewModel.isEmulationStopping.collect(viewLifecycleOwner) {
             if (it) {
+                binding.inGameMenu.menu.findItem(R.id.menu_cheats)?.isVisible = false
                 binding.loadingText.setText(R.string.shutting_down)
                 ViewUtils.showView(binding.loadingIndicator)
                 ViewUtils.hideView(binding.inputContainer)
@@ -1222,6 +1260,45 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     fun editPostProcessing(action: () -> Unit) = withPerGameConfig(true) {
         action()
         NativePostProcessing.persist()
+    }
+
+    private fun showRuntimeCheatDialog() {
+        val cheats = NativeLibrary.getRuntimeCheats()
+        if (cheats.isEmpty()) return
+
+        val names = cheats.map { it.name.ifEmpty { getString(R.string.unnamed_cheat) } }.toTypedArray()
+        lateinit var dialog: androidx.appcompat.app.AlertDialog
+        dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.cheats)
+            .setMultiChoiceItems(names, cheats.map { it.enabled }.toBooleanArray()) { _, which, enabled ->
+                if (cheats[which].isMaster) {
+                    dialog.listView.setItemChecked(which, true)
+                } else if (!NativeLibrary.setRuntimeCheatEnabled(cheats[which].id, enabled)) {
+                    dialog.listView.setItemChecked(which, !enabled)
+                }
+            }
+            .setNegativeButton(R.string.disable_all_cheats) { _, _ ->
+                cheats.forEach {
+                    if (!it.isMaster) NativeLibrary.setRuntimeCheatEnabled(it.id, false)
+                }
+            }
+            .setNeutralButton(R.string.enable_all_cheats) { _, _ ->
+                cheats.forEach {
+                    if (!it.isMaster) NativeLibrary.setRuntimeCheatEnabled(it.id, true)
+                }
+            }
+            .setPositiveButton(R.string.done, null)
+            .create()
+        dialog.setOnShowListener {
+            val listView = dialog.listView
+            fun updateMasterVisuals() = repeat(listView.childCount) { index ->
+                listView.getChildAt(index).alpha =
+                    if (cheats[listView.firstVisiblePosition + index].isMaster) 0.38f else 1f
+            }
+            listView.setOnScrollChangeListener { _, _, _, _, _ -> updateMasterVisuals() }
+            updateMasterVisuals()
+        }
+        dialog.show()
     }
 
     private fun addQuickSettings() {
@@ -1636,6 +1713,26 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         addQuickSettings()
         dualScreen.onResume()
+        // Eden Duo: the companion toggle gesture only exists where a companion window can.
+        if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+            b.surfaceInputOverlay.touchscreenFilter = dualScreen.gameTouch::filter
+        }
+    }
+
+    // Eden Duo: the in-game menu's companion toggle names what it will do.
+    private fun updateCompanionMenuEntry() {
+        val item = _binding?.inGameMenu?.menu?.findItem(R.id.menu_toggle_companion) ?: return
+        // Eden Duo: no second panel, no companion to hide or show.
+        val duoAvailable = org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())
+        item.isVisible = duoAvailable
+        if (!duoAvailable) return
+        item.title = getString(
+            if (dualScreen.isCompanionHiddenByUser) {
+                R.string.companion_toggle_show
+            } else {
+                R.string.companion_toggle_hide
+            }
+        )
     }
 
     private fun resetInputOverlay() {
@@ -2409,10 +2506,158 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
     }
 
+    // ---- Eden Duo: shader warm-up ----
+
+    // Eden Duo: record / compile modes of this launch (see ShaderRuns). The counts are what the
+    // shader cache loader last reported, which for a compile run is its final built/total.
+    private var recordShaders = false
+    private var compileShaders = false
+    private var compileMax = false
+    private var shaderCompileBuilt = 0
+    private var shaderCompileTotal = 0
+
+    private var warmUpMinutes = 0
+    private var warmUpBackupPath: String? = null
+    private var warmUpShadersBefore = 0
+    private var warmUpDeadline = 0L
+    private val warmUpHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val warmUpTick = object : Runnable {
+        override fun run() {
+            val remaining = warmUpDeadline - android.os.SystemClock.elapsedRealtime()
+            if (remaining <= 0) {
+                warmUpHandler.removeCallbacks(this)
+                emulationState.stop()
+                return
+            }
+            val seconds = (remaining + 999) / 1000
+            binding.loadingText.text = getString(
+                R.string.warm_up_remaining,
+                String.format(java.util.Locale.US, "%d:%02d", seconds / 60, seconds % 60)
+            )
+            binding.loadingProgressIndicator.isIndeterminate = false
+            binding.loadingProgressIndicator.progress =
+                (warmUpMinutes * 60 - seconds).toInt().coerceAtLeast(0)
+            warmUpHandler.postDelayed(this, 1000)
+        }
+    }
+
+    /** Reads the warm-up request out of the launch intent, if this launch is one. */
+    private fun readWarmUpRequest() {
+        val intent = activity?.intent ?: return
+        warmUpMinutes = intent.getIntExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, 0)
+        warmUpBackupPath = intent.getStringExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_BACKUP)
+        warmUpShadersBefore = intent.getIntExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SHADERS_BEFORE, 0)
+        // Eden Duo: record / compile / compile max (see ShaderRuns).
+        recordShaders = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_RECORD, false)
+        compileShaders = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_COMPILE, false)
+        compileMax = intent.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_MAX, false)
+        org.yuzu.yuzu_emu.utils.ShaderRuns.recordingNow = recordShaders
+        org.yuzu.yuzu_emu.utils.ShaderRuns.compilingNow = compileShaders
+    }
+
+    /** Says the session is recording once it has booted, and names what it will keep. */
+    private fun startRecordingIfRequested() {
+        if (!recordShaders) return
+        Log.info("[ShaderRuns] recording ${game?.programId}")
+        android.widget.Toast.makeText(
+            requireContext().applicationContext,
+            getString(R.string.shader_record_started),
+            android.widget.Toast.LENGTH_LONG
+        ).show()
+    }
+
+    /**
+     * Runs when a record or compile run ends: the compile reports what it built, a recording what
+     * it captured, and the launch returns to the game's page.
+     */
+    private fun finishShaderRunIfAny() {
+        if (!recordShaders && !compileShaders) return
+        val wasCompile = compileShaders
+        val wasMax = compileMax
+        recordShaders = false
+        compileShaders = false
+        compileMax = false
+        org.yuzu.yuzu_emu.utils.ShaderRuns.recordingNow = false
+        org.yuzu.yuzu_emu.utils.ShaderRuns.compilingNow = false
+        val ctx = context?.applicationContext ?: return
+        val title = game ?: return
+        shaderCompileBuilt = org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt
+        shaderCompileTotal = org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal
+        org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt = 0
+        org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal = 0
+        val message = if (wasCompile) {
+            getString(
+                if (wasMax) R.string.shader_compile_max_done else R.string.shader_compile_done,
+                shaderCompileBuilt,
+                shaderCompileTotal
+            )
+        } else {
+            getString(
+                R.string.shader_record_done,
+                org.yuzu.yuzu_emu.utils.ShaderRuns.recordingCount(title)
+            )
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(ctx, message, android.widget.Toast.LENGTH_LONG).show()
+            activity?.finish()
+        }
+    }
+
+    /** Starts the countdown once the game has booted; the screen says how long is left. */
+    private fun startWarmUpIfRequested() {
+        if (warmUpMinutes <= 0) return
+        Log.info("[WarmUp] running $warmUpMinutes min for ${game?.programId}")
+        ViewUtils.showView(binding.loadingIndicator)
+        ViewUtils.hideView(binding.surfaceInputOverlay)
+        binding.loadingProgressIndicator.isIndeterminate = false
+        binding.loadingProgressIndicator.max = warmUpMinutes * 60
+        warmUpDeadline = android.os.SystemClock.elapsedRealtime() + warmUpMinutes * 60_000L
+        warmUpHandler.removeCallbacks(warmUpTick)
+        warmUpHandler.post(warmUpTick)
+    }
+
+    /**
+     * Runs on the emulation thread after the game stopped: the title's save goes back to what it
+     * was, the shader count is reported, and the warm-up launch returns to the library.
+     */
+    private fun finishWarmUpIfAny() {
+        if (warmUpMinutes <= 0) return
+        warmUpMinutes = 0
+        warmUpHandler.removeCallbacks(warmUpTick)
+        val ctx = context?.applicationContext
+        val title = game
+        if (ctx == null || title == null) return
+        val backup = warmUpBackupPath?.let { java.io.File(it) }
+        val restored = try {
+            org.yuzu.yuzu_emu.utils.WarmUp.restoreSaves(ctx, title, backup)
+        } catch (e: Exception) {
+            Log.warning("[WarmUp] could not restore the save: $e")
+            false
+        }
+        val generated = (org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(title) - warmUpShadersBefore)
+            .coerceAtLeast(0)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(
+                ctx,
+                ctx.getString(R.string.warm_up_done, generated),
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            if (restored) {
+                Log.info("[WarmUp] saves restored for ${title.programId}")
+            }
+            activity?.finish()
+        }
+    }
+
     private class EmulationState(
         private val gamePath: String,
         private val programId: String,
-        private val emulationCanStart: () -> Boolean
+        private val emulationCanStart: () -> Boolean,
+        // Eden Duo: runs on the emulation thread once the game has stopped, for a warm-up's save
+        // restore and a record/compile run's report; harmless when neither asked for it.
+        private val onGameFinished: () -> Unit = {},
+        // Eden Duo: hands this launch's record/compile modes to the native side before it runs.
+        private val prepareShaderRun: () -> Unit = {}
     ) {
         private var state: State
         private var surface: Surface? = null
@@ -2559,9 +2804,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         private fun runEmulation(programIndex: Int, frontendInitiated: Boolean) {
             GameHelper.onEmulationStarting(gamePath, programId)
             try {
+                prepareShaderRun()
                 NativeLibrary.run(gamePath, programIndex, frontendInitiated)
             } finally {
                 GameHelper.onEmulationStopped()
+                onGameFinished()
             }
         }
 

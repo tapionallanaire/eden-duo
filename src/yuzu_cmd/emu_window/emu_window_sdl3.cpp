@@ -1,9 +1,14 @@
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <cstdio>
+#include <chrono>
+#include <array>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_timer.h>
 #ifdef __EMSCRIPTEN__
@@ -18,6 +23,7 @@
 #include "hid_core/hid_core.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/drivers/mouse.h"
+#include "input_common/drivers/tas_input.h"
 #include "input_common/drivers/touch_screen.h"
 #include "input_common/main.h"
 #include "yuzu_cmd/emu_window/emu_window_sdl3.h"
@@ -33,7 +39,7 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
     titlebar_timer = SDL_AddTimer(2000, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
         auto* this_ = (EmuWindow_SDL3*)userdata;
         auto const results = this_->system.GetAndResetPerfStats();
-        auto* title = new std::string(fmt::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", Common::g_build_fullname, Common::g_scm_branch, Common::g_scm_desc, results.average_game_fps, results.emulation_speed * 100.0f));
+        auto* title = new std::string(std::format("{} | {}-{} | FPS: {:.0f} ({:.0f}%)", std::string_view{Common::g_build_fullname}, std::string_view{Common::g_scm_branch}, std::string_view{Common::g_scm_desc}, results.average_game_fps, results.emulation_speed * 100.0f));
         // SDL timers fire on SDL's timer thread; setting the title from there reaches the Wayland
         // decoration plugin (libdecor-gtk showed a GTK widget off the main thread and aborted in
         // malloc). Hand the update to the main thread instead.
@@ -55,7 +61,10 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
     }, this);
     mouse_timer = SDL_AddTimer(100, [](void *userdata, SDL_TimerID, Uint32) -> Uint32 {
         auto* this_ = (EmuWindow_SDL3*)userdata;
-        this_->input_subsystem->GetMouse()->NotifyChanged();
+        // The timer can fire before the input subsystem has created its mouse driver.
+        if (auto* const mouse = this_->input_subsystem->GetMouse()) {
+            mouse->NotifyChanged();
+        }
         return 100;
     }, this);
 }
@@ -63,6 +72,7 @@ EmuWindow_SDL3::EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Co
 EmuWindow_SDL3::~EmuWindow_SDL3() {
     SDL_RemoveTimer(titlebar_timer);
     SDL_RemoveTimer(mouse_timer);
+    delete pending_title.exchange(nullptr);
     system.HIDCore().UnloadInputDevices();
     input_subsystem->Shutdown();
     SDL_Quit();
@@ -131,7 +141,26 @@ void EmuWindow_SDL3::OnFingerUp() {
     input_subsystem->GetTouchScreen()->ReleaseAllTouch();
 }
 
+// Seconds since the first frame; shared by the key script (yuzu.cpp) and key recording.
+double Nx2KeyClockSeconds() {
+    static const auto begin = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+}
+
 void EmuWindow_SDL3::OnKeyEvent(int key, u8 state) {
+    // EDEN_NX2_KEY_RECORD=<file>: append each press/release ("seconds:code", "seconds:-code").
+    static std::FILE* const record = [] {
+        const char* path = std::getenv("EDEN_NX2_KEY_RECORD");
+        return path ? std::fopen(path, "w") : nullptr;
+    }();
+    static std::array<bool, 512> held{};
+    if (record && key >= 0 && key < static_cast<int>(held.size()) && held[key] != (state != 0)) {
+        held[key] = state != 0;
+        std::fprintf(record, "f%llu:%s%d,",
+                     static_cast<unsigned long long>(Core::g_nx2_present_count.load()),
+                     state != 0 ? "" : "-", key);
+        std::fflush(record);
+    }
     if (state != 0) {
         input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
     } else {
@@ -143,8 +172,21 @@ bool EmuWindow_SDL3::IsOpen() const {
     return is_open;
 }
 
+void EmuWindow_SDL3::ApplyPendingTitle() {
+    if (std::string* const title = pending_title.exchange(nullptr)) {
+        SDL_SetWindowTitle(render_window, title->c_str());
+        delete title;
+    }
+}
+
 bool EmuWindow_SDL3::IsShown() const {
     return is_shown;
+}
+
+/// Called by the renderer on its thread after each presented frame: steps the TAS engine.
+void EmuWindow_SDL3::OnFrameDisplayed() {
+    // Without this TAS scripts never advanced in eden-cli (only the Qt frontend called it).
+    input_subsystem->GetTas()->UpdateThread();
 }
 
 void EmuWindow_SDL3::OnResize() {
@@ -217,6 +259,7 @@ void EmuWindow_SDL3::OnEvent(SDL_Event& event) {
         is_shown = true;
         return OnResize();
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        LOG_INFO(Frontend, "Window close requested");
         is_open = false;
         return;
     case SDL_EVENT_KEY_DOWN:
@@ -240,6 +283,7 @@ void EmuWindow_SDL3::OnEvent(SDL_Event& event) {
     case SDL_EVENT_FINGER_UP:
         return OnFingerUp();
     case SDL_EVENT_QUIT:
+        LOG_INFO(Frontend, "Quit requested");
         is_open = false;
         return;
     default:

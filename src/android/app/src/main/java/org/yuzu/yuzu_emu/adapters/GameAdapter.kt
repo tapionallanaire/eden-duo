@@ -278,7 +278,12 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 }
 
                 val action = HomeNavigationDirections.actionGlobalEmulationActivity(game, true)
-                binding.root.findNavController().navigate(action)
+                val navController = binding.root.findNavController()
+                // Duet Plus: pull newer Switch saves from the PC first (save sync, like Steam Cloud).
+                org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(activity)
+                    .beforeLaunch(activity, org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH) {
+                        navController.navigate(action)
+                    }
             }
 
             if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {

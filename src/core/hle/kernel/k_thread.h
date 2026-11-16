@@ -291,6 +291,14 @@ public:
         m_last_scheduled_tick = tick;
     }
 
+    bool HasEnteredKernel() const {
+        return m_entered_kernel.load(std::memory_order_acquire);
+    }
+
+    void SetEnteredKernel() {
+        m_entered_kernel.store(true, std::memory_order_release);
+    }
+
     void AddCpuTime(s32 core_id, s64 amount) {
         m_cpu_time += amount;
         // TODO(bunnei): Debug kernels track per-core tick counts. Should we?
@@ -889,6 +897,7 @@ private:
     SyncObjectBuffer m_sync_object_buffer{};
     s64 m_schedule_count{};
     s64 m_last_scheduled_tick{};
+    std::atomic<bool> m_entered_kernel{false};
     std::array<QueueEntry, Core::Hardware::NUM_CPU_CORES> m_per_core_priority_queue_entry{};
     KThreadQueue* m_wait_queue{};
     LockWithPriorityInheritanceInfoList m_held_lock_info_list{};
@@ -921,6 +930,14 @@ private:
     StackParameters m_stack_parameters{};
     std::mutex m_context_guard{};
 
+public:
+    // EDEN_NX2_KSTATS: when this thread was made runnable from a wait and switched in (host ns),
+    // and how it was woken (Nx2KStats::WakeKind).
+    u64 m_nx2_ready_ns{};
+    u64 m_nx2_switch_ns{};
+    u32 m_nx2_wake_kind{};
+
+private:
     // For emulation
     std::shared_ptr<Common::Fiber> m_host_context{};
     ThreadType m_thread_type{};

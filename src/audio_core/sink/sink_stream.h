@@ -161,6 +161,29 @@ public:
     }
 
     /**
+     * Whether this stream is playing buffers it has been given, so that its queue level says
+     * how far ahead of the host device the renderer is.
+     */
+    bool IsDraining() const {
+        return !paused && queued_buffer_frames.load(std::memory_order_relaxed) != 0;
+    }
+
+    /**
+     * Number of queued buffers the host device takes in one callback, rounded up; 0 until the
+     * device has asked for samples.
+     */
+    u32 DeviceRequestBuffers() const {
+        const u32 request = device_request_frames.load(std::memory_order_relaxed);
+        const u32 buffer_frames = queued_buffer_frames.load(std::memory_order_relaxed);
+        return request != 0 && buffer_frames != 0 ? (request + buffer_frames - 1) / buffer_frames : 0;
+    }
+
+    /**
+     * Wait until fewer than level buffers are queued, or the stream is paused.
+     */
+    void WaitBelow(u32 level, std::stop_token stop_token);
+
+    /**
      * Set the maximum buffer queue size.
      */
     void SetRingSize(u32 ring_size) {
@@ -245,10 +268,17 @@ private:
     SinkBuffer playing_buffer{};
     /// The last played (or received) frame of audio, used when the callback underruns
     std::array<s16, MaxChannels> last_frame{};
+    /// EDEN_NX2_AUDIO_LEVEL meter state.
+    s32 level_peak{};
+    u64 level_frames{};
     /// Number of buffers waiting to be played
     std::atomic<u32> queued_buffers{};
     /// The ring size for audio out buffers (usually 4, rarely 2 or 8)
     u32 max_queue_size{};
+    /// Largest number of frames the host device has asked for in one callback
+    std::atomic<u32> device_request_frames{};
+    /// Frames in the buffers being queued (240 for the audio renderer)
+    std::atomic<u32> queued_buffer_frames{};
     /// Locks access to sample count tracking info
     std::mutex sample_count_lock;
     /// Minimum number of total samples that have been played since the last callback

@@ -6,6 +6,10 @@
 
 #pragma once
 
+#include <array>
+#include <cstring>
+#include <span>
+#include <memory>
 #include <variant>
 #include <vector>
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -16,23 +20,31 @@ class Device;
 class Scheduler;
 
 struct DescriptorAddress {
-    VkDeviceAddress address;
-    VkDeviceSize range;
-    VkFormat format;
+    VkDeviceAddress address{};
+    VkDeviceSize range{};
+    VkFormat format{};
+    u32 pad{};
 };
 
 union DescriptorUpdateEntry {
-    DescriptorUpdateEntry() = default;
-    DescriptorUpdateEntry(VkDescriptorImageInfo image_) : image{image_} {}
+    DescriptorUpdateEntry() : raw{} {}
+    DescriptorUpdateEntry(VkDescriptorImageInfo image_) : raw{} {
+        image.sampler = image_.sampler;
+        image.imageView = image_.imageView;
+        image.imageLayout = image_.imageLayout;
+    }
     DescriptorUpdateEntry(VkDescriptorBufferInfo buffer_) : buffer{buffer_} {}
-    DescriptorUpdateEntry(VkBufferView texel_buffer_) : texel_buffer{texel_buffer_} {}
+    DescriptorUpdateEntry(VkBufferView texel_buffer_) : raw{} {
+        texel_buffer = texel_buffer_;
+    }
     DescriptorUpdateEntry(DescriptorAddress address_) : address{address_} {}
-    std::monostate empty{};
+    std::array<u64, 3> raw{};
     VkDescriptorImageInfo image;
     VkDescriptorBufferInfo buffer;
     VkBufferView texel_buffer;
     DescriptorAddress address;
 };
+static_assert(sizeof(DescriptorUpdateEntry) == 24);
 
 class UpdateDescriptorQueue final {
     // This should be plenty for the vast majority of cases. Most desktop platforms only
@@ -40,7 +52,9 @@ class UpdateDescriptorQueue final {
     static constexpr size_t FRAMES_IN_FLIGHT = 8;
 
 public:
-    static constexpr size_t GUEST_FRAME_PAYLOAD_SIZE = 0x80000;
+    // Hogwarts Legacy's entrance hall reached 523,703 of 524,288 entries in one frame (1,400
+    // draws with handle tables); an overflow resets the cursor and that frame binds garbage.
+    static constexpr size_t GUEST_FRAME_PAYLOAD_SIZE = 0xC0000;
     static constexpr size_t COMPUTE_FRAME_PAYLOAD_SIZE = 0x20000;
 
     explicit UpdateDescriptorQueue(const Device& device_, size_t frame_payload_size_,
@@ -53,7 +67,17 @@ public:
 
     void TickFrame();
     void Acquire(Scheduler& scheduler, size_t required_entries = 0,
-                 bool use_descriptor_buffer_ = false);
+                 bool use_descriptor_buffer_ = false) {
+        use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
+        static constexpr size_t DEFAULT_REQUIRED_ENTRIES = 0x400;
+        const size_t reserve = required_entries > 0 ? required_entries : DEFAULT_REQUIRED_ENTRIES;
+        const size_t used = static_cast<size_t>(payload_cursor - payload_start);
+        if (used + reserve >= frame_payload_size) [[unlikely]] {
+            AcquireOverflow(scheduler, reserve);
+            return;
+        }
+        upload_start = payload_cursor;
+    }
 
     const DescriptorUpdateEntry* UpdateData() const noexcept {
         return upload_start;
@@ -65,6 +89,16 @@ public:
             .imageView = image_view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         };
+    }
+
+    /// Where the next entry goes; with AddEntries, lets a caller keep and replay a run of entries
+    [[nodiscard]] const DescriptorUpdateEntry* Cursor() const noexcept {
+        return payload_cursor;
+    }
+
+    void AddEntries(std::span<const DescriptorUpdateEntry> entries) {
+        std::memcpy(payload_cursor, entries.data(), entries.size_bytes());
+        payload_cursor += entries.size();
     }
 
     void AddImage(VkImageView image_view) {
@@ -114,6 +148,8 @@ public:
     }
 
 private:
+    void AcquireOverflow(Scheduler& scheduler, size_t reserve);
+
     const Device& device;
     const size_t frame_payload_size;
     const bool supports_descriptor_buffer;
@@ -122,7 +158,7 @@ private:
     DescriptorUpdateEntry* payload_cursor = nullptr;
     DescriptorUpdateEntry* payload_start = nullptr;
     const DescriptorUpdateEntry* upload_start = nullptr;
-    std::vector<DescriptorUpdateEntry> payload;
+    std::unique_ptr<DescriptorUpdateEntry[]> payload;
 };
 
 // TODO: should these be separate classes instead?

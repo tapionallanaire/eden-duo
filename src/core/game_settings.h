@@ -47,8 +47,22 @@ enum class TitleID : std::uint64_t {
     NinjaGaidenRagebound = 0x0100781020710000ULL,
     DoubleDragonRevive = 0x01006AE02236C000ULL,
     FireEmblemEngage = 0x0100A6301214E000ULL,
+    FireEmblemThreeHouses = 0x010055D009F78000ULL,
     DragonQuestVIIReimagined = 0x0100A9D01C446000ULL,
     FinalFantasyResonance = 0x0100606026F12000ULL,
+    PokemonScarlet = 0x0100A3D008C5C000ULL,
+    PokemonViolet = 0x01008F6008C5E000ULL,
+    TrailsInTheSky1stChapter = 0x01002C9022770000ULL,
+    TrailsInTheSky2ndChapter = 0x01007A2027548000ULL,
+    YsXNordics = 0x0100BAC01E57E000ULL,
+    XenobladeChronicles2 = 0x0100E95004038000ULL,
+    XenobladeChronicles3 = 0x010074F013262000ULL,
+    HogwartsLegacy = 0x0100F7E00C70E000ULL,
+    /// The launcher; its games are programs 1 to 3 of the same application.
+    KingdomHearts1525 = 0x010090C022978000ULL,
+    /// Switch 2 titles.
+    OcarinaOfTimeNx2 = 0x0400486024DEC000ULL,
+    FireEmblemFortunesWeaveNx2 = 0x04007EF01F8AE000ULL,
 };
 
 struct EnvironmentInfo {
@@ -64,5 +78,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
 /// Per-title defaults for settings read while the GPU is created, so they run before it. A value
 /// the user set for the game is kept; RestoreGlobalState undoes these when the game stops.
 void LoadBootOverrides(std::uint64_t program_id);
+
+/// True when the title has tuned settings (the ones LoadBootOverrides defaults).
+bool HasOptimalSettings(std::uint64_t program_id);
+
+/// Writes the title's tuned settings into the loaded config as the game's own values, replacing
+/// what the user set for them. Returns false when the title has none.
+bool ApplyOptimalSettings(std::uint64_t program_id);
 
 } // namespace Core::GameSettings

@@ -8,6 +8,8 @@
 
 #include "dynarmic/backend/x64/block_of_code.h"
 
+#include <cstdlib>
+
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
 #    include <windows.h>
@@ -17,8 +19,8 @@
 
 #ifdef __APPLE__
 #    include <errno.h>
-#    include <fmt/format.h>
 #    include <sys/sysctl.h>
+#    include <print>
 #endif
 
 #include <array>
@@ -60,6 +62,34 @@ namespace {
 
 constexpr size_t CONSTANT_POOL_SIZE = 2 * 1024 * 1024;
 constexpr size_t PRELUDE_COMMIT_SIZE = 16 * 1024 * 1024;
+#ifdef _WIN32
+constexpr size_t COMMIT_STEP = 4 * 1024 * 1024;
+
+// Reserves the code space; EnsureMemoryCommitted commits it as code is emitted. Xbyak's default
+// allocator commits all of it up front: 512 MiB per core, 3 GiB of commit charge for six cores
+// of which a game fills a fraction.
+struct ReservingAllocator final : Xbyak::Allocator {
+    uint8_t* alloc(size_t size) override {
+        return static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
+    }
+    void free(uint8_t* p) override {
+        VirtualFree(p, 0, MEM_RELEASE);
+    }
+    bool useProtect() const override {
+        return false;
+    }
+};
+
+Xbyak::Allocator* CodeAllocator() {
+    // Never destroyed: code blocks may outlive static destruction.
+    static auto* const allocator = new ReservingAllocator;
+    return allocator;
+}
+#else
+Xbyak::Allocator* CodeAllocator() {
+    return nullptr;
+}
+#endif
 
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
 void ProtectMemory(const void* base, size_t size, bool is_executable) {
@@ -78,7 +108,6 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
 
 static const HostFeature features = []() {
     HostFeature f{};
-#ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
     using Cpu = Xbyak::util::Cpu;
     Xbyak::util::Cpu cpu_info{};
     if (cpu_info.has(Cpu::tSSSE3)) f |= HostFeature::SSSE3;
@@ -120,12 +149,13 @@ static const HostFeature features = []() {
             f |= HostFeature::FastBMI2;
         }
     }
-    return f;
+#ifdef DYNARMIC_HOST_FEATURE_OVERRIDE
+    // Test builds only: DYNARMIC_HOST_FEATURES=<hex mask> hides features to reach the fallbacks.
+    if (const char* mask = std::getenv("DYNARMIC_HOST_FEATURES"); mask && *mask)
+        f &= static_cast<HostFeature>(std::strtoull(mask, nullptr, 16));
 #endif
+    return f;
 }();
-HostFeature GetHostFeatures() {
-    return features;
-}
 
 #ifdef __APPLE__
 bool IsUnderRosetta() {
@@ -133,7 +163,7 @@ bool IsUnderRosetta() {
     size_t result_size = sizeof(result);
     if (sysctlbyname("sysctl.proc_translated", &result, &result_size, nullptr, 0) == -1) {
         if (errno != ENOENT)
-            fmt::print("IsUnderRosetta: Failed to detect Rosetta state, assuming not under Rosetta");
+            std::print("IsUnderRosetta: Failed to detect Rosetta state, assuming not under Rosetta");
         return false;
     }
     return result != 0;
@@ -142,6 +172,10 @@ bool IsUnderRosetta() {
 
 }  // anonymous namespace
 
+HostFeature GetHostFeatures() {
+    return features;
+}
+
 BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_code_size, std::function<void(BlockOfCode&)> rcp)
     : Xbyak::CodeGenerator(total_code_size
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
@@ -149,7 +183,7 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
 #else
         , nullptr //Allow RWE
 #endif
-        , nullptr)
+        , CodeAllocator())
     , constant_pool(*this, CONSTANT_POOL_SIZE)
     , jsi(jsi)
     , cb(std::move(cb))
@@ -206,7 +240,9 @@ size_t BlockOfCode::SpaceRemaining() const {
 void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
 #ifdef _WIN32
     if (committed_size < size_ + codesize) {
-        committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
+        // The code space is only reserved (CodeAllocator), so everything up to the end of the next
+        // emission has to be committed; in steps, as each VirtualAlloc call is a kernel call.
+        committed_size = std::min<size_t>(maxSize_, (std::max)(committed_size + COMMIT_STEP, size_ + codesize));
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
         VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
 #    else

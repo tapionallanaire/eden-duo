@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -15,6 +16,8 @@
 
 #include "common/bounded_threadsafe_queue.h"
 #include "common/polyfill_thread.h"
+#include "video_core/nx2_hazard.h"
+#include "video_core/nx2_timeline.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/framebuffer_config.h"
 
@@ -42,10 +45,15 @@ namespace VideoCommon::GPUThread {
 /// Command to signal to the GPU thread that a command list is ready for processing
 struct SubmitListCommand final {
     explicit SubmitListCommand(s32 channel_, Tegra::CommandList&& entries_)
-        : channel{channel_}, entries{std::move(entries_)} {}
+        : channel{channel_}, entries{std::move(entries_)},
+          epoch{VideoCommon::Nx2Hazard::CurrentEpoch()},
+          timeline_seq{VideoCommon::Nx2Timeline::OnSubmit(
+              static_cast<u32>(entries.command_lists.size()))} {}
 
     s32 channel;
     Tegra::CommandList entries;
+    u64 epoch; ///< Presents the guest had made when it submitted the list (nx2_hazard.h)
+    u64 timeline_seq; ///< nx2_timeline.h
 };
 
 /// Command to signal to the GPU thread to flush a region
@@ -76,9 +84,17 @@ struct FlushAndInvalidateRegionCommand final {
 /// Command to make the gpu look into pending requests
 struct GPUTickCommand final {};
 
+/// Command to run a function on the GPU thread after the commands queued before it
+struct RunCommand final {
+    std::function<void()> func;
+    /// With the GPU split, run on its front (after draining the back) instead of deferring to the
+    /// back, so command lists read after this one see what func did (GMMU maps).
+    bool before_later_reads{};
+};
+
 using CommandData =
     std::variant<std::monostate, SubmitListCommand, FlushRegionCommand, InvalidateRegionCommand,
-                 FlushAndInvalidateRegionCommand, GPUTickCommand>;
+                 FlushAndInvalidateRegionCommand, GPUTickCommand, RunCommand>;
 
 struct CommandDataContainer {
     CommandDataContainer() = default;
@@ -124,6 +140,9 @@ public:
     void FlushAndInvalidateRegion(DAddr addr, u64 size, bool is_async);
 
     void TickGPU(bool is_async);
+
+    /// Runs func on the GPU thread once the commands queued before it have been processed.
+    void Run(std::function<void()>&& func, bool is_async, bool before_later_reads = false);
 
     void NotifyShutdown();
 

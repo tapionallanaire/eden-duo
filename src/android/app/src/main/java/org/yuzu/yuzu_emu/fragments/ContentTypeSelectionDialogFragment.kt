@@ -28,11 +28,13 @@ class ContentTypeSelectionDialogFragment : DialogFragment() {
     private var selectedItem = 0
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-        val launchOptions = arrayOf(
+        // Eden Duo: one screen has no use for dual-screen mods, so no install or fetch entry.
+        val duo = org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())
+        val launchOptions = listOfNotNull(
             getString(R.string.updates_and_dlc),
             getString(R.string.mods_and_cheats),
-            getString(R.string.dual_screen_mods)
-        )
+            if (duo) getString(R.string.dual_screen_mods) else null
+        ).toTypedArray()
 
         if (savedInstanceState != null) {
             selectedItem = savedInstanceState.getInt(SELECTED_ITEM)
@@ -65,8 +67,12 @@ class ContentTypeSelectionDialogFragment : DialogFragment() {
                 selectedItem = i
                 (dialog as AlertDialog).getButton(DialogInterface.BUTTON_NEUTRAL).isVisible = i == 2
             }
-            .setNeutralButton(R.string.fetch) { _, _ ->
-                parentFragmentManager.setFragmentResult(REQUEST_FETCH_DUAL_SCREEN_MOD, Bundle())
+            .apply {
+                if (duo) {
+                    setNeutralButton(R.string.fetch) { _, _ ->
+                        parentFragmentManager.setFragmentResult(REQUEST_FETCH_DUAL_SCREEN_MOD, Bundle())
+                    }
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .create()

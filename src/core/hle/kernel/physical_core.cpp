@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -12,6 +15,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
 
@@ -30,6 +34,9 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
     auto* interface = process->GetArmInterface(m_core_index);
 
     interface->Initialize();
+
+    // EDEN_NX2_KSTATS, per core: the thread that stopped for an SVC, when, and which SVC.
+    static thread_local std::tuple<KThread*, u64, u32> svc_exit{};
 
     const auto EnterContext = [&]() {
         // Lock the core context.
@@ -91,6 +98,33 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
             // If we were interrupted, exit immediately.
             if (!EnterContext()) {
                 return;
+            }
+
+            if (Nx2KStats::g_enabled) {
+                const auto [exited, at, svc] = svc_exit;
+                if (exited == thread && at != 0 && thread->m_nx2_ready_ns == 0) {
+                    Nx2KStats::Add(Nx2KStats::g_stats.svc_rt_count[svc & 0xFF]);
+                    Nx2KStats::Add(Nx2KStats::g_stats.svc_rt_ns[svc & 0xFF],
+                                   Nx2KStats::NowNs() - at);
+                }
+                svc_exit = {};
+            }
+            if (Nx2KStats::g_enabled && thread->m_nx2_ready_ns != 0) {
+                using namespace Nx2KStats;
+                const u64 now = NowNs();
+                const u64 ns = now - thread->m_nx2_ready_ns;
+                const u32 kind = thread->m_nx2_wake_kind;
+                Add(g_stats.wake_hist[kind][Bucket(ns)]);
+                Add(g_stats.wake_ns[kind], ns);
+                Add(g_stats.switch_ns[kind], (thread->m_nx2_switch_ns != 0
+                                                  ? thread->m_nx2_switch_ns
+                                                  : now) - thread->m_nx2_ready_ns);
+                thread->m_nx2_ready_ns = 0;
+                std::scoped_lock lock{g_callers_mutex};
+                auto& per_thread = g_thread_wakes[thread->GetThreadId()];
+                ++per_thread[0];
+                per_thread[1] += ns;
+                per_thread[2] += ns >= 32000 ? 1 : 0;
             }
 
             if (thread->GetStepState() == StepState::StepPending) {
@@ -160,6 +194,9 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
 
         // Handle system calls.
         if (supervisor_call) {
+            if (Nx2KStats::g_enabled) {
+                svc_exit = {thread, Nx2KStats::NowNs(), interface->GetSvcNumber()};
+            }
             // Perform call.
             Svc::Call(system, interface->GetSvcNumber());
             return;
@@ -230,9 +267,54 @@ void PhysicalCore::LogBacktrace(KernelCore& kernel) {
     }
 }
 
-void PhysicalCore::Idle() {
+void PhysicalCore::Idle(KernelCore& kernel) {
+    // Guest job systems hand work between cores many times per frame; blocking at once adds the
+    // host's thread wake-up latency to every handoff. EDEN_NX2_IDLE_SPIN_US=<n>: poll for that
+    // many microseconds before blocking. Switch 2 titles poll 100 us by default outside Android
+    // (title 1's frames: 42 ms without, 35 ms with 50 us, 34 ms with 100 us, 36 ms with 300 us).
+    static const long long spin_setting = [] {
+        const char* text = std::getenv("EDEN_NX2_IDLE_SPIN_US");
+        return text ? std::strtoll(text, nullptr, 10) : -1LL;
+    }();
+    long long spin_us = spin_setting;
+    if (spin_us < 0) {
+#ifdef __ANDROID__
+        spin_us = 0;
+#else
+        const KProcess* process = kernel.ApplicationProcess();
+        spin_us = process != nullptr && process->IsSwitch2() ? 100 : 0;
+#endif
+    }
+    const auto spin = std::chrono::microseconds{spin_us};
+    if (spin.count() > 0) {
+        const auto deadline = std::chrono::steady_clock::now() + spin;
+        while (!m_is_interrupted.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        if (Nx2KStats::g_enabled && m_is_interrupted.load(std::memory_order_acquire)) {
+            if (const u64 at = m_nx2_interrupt_ns.load(std::memory_order_relaxed); at != 0) {
+                const u64 now = Nx2KStats::NowNs();
+                Nx2KStats::Add(Nx2KStats::g_stats.interrupt[2]);
+                Nx2KStats::Add(Nx2KStats::g_stats.interrupt[3], now > at ? now - at : 0);
+            }
+        }
+    }
+    if (Nx2KStats::g_enabled) {
+        Nx2KStats::Add(Nx2KStats::g_stats.idle_entries);
+        if (!m_is_interrupted.load(std::memory_order_acquire)) {
+            const u64 start = Nx2KStats::NowNs();
+            {
+                std::unique_lock lk{m_guard};
+                m_on_interrupt.wait(lk, [this] { return m_is_interrupted.load(); });
+            }
+            Nx2KStats::Add(Nx2KStats::g_stats.idle_blocked);
+            Nx2KStats::Add(Nx2KStats::g_stats.idle_blocked_ns, Nx2KStats::NowNs() - start);
+            return;
+        }
+    }
     std::unique_lock lk{m_guard};
-    m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
+    m_on_interrupt.wait(lk, [this] { return m_is_interrupted.load(); });
 }
 
 bool PhysicalCore::IsInterrupted() const {
@@ -240,6 +322,17 @@ bool PhysicalCore::IsInterrupted() const {
 }
 
 void PhysicalCore::Interrupt() {
+    const u64 nx2_start = Nx2KStats::g_enabled ? Nx2KStats::NowNs() : 0;
+    SCOPE_EXIT {
+        if (nx2_start != 0) {
+            Nx2KStats::Add(Nx2KStats::g_stats.interrupt[0]);
+            Nx2KStats::Add(Nx2KStats::g_stats.interrupt[1], Nx2KStats::NowNs() - nx2_start);
+        }
+    };
+    if (nx2_start != 0) {
+        m_nx2_interrupt_ns.store(nx2_start, std::memory_order_relaxed);
+    }
+
     // Lock core context.
     std::scoped_lock lk{m_guard};
 

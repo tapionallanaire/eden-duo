@@ -29,6 +29,38 @@ struct EnvironmentIdentifier {
 static_assert(sizeof(EnvironmentIdentifier) == 0x8);
 
 NSD::NSD(Core::System& system_, const char* name) : ServiceFramework{system_, name} {
+    // clang-format off
+    static const FunctionInfo functions[] = {
+        {5, nullptr, "GetSettingUrl"},
+        {10, nullptr, "GetSettingName"},
+        {11, &NSD::GetEnvironmentIdentifier, "GetEnvironmentIdentifier"},
+        {12, nullptr, "GetDeviceId"},
+        {13, nullptr, "DeleteSettings"},
+        {14, nullptr, "ImportSettings"},
+        {15, &NSD::SetChangeEnvironmentIdentifierDisabled, "SetChangeEnvironmentIdentifierDisabled"},
+        {20, &NSD::Resolve, "Resolve"},
+        {21, &NSD::ResolveEx, "ResolveEx"},
+        {30, nullptr, "GetNasServiceSetting"},
+        {31, nullptr, "GetNasServiceSettingEx"},
+        {40, nullptr, "GetNasRequestFqdn"},
+        {41, nullptr, "GetNasRequestFqdnEx"},
+        {42, nullptr, "GetNasApiFqdn"},
+        {43, nullptr, "GetNasApiFqdnEx"},
+        {50, nullptr, "GetCurrentSetting"},
+        {51, nullptr, "WriteTestParameter"},
+        {52, nullptr, "ReadTestParameter"},
+        {60, nullptr, "ReadSaveDataFromFsForTest"},
+        {61, nullptr, "WriteSaveDataToFsForTest"},
+        {62, nullptr, "DeleteSaveDataOfFsForTest"},
+        {63, nullptr, "IsChangeEnvironmentIdentifierDisabled"},
+        {64, nullptr, "SetWithoutDomainExchangeFqdns"},
+        {100, &NSD::GetApplicationServerEnvironmentType, "GetApplicationServerEnvironmentType"},
+        {101, nullptr, "SetApplicationServerEnvironmentType"},
+        {102, nullptr, "DeleteApplicationServerEnvironmentType"},
+    };
+    // clang-format on
+
+    RegisterHandlers(functions);
 }
 
 static std::string ResolveImpl(const std::string& fqdn_in) {
@@ -54,7 +86,7 @@ void NSD::SetChangeEnvironmentIdentifierDisabled(HLERequestContext& ctx) {
 
     LOG_WARNING(Service, "(STUBBED) called, disabled={}", disabled);
 
-    IPC::ResponseBuilder rb{ctx, 1};
+    IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(ResultSuccess);
 }
 
@@ -82,7 +114,7 @@ void NSD::ResolveEx(HLERequestContext& ctx) {
     }
 
     ctx.WriteBuffer(fqdn_out);
-    IPC::ResponseBuilder rb{ctx, 4};
+    IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
     rb.Push(ResultSuccess);
 }

@@ -24,6 +24,7 @@
 #include "video_core/renderer_vulkan/present/util.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 #include "video_core/renderer_vulkan/vk_dsmod_aux.h"
+#include "video_core/dsmod/duo_switch.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -343,8 +344,21 @@ bool DSModAuxPresenter::PrimaryPresentDisabled() {
     return no_present;
 }
 
+void DSModAuxPresenter::SetDuoEnabled(bool enabled) {
+    VideoCore::DSMod::SetDuoEnabled(enabled);
+}
+
+bool DSModAuxPresenter::DuoEnabled() {
+    return VideoCore::DSMod::DuoEnabled();
+}
+
 std::span<const Tegra::FramebufferConfig> DSModAuxPresenter::Route(
     std::span<const Tegra::FramebufferConfig> framebuffers) {
+    // A single-screen device has no second panel: no routing, no mirror, no mod UI.
+    if (!DuoEnabled()) {
+        primary_layers.clear();
+        return framebuffers;
+    }
     // Route the bound VI layer (or mirror everything) to the aux window.
     // Report the layers a game actually presents, once. Routing a layer to the second screen is
     // the only way to *move* part of a game's own output there rather than redraw it, and it is

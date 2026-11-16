@@ -1,13 +1,26 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <map>
+#include <tuple>
+#include <format>
+#include <thread>
+#include <cstdlib>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <shared_mutex>
+#include <vector>
+#include <mutex>
 #include <memory>
 #include <unordered_map>
 #include <utility>
 
 #include "game_settings.h"
+#include "common/cpu_features.h"
 #include "audio_core/audio_core.h"
 #include "common/fs/fs.h"
 #include "common/logging.h"
@@ -16,27 +29,38 @@
 #include "common/scope_exit.h"
 #include "common/settings_enums.h"
 #include "common/string_util.h"
+#include "common/thread.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
 
 #include "launch_timestamp_cache.h"
+#include "core/arm/debug.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/debugger/debugger.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "core/device_memory.h"
+#include "core/file_sys/card_image.h"
+#include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
+#include "core/file_sys/nup_container.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/savedata_factory.h"
+#include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_concat.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/gpu_dirty_memory_manager.h"
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_resource_limit.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/nx2_kstats.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/am/applet_manager.h"
@@ -60,6 +84,7 @@
 #include "core/memory/cheat_engine.h"
 #include "core/mods/mod_runtime.h"
 #include "common/atomic_ops.h"
+#include "common/host_memory.h"
 #include "core/perf_stats.h"
 #include "core/reporter.h"
 #include "core/tools/freezer.h"
@@ -67,10 +92,445 @@
 #include "hid_core/hid_core.h"
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_diag.h"
+#include "video_core/nx2_spikes.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
+#include "video_core/dsmod/duo_switch.h"
 
 namespace Core {
+
+std::atomic<u64> g_nx2_present_count{};
+std::atomic<u32> g_nx2_barrier{};
+std::atomic<u32> g_nx2_collect_set{};
+Nx2BarrierStats g_nx2_barrier_stats;
+
+namespace {
+/// EDEN_NX2_KSTATS / EDEN_NX2_SVC_CALLERS (nx2_kstats.h): logs the counters since the last call
+/// per presented frame and clears them.
+void LogKernelStats(u64 presents) {
+    namespace K = Kernel::Nx2KStats;
+    const double frames = static_cast<double>(std::max<u64>(presents, 1));
+    const auto take = [](std::atomic<u64>& counter) {
+        return counter.exchange(0, std::memory_order_relaxed);
+    };
+    if (K::g_enabled) {
+        auto& st = K::g_stats;
+        std::string svcs;
+        for (size_t i = 0; i < st.svc_count.size(); ++i) {
+            const u64 n = take(st.svc_count[i]);
+            const u64 ns = take(st.svc_ns[i]);
+            if (n != 0) {
+                svcs += std::format(" {:#04x}:{:.1f}/f {:.2f}us", i, n / frames,
+                                    ns / 1000.0 / static_cast<double>(n));
+            }
+        }
+        LOG_INFO(Core, "nx2 kstats: {} frames; svc per frame and mean time in the call:{}",
+                 presents, svcs);
+        std::string round_trips;
+        for (size_t i = 0; i < st.svc_rt_count.size(); ++i) {
+            const u64 n = take(st.svc_rt_count[i]);
+            const u64 ns = take(st.svc_rt_ns[i]);
+            if (n != 0) {
+                round_trips += std::format(" {:#04x}:{:.1f}/f {:.2f}us", i, n / frames,
+                                           ns / 1000.0 / static_cast<double>(n));
+            }
+        }
+        LOG_INFO(Core, "nx2 kstats: svc round trips without a switch, per frame, mean:{}",
+                 round_trips);
+        const u64 locks = take(st.sched_lock[0]);
+        const u64 contended = take(st.sched_lock[1]);
+        LOG_INFO(Core,
+                 "nx2 kstats: scheduler lock per frame: {:.1f} taken, {:.1f} contended "
+                 "(mean wait {:.2f}us), held {:.3f} ms per frame (mean {:.2f}us)",
+                 locks / frames, contended / frames,
+                 take(st.sched_lock[2]) / 1000.0 / std::max<u64>(contended, 1),
+                 static_cast<double>(st.sched_lock[3].load()) / 1e6 / frames,
+                 take(st.sched_lock[3]) / 1000.0 / std::max<u64>(locks, 1));
+        static constexpr const char* kinds[] = {"same core", "other core idle",
+                                                "other core busy, preempting", "host thread",
+                                                "other core busy, queued"};
+        for (size_t kind = 0; kind < K::WakeKinds; ++kind) {
+            u64 total = 0;
+            std::string hist;
+            for (size_t b = 0; b < K::Buckets; ++b) {
+                const u64 n = take(st.wake_hist[kind][b]);
+                total += n;
+                hist += std::format(" {}", n);
+            }
+            const u64 ns = take(st.wake_ns[kind]);
+            const u64 sw = take(st.switch_ns[kind]);
+            if (total != 0) {
+                LOG_INFO(Core,
+                         "nx2 kstats: wakes {}: {:.1f}/f, mean {:.1f}us to guest code ({:.1f}us "
+                         "to switched in); us <1 <2 <4 <8 <16 <32 <64 <128 <256 <512 <1024 "
+                         "more:{}",
+                         kinds[kind], total / frames, ns / 1000.0 / total, sw / 1000.0 / total,
+                         hist);
+            }
+        }
+        const u64 blocked = take(st.idle_blocked);
+        LOG_INFO(Core,
+                 "nx2 kstats: per frame: interrupts to idle cores {:.1f}, to busy {:.1f}; idle "
+                 "entries {:.1f}, slept on the host {:.1f} (mean {:.1f}us); thread switches {:.1f}",
+                 take(st.interrupts_idle) / frames, take(st.interrupts_busy) / frames,
+                 take(st.idle_entries) / frames, blocked / frames,
+                 take(st.idle_blocked_ns) / 1000.0 / std::max<u64>(blocked, 1),
+                 take(st.switches) / frames);
+        const u64 interrupts = take(st.interrupt[0]);
+        const u64 spun = take(st.interrupt[2]);
+        LOG_INFO(Core,
+                 "nx2 kstats: Interrupt calls {:.1f}/f, mean {:.2f}us in it; idle cores leaving "
+                 "the spin on one {:.1f}/f, mean {:.2f}us after it",
+                 interrupts / frames, take(st.interrupt[1]) / 1000.0 / std::max<u64>(interrupts, 1),
+                 spun / frames, take(st.interrupt[3]) / 1000.0 / std::max<u64>(spun, 1));
+        const u64 yields = take(st.yields[0]);
+        const u64 sleeps = take(st.sleeps[0]);
+        std::string sleep_hist;
+        for (auto& bucket : st.sleep_hist) {
+            sleep_hist += std::format(" {}", take(bucket));
+        }
+        std::string asked_hist;
+        for (auto& bucket : st.sleep_asked_hist) {
+            asked_hist += std::format(" {}", take(bucket));
+        }
+        LOG_INFO(Core, "nx2 kstats: sleeps asked, us <1 <2 .. more:{}; wakes onto a busy core, "
+                       "woken thread's priority above/equal/below the running one: {} {} {}",
+                 asked_hist, take(st.busy_priority[0]), take(st.busy_priority[1]),
+                 take(st.busy_priority[2]));
+        LOG_INFO(Core,
+                 "nx2 kstats: SleepThread per frame: yields {:.1f} (mean {:.2f}us in the call), "
+                 "sleeps {:.1f} (mean {:.1f}us asked, {:.1f}us in the call; us <1 <2 .. more:{})",
+                 yields / frames, take(st.yields[1]) / 1000.0 / std::max<u64>(yields, 1),
+                 sleeps / frames, take(st.sleeps[1]) / 1000.0 / std::max<u64>(sleeps, 1),
+                 take(st.sleeps[2]) / 1000.0 / std::max<u64>(sleeps, 1), sleep_hist);
+    }
+    if (K::g_enabled) {
+        std::map<u64, std::array<u64, 3>> wakes;
+        {
+            std::scoped_lock lock{K::g_callers_mutex};
+            wakes.swap(K::g_thread_wakes);
+        }
+        std::vector<std::pair<u64, u64>> top;
+        for (const auto& [id, value] : wakes) {
+            top.emplace_back(value[1], id);
+        }
+        std::ranges::sort(top, std::greater{});
+        std::string list;
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 16); ++i) {
+            const auto& w = wakes[top[i].second];
+            list += std::format(" t{}:{:.1f}/f,{:.1f}us,{:.1f}/f>32us", top[i].second,
+                                w[0] / frames, w[1] / 1000.0 / std::max<u64>(w[0], 1),
+                                w[2] / frames);
+        }
+        LOG_INFO(Core, "nx2 kstats: wake latency per thread (wakes, mean, slow ones):{}", list);
+    }
+    if (K::g_callers_enabled) {
+        std::map<K::CallerKey, std::pair<u64, u64>> callers;
+        {
+            std::scoped_lock lock{K::g_callers_mutex};
+            callers.swap(K::g_callers);
+        }
+        // By time in the call (blocked time included): where threads wait.
+        std::vector<std::pair<u64, K::CallerKey>> top;
+        for (const auto& [key, value] : callers) {
+            top.emplace_back(value.second, key);
+        }
+        std::ranges::sort(top, std::greater{});
+        std::string list;
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 40); ++i) {
+            const auto& [svc, tid, lr, main1, main2] = top[i].second;
+            const auto& [calls, ns] = callers[top[i].second];
+            list += std::format(" svc{:02x}/t{}/sdk+{:x}/main+{:x}<main+{:x}={:.1f}/f,{:.2f}ms/f", svc,
+                                tid, lr, main1, main2, calls * 4 / frames, ns * 4 / 1e6 / frames);
+        }
+        LOG_INFO(Core, "nx2 svc callers by time (x4 sampled):{}", list);
+        top.clear();
+        for (const auto& [key, value] : callers) {
+            top.emplace_back(value.first, key);
+        }
+        std::ranges::sort(top, std::greater{});
+        list.clear();
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 40); ++i) {
+            const auto& [svc, tid, lr, main1, main2] = top[i].second;
+            const auto& [calls, ns] = callers[top[i].second];
+            list += std::format(" svc{:02x}/t{}/sdk+{:x}/main+{:x}<main+{:x}={:.1f}/f,{:.2f}ms/f", svc,
+                                tid, lr, main1, main2, calls * 4 / frames, ns * 4 / 1e6 / frames);
+        }
+        LOG_INFO(Core, "nx2 svc callers by count (x4 sampled):{}", list);
+    }
+}
+
+/// EDEN_NX2_GUEST_SAMPLER=1: about every millisecond, reads each core's running guest thread and
+/// its PC (dynarmic: the current block) and every 10 s logs how often each core was idle and the
+/// busiest (thread, PC) pairs, so time spent in guest code can be found. Racy reads, diagnostics.
+void StartGuestSampler(System& system) {
+    static std::jthread sampler;
+    Kernel::Nx2KStats::g_enabled = std::getenv("EDEN_NX2_KSTATS") != nullptr;
+    Kernel::Nx2KStats::g_callers_enabled = std::getenv("EDEN_NX2_SVC_CALLERS") != nullptr;
+    const bool sample = std::getenv("EDEN_NX2_GUEST_SAMPLER") != nullptr;
+    if ((!sample && !Kernel::Nx2KStats::g_enabled && !Kernel::Nx2KStats::g_callers_enabled) ||
+        sampler.joinable()) {
+        return;
+    }
+    sampler = std::jthread([&system, sample](std::stop_token stop) {
+        std::map<std::pair<u64, u64>, u32> hits;
+        std::map<u64, u32> per_thread;
+        // Threads seen running (one reference each, kept: diagnostics) and, while they wait, the
+        // wait reason and the return address of the kernel call they wait in.
+        std::map<u64, Kernel::KThread*> known;
+        std::map<std::tuple<u64, u32, u64>, u32> waits;
+        std::map<u64, std::array<u32, 4>> states; // not running: runnable, waiting, other
+        std::array<u32, Hardware::NUM_CPU_CORES> busy{};
+        u32 rounds{};
+        auto last = std::chrono::steady_clock::now();
+        u64 last_presents = g_nx2_present_count.load(std::memory_order_relaxed);
+        while (!stop.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(sample ? 1 : 100));
+            Kernel::KProcess* const process = system.ApplicationProcess();
+            if (!process) {
+                continue;
+            }
+            if (!sample) {
+                if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(10)) {
+                    last = std::chrono::steady_clock::now();
+                    const u64 presents = g_nx2_present_count.load(std::memory_order_relaxed);
+                    LogKernelStats(presents - last_presents);
+                    last_presents = presents;
+                }
+                continue;
+            }
+            ++rounds;
+            std::array<Kernel::KThread*, Hardware::NUM_CPU_CORES> running{};
+            for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
+                Kernel::KScheduler& scheduler = system.Kernel().Scheduler(core);
+                Kernel::KThread* const thread = scheduler.GetSchedulerCurrentThread();
+                ArmInterface* const arm = process->GetArmInterface(core);
+                if (!thread || thread == scheduler.GetIdleThread() || !arm) {
+                    continue;
+                }
+                ++busy[core];
+                running[core] = thread;
+                if (known.emplace(thread->GetThreadId(), thread).second) {
+                    thread->Open(system.Kernel());
+                }
+                ++per_thread[thread->GetThreadId()];
+                ++hits[{thread->GetThreadId(), arm->PeekPC()}];
+            }
+            for (const auto& [id, thread] : known) {
+                if (std::ranges::find(running, thread) != running.end()) {
+                    continue;
+                }
+                const Kernel::ThreadState state{thread->GetState()};
+                ++states[id][state == Kernel::ThreadState::Runnable  ? 0
+                             : state == Kernel::ThreadState::Waiting ? 1
+                                                                     : 2];
+                if (state != Kernel::ThreadState::Waiting) {
+                    continue;
+                }
+                ++waits[{id, static_cast<u32>(thread->GetWaitReasonForDebugging()),
+                         thread->GetContext().lr}];
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last < std::chrono::seconds(10)) {
+                continue;
+            }
+            last = now;
+            {
+                const u64 presents = g_nx2_present_count.load(std::memory_order_relaxed);
+                LogKernelStats(presents - last_presents);
+                last_presents = presents;
+            }
+            std::string cores;
+            for (size_t core = 0; core < busy.size(); ++core) {
+                cores += std::format(" {}:{}%", core, busy[core] * 100 / std::max(rounds, 1U));
+            }
+            std::vector<std::pair<u32, u64>> threads;
+            for (const auto& [id, n] : per_thread) {
+                threads.emplace_back(n, id);
+            }
+            std::ranges::sort(threads, std::greater{});
+            std::string thread_list;
+            for (size_t i = 0; i < std::min<size_t>(threads.size(), 12); ++i) {
+                thread_list += std::format(" t{}:{}%", threads[i].second,
+                                           threads[i].first * 100 / std::max(rounds, 1U));
+            }
+            LOG_INFO(Core, "Guest sampler: {} rounds, code start 0x{:x}; busy per core{}; threads{}",
+                     rounds, GetInteger(process->GetEntryPoint()), cores, thread_list);
+            std::vector<std::pair<u32, std::pair<u64, u64>>> top;
+            for (const auto& [key, n] : hits) {
+                top.emplace_back(n, key);
+            }
+            std::ranges::sort(top, std::greater{});
+            std::string pcs;
+            for (size_t i = 0; i < std::min<size_t>(top.size(), 60); ++i) {
+                pcs += std::format(" t{}@{:x}={}", top[i].second.first, top[i].second.second,
+                                   top[i].first);
+            }
+            LOG_INFO(Core, "Guest sampler top:{}", pcs);
+            std::vector<std::pair<u32, std::tuple<u64, u32, u64>>> wait_top;
+            for (const auto& [key, n] : waits) {
+                // Only threads that also ran: the always-blocked ones say nothing.
+                if (!per_thread.contains(std::get<0>(key))) {
+                    continue;
+                }
+                wait_top.emplace_back(n, key);
+            }
+            std::ranges::sort(wait_top, std::greater{});
+            std::string wait_list;
+            for (size_t i = 0; i < std::min<size_t>(wait_top.size(), 50); ++i) {
+                const auto& [id, reason, lr] = wait_top[i].second;
+                wait_list += std::format(" t{}:r{}@{:x}={}", id, reason, lr, wait_top[i].first);
+            }
+            LOG_INFO(Core, "Guest sampler waits (r1 sleep, 3 sync, 4 condvar, 5 arbiter):{}",
+                     wait_list);
+            std::string state_list;
+            for (size_t i = 0; i < std::min<size_t>(threads.size(), 14); ++i) {
+                const u64 id{threads[i].second};
+                const auto& s{states[id]};
+                const u32 r{std::max(rounds, 1U)};
+                // Name, owning process and priority: threads of other processes share the cores.
+                std::string who;
+                {
+                    Kernel::KScopedLightLock list_lock{process->GetListLock()};
+                    for (const auto& t : process->GetThreadList()) {
+                        if (t.GetThreadId() == id) {
+                            who = std::format("'{}' p{} c{}", GetThreadName(&t).value_or(""),
+                                              t.GetPriority(), t.GetActiveCore());
+                            break;
+                        }
+                    }
+                }
+                if (who.empty()) {
+                    who = "(other process)";
+                }
+                state_list += std::format(" t{}{}: run {}% ready {}% wait {}%", id, who,
+                                          threads[i].first * 100 / r, s[0] * 100 / r,
+                                          s[1] * 100 / r);
+            }
+            LOG_INFO(Core, "Guest sampler states:{}", state_list);
+            states.clear();
+            waits.clear();
+            hits.clear();
+            per_thread.clear();
+            busy = {};
+            rounds = 0;
+        }
+    });
+}
+
+std::mutex nx2_barrier_mutex;
+std::condition_variable nx2_barrier_cv;
+std::atomic<u64> nx2_gpu_thread_done{};
+} // namespace
+
+void Nx2NoteGpuThreadDone(u64 present) {
+    {
+        std::scoped_lock lock{nx2_barrier_mutex};
+        nx2_gpu_thread_done.store(present, std::memory_order_release);
+    }
+    nx2_barrier_cv.notify_all();
+}
+
+u64 Nx2GpuThreadDone() {
+    return nx2_gpu_thread_done.load(std::memory_order_acquire);
+}
+
+void Nx2BarrierReset() {
+    g_nx2_barrier.store(0, std::memory_order_relaxed);
+    g_nx2_collect_set.store(0, std::memory_order_relaxed);
+    nx2_gpu_thread_done.store(0, std::memory_order_release);
+}
+
+namespace Nx2PageStore {
+Stats g_stats;
+namespace {
+std::mutex record_mutex;
+std::vector<u64> recorded;        ///< Pages handed over since the last present
+std::shared_mutex store_mutex;
+std::unordered_map<u64, std::unique_ptr<std::array<u8, PageSize>>> pages;
+std::unordered_map<u64, u32> hot; ///< Pages rewritten ahead of their upload: presents left
+u64 store_present{};              ///< The present the copies were taken at
+} // namespace
+
+void Record(u64 device_address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    std::scoped_lock lock{record_mutex};
+    for (u64 page = device_address & ~(PageSize - 1); page < device_address + size;
+         page += PageSize) {
+        if (recorded.empty() || recorded.back() != page) {
+            recorded.push_back(page);
+        }
+    }
+}
+
+void Snapshot(u64 present, const std::function<const u8*(u64)>& read) {
+    std::vector<u64> wanted;
+    {
+        std::scoped_lock lock{record_mutex};
+        wanted.swap(recorded);
+    }
+    std::unique_lock lock{store_mutex};
+    for (auto it = hot.begin(); it != hot.end();) {
+        wanted.push_back(it->first);
+        it = --it->second == 0 ? hot.erase(it) : std::next(it);
+    }
+    pages.clear();
+    for (const u64 page : wanted) {
+        if (pages.contains(page)) {
+            continue;
+        }
+        if (const u8* const memory = read(page); memory != nullptr) {
+            auto copy = std::make_unique<std::array<u8, PageSize>>();
+            std::memcpy(copy->data(), memory, PageSize);
+            pages.emplace(page, std::move(copy));
+        }
+    }
+    store_present = present;
+    g_stats.copied.fetch_add(pages.size(), std::memory_order_relaxed);
+}
+
+const u8* Find(u64 device_page) {
+    std::shared_lock lock{store_mutex};
+    // Only while the guest is ahead: the frame the GPU thread runs has been presented.
+    if (store_present != Nx2GpuThreadDone() + 1) {
+        return nullptr;
+    }
+    const auto it = pages.find(device_page);
+    if (it == pages.end()) {
+        return nullptr;
+    }
+    g_stats.served.fetch_add(1, std::memory_order_relaxed);
+    return it->second->data();
+}
+
+void NoteRewritten(u64 device_page) {
+    std::unique_lock lock{store_mutex};
+    hot[device_page] = 600;
+    g_stats.rewritten.fetch_add(1, std::memory_order_relaxed);
+}
+} // namespace Nx2PageStore
+
+void Nx2WaitGpuThreadDone(u64 want) {
+    if (nx2_gpu_thread_done.load(std::memory_order_acquire) >= want) {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock lock{nx2_barrier_mutex};
+    // Bounded: the GPU thread may itself be waiting for this thread (a semaphore it releases).
+    const bool done = nx2_barrier_cv.wait_for(lock, std::chrono::milliseconds{2000}, [want] {
+        return nx2_gpu_thread_done.load(std::memory_order_acquire) >= want;
+    });
+    g_nx2_barrier_stats.waits.fetch_add(1, std::memory_order_relaxed);
+    g_nx2_barrier_stats.timeouts.fetch_add(done ? 0 : 1, std::memory_order_relaxed);
+    g_nx2_barrier_stats.wait_ns.fetch_add(
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count()),
+        std::memory_order_relaxed);
+}
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {
@@ -84,7 +544,7 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
         std::vector<FileSys::VirtualFile> concat;
 
         for (u32 i = 0; i < 0x10; ++i) {
-            const auto file_name = fmt::format("{:02X}", i);
+            const auto file_name = std::format("{:02X}", i);
             auto next = dir->GetFile(file_name);
 
             if (next != nullptr) {
@@ -110,6 +570,112 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 
     return vfs->OpenFile(path, FileSys::OpenMode::Read);
 }
+
+namespace {
+
+// Detect the platform before initializing the kernel memory layout and guest clock.
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
+    FileSys::ProgramMetadata metadata;
+    if (FileSys::NupContainer::IsNupFile(file)) {
+        FileSys::NupContainer nup{file};
+        if (nup.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        const auto base = nup.FindBasePackage();
+        const auto update = nup.FindBestUpdatePackage();
+        std::optional<std::size_t> program;
+        if (update && nup.GetExeFSDir(*update) != nullptr) {
+            program = update;
+        } else if (base && nup.GetExeFSDir(*base) != nullptr) {
+            program = base;
+        }
+        const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
+    if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
+        const FileSys::XCI xci{file, program_id, program_index};
+        if (xci.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        const auto partition = xci.GetSecurePartitionNSP();
+        const auto program = partition != nullptr
+                                 ? partition->GetNCA(xci.GetProgramTitleID(),
+                                                     FileSys::ContentRecordType::Program)
+                                 : nullptr;
+        const auto exefs = program != nullptr ? program->GetExeFS() : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    if (type == Loader::FileType::NSP || type == Loader::FileType::NSZ) {
+        const FileSys::NSP nsp{file, program_id, program_index};
+        if (nsp.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        auto exefs = nsp.GetExeFS();
+        if (!nsp.IsExtractedType()) {
+            const auto program =
+                nsp.GetNCA(nsp.GetProgramTitleID(), FileSys::ContentRecordType::Program);
+            exefs = program != nullptr ? program->GetExeFS() : nullptr;
+        }
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
+    const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
+    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+           metadata.IsSwitch2();
+}
+
+/// Frame spike recorder source: every application thread's CPU ticks, counting the running
+/// thread of each core up to now (the kernel only adds a thread's time when it switches out).
+bool ReadGuestThreadTicks(void* user, std::vector<VideoCommon::Nx2Spikes::GuestThreadTicks>& out,
+                          u64& clock) {
+    auto& system = *static_cast<System*>(user);
+    auto& kernel = system.Kernel();
+    Kernel::KProcess* const process = kernel.ApplicationProcess();
+    if (process == nullptr) {
+        return false;
+    }
+    clock = system.CoreTiming().GetClockTicks();
+    std::array<std::pair<const Kernel::KThread*, s64>, Hardware::NUM_CPU_CORES> running{};
+    for (size_t core = 0; core < running.size(); ++core) {
+        const Kernel::KScheduler& scheduler = kernel.Scheduler(core);
+        running[core] = {scheduler.GetSchedulerCurrentThread(), scheduler.GetLastContextSwitchTime()};
+    }
+    Kernel::KScopedLightLock lock{process->GetListLock()};
+    for (const Kernel::KThread& thread : process->GetThreadList()) {
+        u64 ticks = static_cast<u64>(thread.GetCpuTime());
+        for (const auto& [current, since] : running) {
+            if (current == &thread && static_cast<s64>(clock) > since) {
+                ticks += clock - static_cast<u64>(since);
+            }
+        }
+        out.push_back({thread.GetThreadId(), ticks, thread.GetActiveCore()});
+    }
+    return true;
+}
+
+std::string GuestThreadName(void* user, u64 id) {
+    auto& system = *static_cast<System*>(user);
+    Kernel::KProcess* const process = system.Kernel().ApplicationProcess();
+    if (process == nullptr) {
+        return {};
+    }
+    Kernel::KScopedLightLock lock{process->GetListLock()};
+    for (const Kernel::KThread& thread : process->GetThreadList()) {
+        if (thread.GetThreadId() == id) {
+            return GetThreadName(&thread).value_or("");
+        }
+    }
+    return {};
+}
+
+} // namespace
 
 struct System::Impl {
     explicit Impl(System& system)
@@ -197,15 +763,16 @@ struct System::Impl {
 
         timezone_service->SetDeviceLocationName(name);
 
-        u64 time_offset = 0;
+        s64 time_offset = 0;
         if (Settings::values.custom_rtc_enabled) {
             time_offset = Settings::values.custom_rtc_offset.GetValue();
         }
 
         const auto posix_time = std::chrono::system_clock::now().time_since_epoch();
-        const u64 current_time =
-            +std::chrono::duration_cast<std::chrono::seconds>(posix_time).count();
-        const u64 new_time = current_time + time_offset;
+        const s64 current_time =
+            std::chrono::duration_cast<std::chrono::seconds>(posix_time).count();
+        const s64 target_time = current_time + time_offset;
+        const u64 new_time = static_cast<u64>((std::max<s64>)(0, target_time));
 
         Service::PSC::Time::SystemClockContext context{};
         settings_service->SetUserSystemClockContext(context);
@@ -304,6 +871,12 @@ struct System::Impl {
     void InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
 
+        // ShutdownMainProcess releases it after a Switch 2 game; create it before the check below
+        // so an empty slot alone does not rerun the full Initialize.
+        if (!device_memory.has_value()) {
+            device_memory.emplace();
+        }
+
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
         kernel.Initialize();
@@ -341,9 +914,49 @@ struct System::Impl {
         // registration wins. A previous load that failed after registering (or a previous game in
         // the same process) must not leave its build id and main base behind for this one.
         ResetPendingDualScreenMod();
+        // ShutdownMainProcess leaves the shutting-down flag set. A load that follows it in the
+        // same System (a multi-program title's ExecuteProgram, Kingdom Hearts 1.5+2.5's launcher
+        // starting a game) must clear it, or the VI conductor never produces another vsync and
+        // the new program waits on its first frame forever.
+        SetShuttingDown(false);
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
+
+        const bool switch2_program =
+            virtual_filesystem != nullptr &&
+            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath), params.program_id,
+                             params.program_index);
+        Settings::SetCurrentProgramIsSwitch2(switch2_program);
+        StartGuestSampler(system);
+        Settings::SetAstcRecompressionOverride(std::nullopt);
+        if (switch2_program) {
+            // Before guest memory is taken: see the function (Android only).
+            Common::ReleaseReclaimableKernelMemory();
+        }
+
+        // Switch 2 titles size their heap from the total memory and need the 12 GiB layout. Set it
+        // as a per-game value, so RestoreGlobalState brings back the configured layout afterwards.
+        if (switch2_program &&
+            Settings::values.memory_layout_mode.GetValue() != Settings::MemoryLayout::Memory_12Gb) {
+            LOG_INFO(Core, "Switch 2 program: using the 12 GiB memory layout");
+            Settings::values.memory_layout_mode.SetGlobal(false);
+            Settings::values.memory_layout_mode.SetValue(Settings::MemoryLayout::Memory_12Gb);
+        }
+
+        // The Switch 2 counter runs at 31.25 MHz and its SDK converts ticks with that constant
+        // (nn::os::GetSystemTickFrequency, TickManager::ConvertToTimeSpan/ConvertToTick). At 19.2 MHz
+        // every tick-based time in the game was off by 1.63x: elapsed times read short and a frame
+        // deadline in ticks waited ~27 ms. EDEN_NX2_CNTFRQ=<Hz> overrides it (A/B tests).
+        static const u64 forced_cntfrq = [] {
+            const char* value = std::getenv("EDEN_NX2_CNTFRQ");
+            return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
+        }();
+        const u64 cntfrq = forced_cntfrq != 0 ? forced_cntfrq
+                           : switch2_program  ? Common::WallClock::Switch2CNTFRQ
+                                              : Common::WallClock::CNTFRQ;
+        Common::g_wall_clock.SetGuestCNTFRQ(cntfrq);
+        LOG_INFO(Core, "Guest counter frequency: {} Hz", cntfrq);
 
         InitializeKernel(system);
 
@@ -365,6 +978,7 @@ struct System::Impl {
 
         if (!app_loader) {
             LOG_CRITICAL(Core, "Failed to obtain loader for {}!", filepath);
+            ShutdownMainProcess();
             return SystemResultStatus::ErrorGetLoader;
         }
 
@@ -401,6 +1015,7 @@ struct System::Impl {
         }
         // Waiting for GPU before initializing CPU
         cpu_manager.Initialize();
+        VideoCommon::Nx2Spikes::SetGuestThreadSource({ReadGuestThreadTicks, GuestThreadName, &system});
 
         // Initialize cheat engine
         // DSMod: discover now -- at loader time the application process (and thus the title id)
@@ -464,10 +1079,16 @@ struct System::Impl {
             game_info.version = title_version;
             room_member->SendGameInfo(game_info);
         }
+        if (VideoCommon::Nx2Diag::Active()) {
+            VideoCommon::Nx2Diag::Diagnostics::Get().SetTitle(params.program_id);
+        }
+        debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
         return SystemResultStatus::Success;
     }
 
     void ShutdownMainProcess() {
+        VideoCommon::Nx2Spikes::SetGuestThreadSource({});
+        debug_service.reset();
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
 
@@ -515,6 +1136,13 @@ struct System::Impl {
         // Reset all glue registrations
         arp_manager.ResetAll();
 
+        // The guest RAM section keeps every page the game touched until it is destroyed (up to
+        // 12 GiB), and the next Load reuses it. Switch 2 only: Switch 1 keeps its behaviour.
+        // InitializeKernel creates it again, sized for the next game.
+        if (Settings::CurrentProgramIsSwitch2()) {
+            device_memory.reset();
+        }
+
         LOG_DEBUG(Core, "Shutdown OK");
     }
 
@@ -531,6 +1159,9 @@ struct System::Impl {
     }
 
     PerfStatsResults GetAndResetPerfStats() {
+        if (!perf_stats) {
+            return {};
+        }
         return perf_stats->GetAndResetStats(core_timing.GetGlobalTimeUs());
     }
 
@@ -605,7 +1236,9 @@ struct System::Impl {
     std::optional<Tools::RenderdocAPI> renderdoc_api;
     std::optional<Tegra::GPU> gpu_core;
 
-    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES> gpu_dirty_memory_managers;
+    // Two sets (Core::g_nx2_collect_set): [0, NUM_CPU_CORES) and [NUM_CPU_CORES, 2 * NUM_CPU_CORES).
+    std::array<Core::GPUDirtyMemoryManager, Core::Hardware::NUM_CPU_CORES * 2>
+        gpu_dirty_memory_managers;
     std::vector<std::vector<u8>> user_channel;
     std::vector<std::vector<u8>> general_channel;
 
@@ -633,6 +1266,8 @@ struct System::Impl {
     bool extended_memory_layout : 1 = false;
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
+    /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
+    std::unique_ptr<Nx2Debug::Service> debug_service;
 
     void EnsureGeneralChannelInitialized(System& system) {
         if (!general_channel_event) {
@@ -742,8 +1377,17 @@ std::span<GPUDirtyMemoryManager> System::GetGPUDirtyMemoryManager() {
 }
 
 void System::GatherGPUDirtyMemory(std::function<void(PAddr, size_t)>& callback) {
-    for (auto& manager : impl->gpu_dirty_memory_managers) {
-        manager.Gather(callback);
+    if (g_nx2_barrier.load(std::memory_order_relaxed) < 2) {
+        for (auto& manager : impl->gpu_dirty_memory_managers) {
+            manager.Gather(callback);
+        }
+        return;
+    }
+    // Only the writes made for the frame the GPU thread is running: those after the last
+    // present it has finished, and before the next one.
+    const size_t first = (Nx2GpuThreadDone() & 1) != 0 ? Core::Hardware::NUM_CPU_CORES : 0;
+    for (size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; ++i) {
+        impl->gpu_dirty_memory_managers[first + i].Gather(callback);
     }
 }
 
@@ -941,7 +1585,9 @@ Core::Mods::ModRuntime* System::ModRuntime() {
 void System::RegisterDualScreenMod(const std::array<u8, 0x20>& build_id, VAddr main_region_begin,
                                    u64 main_region_size) {
     // Called from the loader, before the application process exists: just remember the extents.
-    if (impl->pending_mod_base != 0) {
+    // A single-screen device never gets a ModRuntime: with nothing remembered here, Load skips
+    // Discover/IdleManifest and no DSMod::Tick event or package module is ever set up.
+    if (impl->pending_mod_base != 0 || !VideoCore::DSMod::DuoEnabled()) {
         return; // first module wins (main)
     }
     impl->pending_mod_build_id = build_id;
@@ -954,6 +1600,17 @@ void System::RegisterCheatList(const std::vector<Memory::CheatEntry>& list,
                                u64 main_region_size) {
     impl->cheat_engine.emplace(*this, list, build_id);
     impl->cheat_engine->SetMainMemoryParameters(main_region_begin, main_region_size);
+}
+
+std::vector<Memory::RuntimeCheatInfo> System::GetRuntimeCheats() const {
+    if (!impl->cheat_engine) {
+        return {};
+    }
+    return impl->cheat_engine->GetCheats();
+}
+
+bool System::SetCheatEnabled(u32 cheat_id, bool enabled) {
+    return impl->cheat_engine && impl->cheat_engine->SetCheatEnabled(cheat_id, enabled);
 }
 
 void System::SetFrontendAppletSet(Service::AM::Frontend::FrontendAppletSet&& set) {
@@ -1178,9 +1835,12 @@ void System::NotifyApplicationChanged(u64 program_id) {
 
 void System::ApplySettings() {
     impl->RefreshTime(*this);
+    Common::RefreshThreadPolicies();
 
     if (IsPoweredOn()) {
         Renderer().RefreshBaseSettings();
+        // Frontends switch docked/handheld through the settings; let the running game know.
+        GetAppletManager().OperationModeChanged();
     }
 }
 

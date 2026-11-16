@@ -70,6 +70,15 @@ static u128 MakeUuidFromName(std::string_view name) {
     return {h1, h2};
 }
 
+// A joined room is the emulated network, even in airplane mode. Its sockets only reach room
+// members, and LAN games (e.g. Mario Kart World LAN Play) need their connection request accepted.
+static bool IsNetworkAvailable() {
+    if (Network::GetRoomIPv4Address()) {
+        return true;
+    }
+    return Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue();
+}
+
 // This is nn::nifm::RequestState
 enum class RequestState : u32 {
     NotSubmitted = 1,
@@ -109,6 +118,17 @@ struct IpAddressSetting {
     Network::IPv4Address default_gateway{};
 };
 static_assert(sizeof(IpAddressSetting) == 0xD, "IpAddressSetting has incorrect size.");
+
+// Room fake IPs are spread over 192.168.0.0/16, and some room servers give members different /24s.
+// A host /24 mask would then put room members on different subnets, so LAN games ignore each other.
+constexpr Network::IPv4Address RoomSubnetMask{255, 255, 0, 0};
+
+static void ApplyRoomAddress(IpAddressSetting& setting) {
+    if (const auto room_ip = Network::GetRoomIPv4Address()) {
+        setting.ip_address = *room_ip;
+        setting.subnet_mask = RoomSubnetMask;
+    }
+}
 
 // This is nn::nifm::DnsSetting
 struct DnsSetting {
@@ -235,6 +255,15 @@ public:
     explicit IScanRequest(Core::System& system_)
         : ServiceFramework{system_, "IScanRequest"}, svc_ctx{system_, "IScanRequest"} {
 
+        static const FunctionInfo functions[] = {
+            {0, &IScanRequest::Submit, "Submit"},
+            {1, &IScanRequest::IsProcessing, "IsProcessing"},
+            {2, &IScanRequest::GetResult, "GetResult"},
+            {3, &IScanRequest::GetSystemEventReadableHandle, "GetSystemEventReadableHandle"},
+            {4, &IScanRequest::SetChannels, "SetChannels"},
+        };
+        RegisterHandlers(functions);
+
         evt_scan_complete = CreateKEvent(svc_ctx, "IScanRequest:Complete");
         evt_processing = CreateKEvent(svc_ctx, "IScanRequest:Processing");
     }
@@ -248,6 +277,8 @@ public:
     }
 
 private:
+    std::vector<Network::ScanData> scan_results;
+
     void Submit(HLERequestContext& ctx) {
 
         if (state.load() == State::Finished) {
@@ -318,17 +349,6 @@ private:
         evt_scan_complete->Signal(system.Kernel());
     }
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
-    }
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, &IScanRequest::Submit, "Submit"},
-        FunctionInfo{1, &IScanRequest::IsProcessing, "IsProcessing"},
-        FunctionInfo{2, &IScanRequest::GetResult, "GetResult"},
-        FunctionInfo{3, &IScanRequest::GetSystemEventReadableHandle, "GetSystemEventReadableHandle"},
-        FunctionInfo{4, &IScanRequest::SetChannels, "SetChannels"}
-    );
-    std::vector<Network::ScanData> scan_results;
     KernelHelpers::ServiceContext svc_ctx;
 
     Kernel::KEvent* evt_scan_complete{};
@@ -342,6 +362,36 @@ class IRequest final : public ServiceFramework<IRequest> {
 public:
     explicit IRequest(Core::System& system_)
         : ServiceFramework{system_, "IRequest"}, service_context{system_, "IRequest"} {
+        static const FunctionInfo functions[] = {
+            {0, &IRequest::GetRequestState, "GetRequestState"},
+            {1, &IRequest::GetResult, "GetResult"},
+            {2, &IRequest::GetSystemEventReadableHandles, "GetSystemEventReadableHandles"},
+            {3, &IRequest::Cancel, "Cancel"},
+            {4, &IRequest::Submit, "Submit"},
+            {5, nullptr, "SetRequirement"},
+            {6, &IRequest::SetRequirementPreset, "SetRequirementPreset"},
+            {8, nullptr, "SetPriority"},
+            {9, &IRequest::SetNetworkProfileId, "SetNetworkProfileId"},
+            {10, nullptr, "SetRejectable"},
+            {11, &IRequest::SetConnectionConfirmationOption, "SetConnectionConfirmationOption"},
+            {12, nullptr, "SetPersistent"},
+            {13, nullptr, "SetInstant"},
+            {14, nullptr, "SetSustainable"},
+            {15, nullptr, "SetRawPriority"},
+            {16, nullptr, "SetGreedy"},
+            {17, nullptr, "SetSharable"},
+            {18, nullptr, "SetRequirementByRevision"},
+            {19, nullptr, "GetRequirement"},
+            {20, nullptr, "GetRevision"},
+            {21, &IRequest::GetAppletInfo, "GetAppletInfo"},
+            {22, nullptr, "GetAdditionalInfo"},
+            {23, nullptr, "SetKeptInSleep"},
+            {24, nullptr, "RegisterSocketDescriptor"},
+            {25, nullptr, "UnregisterSocketDescriptor"},
+            {26, nullptr, "GetNetworkAccessStatus"}, //21.0.0+
+        };
+        RegisterHandlers(functions);
+
         event1 = CreateKEvent(service_context, "IRequest:Event1");
         event2 = CreateKEvent(service_context, "IRequest:Event2");
         state = RequestState::NotSubmitted;
@@ -400,8 +450,7 @@ private:
         LOG_DEBUG(Service_NIFM, "(STUBBED) called");
 
         const auto result = [this] {
-            const auto has_connection = Network::GetHostIPv4Address().has_value() &&
-                                        !Settings::values.airplane_mode.GetValue();
+            const auto has_connection = IsNetworkAvailable();
             switch (state) {
             case RequestState::NotSubmitted:
                 return has_connection ? ResultSuccess : ResultNetworkCommunicationDisabled;
@@ -464,37 +513,6 @@ private:
         event1->Signal(system.Kernel());
     }
 
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
-    }
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, &IRequest::GetRequestState, "GetRequestState"},
-        FunctionInfo{1, &IRequest::GetResult, "GetResult"},
-        FunctionInfo{2, &IRequest::GetSystemEventReadableHandles, "GetSystemEventReadableHandles"},
-        FunctionInfo{3, &IRequest::Cancel, "Cancel"},
-        FunctionInfo{4, &IRequest::Submit, "Submit"},
-        FunctionInfo{5, nullptr, "SetRequirement"},
-        FunctionInfo{6, &IRequest::SetRequirementPreset, "SetRequirementPreset"},
-        FunctionInfo{8, nullptr, "SetPriority"},
-        FunctionInfo{9, &IRequest::SetNetworkProfileId, "SetNetworkProfileId"},
-        FunctionInfo{10, nullptr, "SetRejectable"},
-        FunctionInfo{11, &IRequest::SetConnectionConfirmationOption, "SetConnectionConfirmationOption"},
-        FunctionInfo{12, nullptr, "SetPersistent"},
-        FunctionInfo{13, nullptr, "SetInstant"},
-        FunctionInfo{14, nullptr, "SetSustainable"},
-        FunctionInfo{15, nullptr, "SetRawPriority"},
-        FunctionInfo{16, nullptr, "SetGreedy"},
-        FunctionInfo{17, nullptr, "SetSharable"},
-        FunctionInfo{18, nullptr, "SetRequirementByRevision"},
-        FunctionInfo{19, nullptr, "GetRequirement"},
-        FunctionInfo{20, nullptr, "GetRevision"},
-        FunctionInfo{21, &IRequest::GetAppletInfo, "GetAppletInfo"},
-        FunctionInfo{22, nullptr, "GetAdditionalInfo"},
-        FunctionInfo{23, nullptr, "SetKeptInSleep"},
-        FunctionInfo{24, nullptr, "RegisterSocketDescriptor"},
-        FunctionInfo{25, nullptr, "UnregisterSocketDescriptor"},
-        FunctionInfo{26, nullptr, "GetNetworkAccessStatus", MakeVersionGate({21,0,0})}
-    );
     KernelHelpers::ServiceContext service_context;
 
     RequestState state;
@@ -509,16 +527,14 @@ private:
 
 class INetworkProfile final : public ServiceFramework<INetworkProfile> {
 public:
-    explicit INetworkProfile(Core::System& system_) : ServiceFramework{system_, "INetworkProfile"} {}
-
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
+    explicit INetworkProfile(Core::System& system_) : ServiceFramework{system_, "INetworkProfile"} {
+        static const FunctionInfo functions[] = {
+            {0, nullptr, "Update"},
+            {1, nullptr, "PersistOld"},
+            {2, nullptr, "Persist"},
+        };
+        RegisterHandlers(functions);
     }
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{0, nullptr, "Update"},
-        FunctionInfo{1, nullptr, "PersistOld"},
-        FunctionInfo{2, nullptr, "Persist"}
-    );
 };
 
 void IGeneralService::GetClientId(HLERequestContext& ctx) {
@@ -575,10 +591,7 @@ void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
         std::strncpy(profile.network_name.data(), st.ssid, sizeof(profile.network_name) - 1);
 
         if (auto room_member = Network::GetRoomMember().lock()) {
-            if (room_member->IsConnected()) {
-                profile.ip_setting_data.ip_address_setting.ip_address =
-                    room_member->GetFakeIpAddress();
-            }
+            ApplyRoomAddress(profile.ip_setting_data.ip_address_setting);
             profile.ip_setting_data.dns_setting.secondary_dns = {8, 8, 8, 8};
         }
 
@@ -587,6 +600,19 @@ void IGeneralService::GetCurrentNetworkProfile(HLERequestContext& ctx) {
             std::memcpy(profile.wireless_setting_data.ssid.data(), st.ssid,
                         profile.wireless_setting_data.ssid_length);
         }
+    } else if (Network::GetRoomIPv4Address()) {
+        // The selected adapter is missing, but the room still works and IsNetworkAvailable
+        // reports it, so describe the room as a wired network
+        profile.ip_setting_data.ip_address_setting.is_automatic = true;
+        ApplyRoomAddress(profile.ip_setting_data.ip_address_setting);
+
+        profile.ip_setting_data.dns_setting.is_automatic = true;
+        profile.ip_setting_data.dns_setting.primary_dns = {1, 1, 1, 1};
+        profile.ip_setting_data.dns_setting.secondary_dns = {8, 8, 8, 8};
+
+        profile.uuid = MakeUuidFromName(st.ssid);
+        profile.profile_type = static_cast<u8>(NetworkProfileType::User);
+        profile.interface_type = static_cast<u8>(NetworkInterfaceType::Ethernet);
     }
 
     ctx.WriteBuffer(profile);
@@ -600,6 +626,8 @@ void IGeneralService::EnumerateNetworkInterfaces(HLERequestContext& ctx) {
     using Network::HostAdapterKind;
 
     const auto adapters = Network::GetAvailableNetworkInterfaces();
+    const auto selected = Network::GetSelectedNetworkInterface();
+    const auto room_ip = Network::GetRoomIPv4Address();
     constexpr size_t kEntry = 0x3F0;
 
     std::vector<u8> blob(adapters.size() * kEntry, 0);
@@ -614,6 +642,13 @@ void IGeneralService::EnumerateNetworkInterfaces(HLERequestContext& ctx) {
         *reinterpret_cast<in_addr*>(base + 0x18) = host.ip_address;
         *reinterpret_cast<in_addr*>(base + 0x1C) = host.subnet_mask;
         *reinterpret_cast<in_addr*>(base + 0x20) = host.gateway;
+
+        // The room traffic goes through the selected adapter, so report it like the other calls.
+        // Without a selected adapter, the first one stands for the room.
+        if (room_ip && (selected ? host.name == selected->name : i == 0)) {
+            std::memcpy(base + 0x18, room_ip->data(), room_ip->size());
+            std::memcpy(base + 0x1C, RoomSubnetMask.data(), RoomSubnetMask.size());
+        }
 
         std::string name_utf8 = host.name;
         name_utf8.resize(0x110, '\0');
@@ -714,11 +749,7 @@ void IGeneralService::GetNetworkProfile(HLERequestContext& ctx) {
             .wireless_setting_data{wifi}};
     }();
 
-    if (auto room_member = Network::GetRoomMember().lock()) {
-        if (room_member->IsConnected()) {
-            profile.ip_setting_data.ip_address_setting.ip_address = room_member->GetFakeIpAddress();
-        }
-    }
+    ApplyRoomAddress(profile.ip_setting_data.ip_address_setting);
 
     ctx.WriteBuffer(profile);
 
@@ -855,10 +886,8 @@ void IGeneralService::GetCurrentIpAddress(HLERequestContext& ctx) {
         ipv4.emplace(Network::IPv4Address{0, 0, 0, 0});
     }
 
-    if (auto room_member = Network::GetRoomMember().lock()) {
-        if (room_member->IsConnected()) {
-            ipv4 = room_member->GetFakeIpAddress();
-        }
+    if (const auto room_ip = Network::GetRoomIPv4Address()) {
+        ipv4 = room_ip;
     }
 
     IPC::ResponseBuilder rb{ctx, 3};
@@ -905,9 +934,7 @@ void IGeneralService::GetCurrentIpConfigInfo(HLERequestContext& ctx) {
     }
 
     if (auto room_member = Network::GetRoomMember().lock()) {
-        if (room_member->IsConnected()) {
-            info.ip.ip_address = room_member->GetFakeIpAddress();
-        }
+        ApplyRoomAddress(info.ip);
         info.dns.is_automatic = true;
         info.dns.primary_dns = {1, 1, 1, 1};
         info.dns.secondary_dns = {8, 8, 8, 8};
@@ -987,7 +1014,7 @@ void IGeneralService::IsAnyInternetRequestAccepted(HLERequestContext& ctx) {
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    if (Network::GetHostIPv4Address().has_value() && !Settings::values.airplane_mode.GetValue()) {
+    if (IsNetworkAvailable()) {
         rb.Push<u8>(1);
     } else {
         rb.Push<u8>(0);
@@ -1053,70 +1080,78 @@ void IGeneralService::GetCurrentAccessPoint(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
-std::optional<ServiceFrameworkBase::FunctionInfoBase> IGeneralService::FindRequest(u32 key) {
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{1, &IGeneralService::GetClientId, "GetClientId"},
-        FunctionInfo{2, &IGeneralService::CreateScanRequest, "CreateScanRequest"},
-        FunctionInfo{4, &IGeneralService::CreateRequest, "CreateRequest"},
-        FunctionInfo{5, &IGeneralService::GetCurrentNetworkProfile, "GetCurrentNetworkProfile"},
-        FunctionInfo{6, &IGeneralService::EnumerateNetworkInterfaces, "EnumerateNetworkInterfaces"},
-        FunctionInfo{7, &IGeneralService::EnumerateNetworkProfiles, "EnumerateNetworkProfiles"},
-        FunctionInfo{8, &IGeneralService::GetNetworkProfile, "GetNetworkProfile"},
-        FunctionInfo{9, &IGeneralService::SetNetworkProfile, "SetNetworkProfile"},
-        FunctionInfo{10, &IGeneralService::RemoveNetworkProfile, "RemoveNetworkProfile"},
-        FunctionInfo{11, &IGeneralService::GetScanData, "GetScanDataOld"},
-        FunctionInfo{12, &IGeneralService::GetCurrentIpAddress, "GetCurrentIpAddress"},
-        FunctionInfo{13, nullptr, "GetCurrentAccessPointOld"},
-        FunctionInfo{14, &IGeneralService::CreateTemporaryNetworkProfile, "CreateTemporaryNetworkProfile"},
-        FunctionInfo{15, &IGeneralService::GetCurrentIpConfigInfo, "GetCurrentIpConfigInfo"},
-        FunctionInfo{16, &IGeneralService::SetWirelessCommunicationEnabled, "SetWirelessCommunicationEnabled"},
-        FunctionInfo{17, &IGeneralService::IsWirelessCommunicationEnabled, "IsWirelessCommunicationEnabled"},
-        FunctionInfo{18, &IGeneralService::GetInternetConnectionStatus, "GetInternetConnectionStatus"},
-        FunctionInfo{19, &IGeneralService::SetEthernetCommunicationEnabled, "SetEthernetCommunicationEnabled"},
-        FunctionInfo{20, &IGeneralService::IsEthernetCommunicationEnabled, "IsEthernetCommunicationEnabled"},
-        FunctionInfo{21, &IGeneralService::IsAnyInternetRequestAccepted, "IsAnyInternetRequestAccepted"},
-        FunctionInfo{22, &IGeneralService::IsAnyForegroundRequestAccepted, "IsAnyForegroundRequestAccepted"},
-        FunctionInfo{23, nullptr, "PutToSleep"},
-        FunctionInfo{24, nullptr, "WakeUp"},
-        FunctionInfo{25, &IGeneralService::GetSsidListVersion, "GetSsidListVersion"},
-        FunctionInfo{26, nullptr, "SetExclusiveClient"},
-        FunctionInfo{27, nullptr, "GetDefaultIpSetting"},
-        FunctionInfo{28, nullptr, "SetDefaultIpSetting"},
-        FunctionInfo{29, nullptr, "SetWirelessCommunicationEnabledForTest"},
-        FunctionInfo{30, nullptr, "SetEthernetCommunicationEnabledForTest"},
-        FunctionInfo{31, nullptr, "GetTelemetorySystemEventReadableHandle"},
-        FunctionInfo{32, nullptr, "GetTelemetryInfo"},
-        FunctionInfo{33, &IGeneralService::ConfirmSystemAvailability, "ConfirmSystemAvailability", MakeVersionGate({2,0,0})},
-        FunctionInfo{34, &IGeneralService::SetBackgroundRequestEnabled, "SetBackgroundRequestEnabled", MakeVersionGate({4,0,0})},
-        FunctionInfo{35, &IGeneralService::GetScanDataV2, "GetScanData"},
-        FunctionInfo{36, &IGeneralService::GetCurrentAccessPoint, "GetCurrentAccessPoint"},
-        FunctionInfo{37, nullptr, "Shutdown"},
-        FunctionInfo{38, nullptr, "GetAllowedChannels"},
-        FunctionInfo{39, nullptr, "NotifyApplicationSuspended"},
-        FunctionInfo{40, nullptr, "SetAcceptableNetworkTypeFlag"},
-        FunctionInfo{41, nullptr, "GetAcceptableNetworkTypeFlag"},
-        FunctionInfo{42, nullptr, "NotifyConnectionStateChanged"},
-        FunctionInfo{43, nullptr, "SetWowlDelayedWakeTime"},
-        FunctionInfo{44, nullptr, "IsWiredConnectionAvailable", MakeVersionGate({18,0,0})},
-        FunctionInfo{45, nullptr, "IsNetworkEmulationFeatureEnabled", MakeVersionGate({18,0,0})},
-        FunctionInfo{46, nullptr, "SelectActiveNetworkEmulationProfileIdForDebug", MakeVersionGate({18,0,0})},
-        FunctionInfo{47, &IGeneralService::GetScanDataV3, "GetScanData", MakeVersionGate({19,0,0})},
-        FunctionInfo{50, nullptr, "IsRewriteFeatureEnabled", MakeVersionGate({18,0,0})},
-        FunctionInfo{51, nullptr, "CreateRewriteRule", MakeVersionGate({18,0,0})},
-        FunctionInfo{52, nullptr, "DestroyRewriteRule", MakeVersionGate({18,0,0})}
-    );
-    return HandlerTableGenerateWithFind(key, functions);
-}
-
 IGeneralService::IGeneralService(Core::System& system_)
     : ServiceFramework{system_, "IGeneralService"} {
+    // clang-format off
+
+    static const FunctionInfo functions[] = {
+        {1, &IGeneralService::GetClientId, "GetClientId"},
+        {2, &IGeneralService::CreateScanRequest, "CreateScanRequest"},
+        {4, &IGeneralService::CreateRequest, "CreateRequest"},
+        {5, &IGeneralService::GetCurrentNetworkProfile, "GetCurrentNetworkProfile"},
+        {6, &IGeneralService::EnumerateNetworkInterfaces, "EnumerateNetworkInterfaces"},
+        {7, &IGeneralService::EnumerateNetworkProfiles, "EnumerateNetworkProfiles"},
+        {8, &IGeneralService::GetNetworkProfile, "GetNetworkProfile"},
+        {9, &IGeneralService::SetNetworkProfile, "SetNetworkProfile"},
+        {10, &IGeneralService::RemoveNetworkProfile, "RemoveNetworkProfile"},
+        {11, &IGeneralService::GetScanData, "GetScanDataOld"},
+        {12, &IGeneralService::GetCurrentIpAddress, "GetCurrentIpAddress"},
+        {13, nullptr, "GetCurrentAccessPointOld"},
+        {14, &IGeneralService::CreateTemporaryNetworkProfile, "CreateTemporaryNetworkProfile"},
+        {15, &IGeneralService::GetCurrentIpConfigInfo, "GetCurrentIpConfigInfo"},
+        {16, &IGeneralService::SetWirelessCommunicationEnabled, "SetWirelessCommunicationEnabled"},
+        {17, &IGeneralService::IsWirelessCommunicationEnabled, "IsWirelessCommunicationEnabled"},
+        {18, &IGeneralService::GetInternetConnectionStatus, "GetInternetConnectionStatus"},
+        {19, &IGeneralService::SetEthernetCommunicationEnabled, "SetEthernetCommunicationEnabled"},
+        {20, &IGeneralService::IsEthernetCommunicationEnabled, "IsEthernetCommunicationEnabled"},
+        {21, &IGeneralService::IsAnyInternetRequestAccepted, "IsAnyInternetRequestAccepted"},
+        {22, &IGeneralService::IsAnyForegroundRequestAccepted, "IsAnyForegroundRequestAccepted"},
+        {23, nullptr, "PutToSleep"},
+        {24, nullptr, "WakeUp"},
+        {25, &IGeneralService::GetSsidListVersion, "GetSsidListVersion"},
+        {26, nullptr, "SetExclusiveClient"},
+        {27, nullptr, "GetDefaultIpSetting"},
+        {28, nullptr, "SetDefaultIpSetting"},
+        {29, nullptr, "SetWirelessCommunicationEnabledForTest"},
+        {30, nullptr, "SetEthernetCommunicationEnabledForTest"},
+        {31, nullptr, "GetTelemetorySystemEventReadableHandle"},
+        {32, nullptr, "GetTelemetryInfo"},
+        {33, &IGeneralService::ConfirmSystemAvailability, "ConfirmSystemAvailability"}, // 2.0.0+
+        {34, &IGeneralService::SetBackgroundRequestEnabled, "SetBackgroundRequestEnabled"}, // 4.0.0+
+        {35, &IGeneralService::GetScanDataV2, "GetScanData"},
+        {36, &IGeneralService::GetCurrentAccessPoint, "GetCurrentAccessPoint"},
+        {37, nullptr, "Shutdown"},
+        {38, nullptr, "GetAllowedChannels"},
+        {39, nullptr, "NotifyApplicationSuspended"},
+        {40, nullptr, "SetAcceptableNetworkTypeFlag"},
+        {41, nullptr, "GetAcceptableNetworkTypeFlag"},
+        {42, nullptr, "NotifyConnectionStateChanged"},
+        {43, nullptr, "SetWowlDelayedWakeTime"},
+        {44, nullptr, "IsWiredConnectionAvailable"}, // 18.0.0+
+        {45, nullptr, "IsNetworkEmulationFeatureEnabled"}, // 18.0.0+
+        {46, nullptr, "SelectActiveNetworkEmulationProfileIdForDebug"}, // 18.0.0+
+        {47, &IGeneralService::GetScanDataV3, "GetScanData"}, // 19.0.0+
+        {50, nullptr, "IsRewriteFeatureEnabled"}, // 18.0.0+
+        {51, nullptr, "CreateRewriteRule"}, // 18.0.0+
+        {52, nullptr, "DestroyRewriteRule"} // 18.0.0+
+    };
+    // clang-format on
+
+    RegisterHandlers(functions);
 }
 
 IGeneralService::~IGeneralService() = default;
 
 class NetworkInterface final : public ServiceFramework<NetworkInterface> {
 public:
-    explicit NetworkInterface(const char* name, Core::System& system_) : ServiceFramework{system_, name} {}
+    explicit NetworkInterface(const char* name, Core::System& system_)
+        : ServiceFramework{system_, name} {
+        static const FunctionInfo functions[] = {
+            {4, &NetworkInterface::CreateGeneralServiceOld, "CreateGeneralServiceOld"},
+            {5, &NetworkInterface::CreateGeneralService, "CreateGeneralService"},
+        };
+        RegisterHandlers(functions);
+    }
 
 private:
     void CreateGeneralServiceOld(HLERequestContext& ctx) {
@@ -1134,14 +1169,6 @@ private:
         rb.Push(ResultSuccess);
         rb.PushIpcInterface<IGeneralService>(ctx, system);
     }
-
-    std::optional<FunctionInfoBase> FindRequest(u32 key) override {
-        return HandlerTableGenerateWithFind(key, functions);
-    }
-    static constexpr auto functions = CreateStaticMap(
-        FunctionInfo{4, &NetworkInterface::CreateGeneralServiceOld, "CreateGeneralServiceOld"},
-        FunctionInfo{5, &NetworkInterface::CreateGeneralService, "CreateGeneralService"}
-    );
 };
 
 void LoopProcess(Core::System& system) {

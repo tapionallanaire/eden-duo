@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <string>
+#include <format>
 
 #include <jni.h>
 
@@ -12,6 +13,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/game_settings.h"
 #include "frontend_common/config.h"
 #include "frontend_common/settings_generator.h"
 #include "native.h"
@@ -72,7 +74,7 @@ void Java_org_yuzu_yuzu_1emu_utils_NativeConfig_initializePerGameConfig(JNIEnv* 
                                                                         jstring jfileName) {
     auto program_id = EmulationSession::GetProgramId(env, jprogramId);
     auto file_name = Common::Android::GetJString(env, jfileName);
-    const auto config_file_name = program_id == 0 ? file_name : fmt::format("{:016X}", program_id);
+    const auto config_file_name = program_id == 0 ? file_name : std::format("{:016X}", program_id);
     per_game_config =
         std::make_unique<AndroidConfig>(config_file_name, Config::ConfigType::PerGameConfig);
 }
@@ -88,6 +90,20 @@ void Java_org_yuzu_yuzu_1emu_utils_NativeConfig_savePerGameConfig(JNIEnv* env, j
 
 void Java_org_yuzu_yuzu_1emu_utils_NativeConfig_unloadPerGameConfig(JNIEnv* env, jobject obj) {
     per_game_config.reset();
+}
+
+jboolean Java_org_yuzu_yuzu_1emu_utils_NativeConfig_hasOptimalSettings(JNIEnv* env, jobject obj,
+                                                                      jstring jprogramId) {
+    return Core::GameSettings::HasOptimalSettings(EmulationSession::GetProgramId(env, jprogramId));
+}
+
+jboolean Java_org_yuzu_yuzu_1emu_utils_NativeConfig_applyOptimalSettings(JNIEnv* env, jobject obj,
+                                                                        jstring jprogramId) {
+    if (per_game_config == nullptr) {
+        return false;
+    }
+    return Core::GameSettings::ApplyOptimalSettings(
+        EmulationSession::GetProgramId(env, jprogramId));
 }
 
 jboolean Java_org_yuzu_yuzu_1emu_utils_NativeConfig_getBoolean(JNIEnv* env, jobject obj,

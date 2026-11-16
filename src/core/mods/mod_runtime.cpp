@@ -26,6 +26,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <format>
 
 #include <cstdlib>
 #include <fstream>
@@ -622,9 +623,9 @@ void ModRuntime::Tick() {
             for (const auto& thread : process->GetThreadList()) {
                 const u64 pc = thread.GetContext().pc;
                 const s64 rel = static_cast<s64>(pc) - static_cast<s64>(main_region_begin);
-                summary += fmt::format(" [{}:{:X}{}]", thread.GetThreadId(), pc,
+                summary += std::format(" [{}:{:X}{}]", thread.GetThreadId(), pc,
                                        (rel >= 0 && rel < static_cast<s64>(main_region_size))
-                                           ? fmt::format(" main+{:X}", rel)
+                                           ? std::format(" main+{:X}", rel)
                                            : std::string{});
                 if (++listed >= 12) {
                     break;
@@ -649,10 +650,13 @@ void ModRuntime::Tick() {
             UpdateHostValues(); // runtime 21: what the module's get_i64 answers
             RunGameModule(snapshot, true);
         }
-        // What the package does to the game itself must not depend on whether a second display
-        // exists (lid closed at boot, one-display setups): code patches, spies, and the watchdog
-        // for a call that went in just before the surface vanished. With the surface shown these
-        // run from ApplyEnforceRules / after the page binds, exactly as before.
+        // What the package does to the game itself must not depend on whether the second display
+        // is shown right now (lid closed at boot, panel switched off): code patches, spies, and
+        // the watchdog for a call that went in just before the surface vanished. With the surface
+        // shown these run from ApplyEnforceRules / after the page binds, exactly as before. A
+        // device with only one display never gets here: it runs no ModRuntime and no load plan
+        // (VideoCore::DSMod::DuoEnabled, checked in System::RegisterDualScreenMod and at the
+        // shared load-plan selection boundary in mod_load_plan.cpp).
         MaintainGuestBridge();
         ArmSpies();
         NavOff("second screen hidden"); // runtime 17: the game gets its controller back
@@ -788,14 +792,14 @@ void ModRuntime::Tick() {
             // marker's player_x/y come from the minimap-grid tracker), so report the value
             // whenever one exists and say "unresolved" only when there is neither.
             if (const auto number = snapshot.floats.find(name); number != snapshot.floats.end()) {
-                summary += fmt::format("{}={:g} ", name, number->second);
+                summary += std::format("{}={:g} ", name, number->second);
             } else if (const auto whole = snapshot.ints.find(name); whole != snapshot.ints.end()) {
-                summary += fmt::format("{}={} ", name, whole->second);
+                summary += std::format("{}={} ", name, whole->second);
             } else if (const auto address = snapshot.addresses.find(name);
                        address == snapshot.addresses.end() || address->second == 0) {
-                summary += fmt::format("{}=unresolved ", name);
+                summary += std::format("{}=unresolved ", name);
             } else {
-                summary += fmt::format("{}=? ", name);
+                summary += std::format("{}=? ", name);
             }
         }
         LOG_INFO(Core, "DSMod snapshot: {}", summary);

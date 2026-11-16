@@ -31,7 +31,7 @@ import org.yuzu.yuzu_emu.model.Installable
 import org.yuzu.yuzu_emu.model.TaskState
 import org.yuzu.yuzu_emu.utils.FileUtil
 import org.yuzu.yuzu_emu.utils.InstallableActions
-import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.PathUtil
 import org.yuzu.yuzu_emu.utils.ViewUtils.updateMargins
 import org.yuzu.yuzu_emu.utils.collect
 import java.io.BufferedOutputStream
@@ -102,11 +102,11 @@ class InstallableFragment : Fragment() {
                 },
                 export = {
                     val oldSaveDataFolder = File(
-                        NativeConfig.getSaveDir() +
+                        PathUtil.saveDir() +
                             NativeLibrary.getDefaultProfileSaveDataRoot(false)
                     )
                     val futureSaveDataFolder = File(
-                        NativeConfig.getSaveDir() +
+                        PathUtil.saveDir() +
                             NativeLibrary.getDefaultProfileSaveDataRoot(true)
                     )
                     if (!oldSaveDataFolder.exists() && !futureSaveDataFolder.exists()) {
@@ -296,7 +296,7 @@ class InstallableFragment : Fragment() {
                                 }
 
                                 val internalSaveFolder = File(
-                                    "${NativeConfig.getSaveDir()}$baseSaveDir"
+                                    "${PathUtil.saveDir()}$baseSaveDir"
                                 )
                                 internalSaveFolder.deleteRecursively()
                                 internalSaveFolder.mkdir()
@@ -373,7 +373,7 @@ class InstallableFragment : Fragment() {
             cacheSaveDir.mkdir()
 
             val oldSaveDataFolder = File(
-                NativeConfig.getSaveDir() +
+                PathUtil.saveDir() +
                     NativeLibrary.getDefaultProfileSaveDataRoot(false)
             )
             if (oldSaveDataFolder.exists()) {
@@ -381,7 +381,7 @@ class InstallableFragment : Fragment() {
             }
 
             val futureSaveDataFolder = File(
-                NativeConfig.getSaveDir() +
+                PathUtil.saveDir() +
                     NativeLibrary.getDefaultProfileSaveDataRoot(true)
             )
             if (futureSaveDataFolder.exists()) {

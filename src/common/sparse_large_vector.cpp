@@ -39,12 +39,12 @@ static LONG WINAPI FakePageFaultHandler(PEXCEPTION_POINTERS info) {
         std::lock_guard lock(vector_regions_mutex);
         for (auto region: vector_regions) {
             auto addr_shifted = exception_addr >> HostPageBits;
-            if (region.first <= addr_shifted && addr_shifted <= region.second) {
+            if (region.first <= addr_shifted && addr_shifted < region.second) {
                 addr = addr_shifted;
             }
 
             // Page-boundary accesses
-            if (auto addr_ = (exception_addr + 0x40) >> HostPageBits; addr_ != addr_shifted && region.first <= addr_ && addr_ <= region.second) {
+            if (auto addr_ = (exception_addr + 0x40) >> HostPageBits; addr_ != addr_shifted && region.first <= addr_ && addr_ < region.second) {
                 addr2 = addr_;
             }
 
@@ -109,21 +109,6 @@ bool CommitVectorPage(uintptr_t addr, bool write) noexcept {
 #ifndef MAP_NOCORE
 #define MAP_NOCORE 0
 #endif
-#ifndef MADV_FREE
-#define MADV_FREE MADV_DONTNEED
-#endif
-
-void DecommitVectorPage(uintptr_t base) noexcept {
-#if defined(_WIN32)
-    VirtualFree(reinterpret_cast<LPVOID>(base), HostPageSize, MEM_DECOMMIT);
-#elif defined(__linux__)
-    // Linux's MADV_DONTNEED zeros out pages for us
-    madvise(reinterpret_cast<void*>(base), HostPageSize, MADV_DONTNEED);
-#else
-    madvise(reinterpret_cast<void*>(base), HostPageSize, MADV_FREE);
-    std::memset(reinterpret_cast<void*>(base), 0, HostPageSize);
-#endif
-}
 
 void* AllocateMemoryPages(std::size_t size) noexcept {
     if (auto page = HostPageSize; size % page != 0) {
@@ -164,7 +149,8 @@ void FreeMemoryPages(void* base, [[maybe_unused]] std::size_t size) noexcept {
         return;
 #ifdef _WIN32
     std::lock_guard lock(vector_regions_mutex);
-    std::erase_if(vector_regions, [base](const auto& r) {return r.first == reinterpret_cast<u64>(base); });
+    // Regions are kept in host pages.
+    std::erase_if(vector_regions, [base](const auto& r) {return r.first == reinterpret_cast<u64>(base) >> HostPageBits; });
     ASSERT(VirtualFree(base, 0, MEM_RELEASE));
 #else
     ASSERT(munmap(base, size) == 0);

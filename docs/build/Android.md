@@ -3,12 +3,13 @@
 ## Dependencies
 
 * [Android Studio](https://developer.android.com/studio)
-* [NDK 27+ and CMake 3.22.1](https://developer.android.com/studio/projects/install-ndk#default-version)
+* [NDK 30+ and CMake 3.31.6](https://developer.android.com/studio/projects/install-ndk#default-version)
+  * `$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "cmake;3.31.6" "ndk;30.0.16138531"`
 * [Git](https://git-scm.com/download)
 
 ## WINDOWS ONLY - Additional Dependencies
 
-* **[Visual Studio 2022 Community](https://visualstudio.microsoft.com/downloads/)** - **Make sure to select "Desktop development with C++" support in the installer. Make sure to update to the latest version if already installed.**
+* **[Visual Studio](https://visualstudio.microsoft.com/downloads/)** - **Make sure to select "Desktop development with C++" support in the installer. Make sure to update to the latest version if already installed.**
 * **[Vulkan SDK](https://vulkan.lunarg.com/sdk/home#windows)** - **Make sure to select Latest SDK.**
   * A convenience script to install the latest SDK is provided in `.ci\windows\install-vulkan-sdk.ps1`.
 
@@ -33,10 +34,9 @@ Eden by default will be cloned into:
 ## Building with Terminal
 
 1. Download the SDK and NDK from Android Studio.
-2. Navigate to SDK and NDK paths.
-3. Then set ANDROID_SDK_ROOT and ANDROID_NDK_ROOT in terminal via
-`export ANDROID_SDK_ROOT=path/to/sdk`
-`export ANDROID_NDK_ROOT=path/to/ndk`.
+2. Navigate to SDK path.
+3. Then set ANDROID_HOME in terminal via
+`export ANDROID_HOME=path/to/sdk`
 4. Navigate to `eden/src/android`.
 5. Then Build with `./gradlew assembleRelWithDebInfo`.
 6. To build the optimised build use `./gradlew assembleGenshinSpoofRelWithDebInfo`.

@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include "common/common_types.h"
 #include "shader_recompiler/exception.h"
@@ -271,7 +274,9 @@ enum class Reg : u64 {
 static_assert(static_cast<int>(Reg::RZ) == 255);
 
 constexpr size_t NUM_USER_REGS = 255;
-constexpr size_t NUM_REGS = 256;
+// Native lowering keeps shadowed guest registers and borrowed scratch registers in two more banks
+// of 256 (R256-R767). Only native register copies (a MOV form Maxwell code never uses) reach them.
+constexpr size_t NUM_REGS = 768;
 
 [[nodiscard]] constexpr Reg operator+(Reg reg, int num) {
     if (reg == Reg::RZ) {
@@ -314,16 +319,17 @@ constexpr Reg operator++(Reg& reg, int) {
 } // namespace Shader::IR
 
 template <>
-struct fmt::formatter<Shader::IR::Reg> {
+struct std::formatter<Shader::IR::Reg> {
     constexpr auto parse(format_parse_context& ctx) {
         return ctx.begin();
     }
     template <typename FormatContext>
     auto format(const Shader::IR::Reg& reg, FormatContext& ctx) const {
         if (reg == Shader::IR::Reg::RZ) {
-            return fmt::format_to(ctx.out(), "RZ");
-        } else if (static_cast<int>(reg) >= 0 && static_cast<int>(reg) < 255) {
-            return fmt::format_to(ctx.out(), "R{}", static_cast<int>(reg));
+            return std::format_to(ctx.out(), "RZ");
+        } else if (static_cast<int>(reg) >= 0 &&
+                   static_cast<int>(reg) < static_cast<int>(Shader::IR::NUM_REGS)) {
+            return std::format_to(ctx.out(), "R{}", static_cast<int>(reg));
         } else {
             throw Shader::LogicError("Invalid register with raw value {}", static_cast<int>(reg));
         }

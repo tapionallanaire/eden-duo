@@ -35,6 +35,13 @@ import org.yuzu.yuzu_emu.applets.web.WebBrowser
  */
 object NativeLibrary {
     @Keep
+    class RuntimeCheat(
+        val id: Int,
+        val name: String,
+        val enabled: Boolean,
+        val isMaster: Boolean
+    )
+    @Keep
     data class UpdateResult(
         var tag: String = "",
         var title: String = "",
@@ -164,6 +171,13 @@ object NativeLibrary {
      */
     external fun run(path: String?, programIndex: Int, frontendInitiated: Boolean)
 
+    /**
+     * Eden Duo: set before [run]. `record` writes this session's newly built pipelines to the
+     * title's recording; `compile` makes this run load and build the title's plan and stop;
+     * `compileMax` also builds every vertex/fragment shader combination the plan knows.
+     */
+    external fun setShaderRunMode(record: Boolean, compile: Boolean, compileMax: Boolean)
+
     // Surface Handling
     external fun surfaceChanged(surf: Surface?)
 
@@ -197,6 +211,9 @@ object NativeLibrary {
      * Returns true if emulation is paused.
      */
     external fun isPaused(): Boolean
+
+    external fun getRuntimeCheats(): Array<RuntimeCheat>
+    external fun setRuntimeCheatEnabled(id: Int, enabled: Boolean): Boolean
 
     /**
      * Returns the performance stats for the current game
@@ -745,6 +762,12 @@ object NativeLibrary {
 
     // DSMod second-screen surface
     external fun auxSurfaceChanged(surf: Surface)
+
+    /** Eden Duo: false on a single-screen device, which turns the whole Duo path off. */
+    external fun setDuoAvailable(available: Boolean)
+
+    /** Eden Duo: drop cached host resources (textures, buffers) and return the heap to the OS. */
+    external fun recoverMemory()
 
     external fun auxSurfaceDestroyed()
 

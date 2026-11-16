@@ -27,6 +27,15 @@ namespace VideoCommon {
     return {0, 0};
 }
 
+/// log2 of the guest samples per host texel of an image, in x and y.
+template <typename Info>
+[[nodiscard]] inline std::pair<int, int> ExtentShift(const Info& info) {
+    if ((info.unroll_x | info.unroll_y) != 0) {
+        return {info.unroll_x, info.unroll_y};
+    }
+    return SamplesLog2(static_cast<int>(info.num_samples));
+}
+
 [[nodiscard]] inline int NumSamples(Tegra::Texture::MsaaMode msaa_mode) {
     using Tegra::Texture::MsaaMode;
     switch (msaa_mode) {

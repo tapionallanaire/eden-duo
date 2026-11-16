@@ -5,8 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cinttypes>
+#include <chrono>
+#include <atomic>
 #include <memory>
 
+#include "common/settings.h"
 #include "common/signal_chain.h"
 #include "core/arm/nce/arm_nce.h"
 #include "core/arm/nce/interpreter_visitor.h"
@@ -26,6 +29,7 @@ namespace {
 
 struct sigaction g_orig_bus_action;
 struct sigaction g_orig_segv_action;
+struct sigaction g_orig_ill_action;
 
 // Verify assembly offsets.
 using NativeExecutionParameters = Kernel::KThread::NativeExecutionParameters;
@@ -189,12 +193,96 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     const Common::ProcessAddress addr =
         (reinterpret_cast<u64>(info->si_addr) & ~Memory::YUZU_PAGEMASK);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
-    if (memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE)) {
-        // We handled the access successfully and are returning to guest code.
+    const auto fault_start = std::chrono::steady_clock::now();
+    static std::atomic<u64> handed{}, handler_ns{}, handed_ns{};
+    const auto spent = [&] {
+        handler_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - fault_start)
+                                           .count());
+    };
+    const auto result = memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE);
+    if (result == Memory::NCEAccessFaultAction::Retry) {
+        ++handed;
+        handed_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - fault_start)
+                                          .count());
         return true;
+    }
+    if (result == Memory::NCEAccessFaultAction::Instruction) {
+        auto& instruction_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+        // How many instructions run this way, every 5 s (each costs a signal and a decode).
+        static std::atomic<u64> emulated{}, refused{};
+        static std::atomic<s64> reported{};
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        if (s64 last = reported.load(); now - last >= 5 && reported.compare_exchange_strong(last, now)) {
+            LOG_INFO(Core_ARM, "NCE: {} writes to GPU-tracked pages emulated in the last 5 s, {} "
+                               "left to the page-wide path, {} pages handed over whole; {} ms "
+                               "emulating, {} ms handing pages over",
+                     emulated.exchange(0), refused.exchange(0), handed.exchange(0),
+                     handler_ns.exchange(0) / 1000000, handed_ns.exchange(0) / 1000000);
+        }
+        if (const auto next_pc = MatchAndExecuteOneInstruction(
+                memory, &instruction_ctx, GetFloatingPointState(instruction_ctx))) {
+            instruction_ctx.pc = *next_pc;
+            ++emulated;
+            spent();
+            return true;
+        }
+        ++refused;
+        // An instruction the interpreter does not run (an exclusive store, say): the page-wide
+        // path, which lets the instruction run again natively.
+        const auto page_wide_start = std::chrono::steady_clock::now();
+        const auto page_wide = memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE, true);
+        {
+            // Diagnostic: the slow ones (they wait for the page's GPU-written bytes).
+            static std::atomic<u32> slow_logged{};
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - page_wide_start)
+                                .count();
+            if (us >= 1000 && slow_logged.fetch_add(1) < 60) {
+                const u32 word = *reinterpret_cast<const u32*>(instruction_ctx.pc);
+                LOG_INFO(Core_ARM, "NCE page-wide fault: {} us, addr {:#x} (si {:#x}), pc {:#x} {:08x}",
+                         us, GetInteger(addr), reinterpret_cast<u64>(info->si_addr),
+                         instruction_ctx.pc, word);
+            }
+        }
+        if (page_wide == Memory::NCEAccessFaultAction::Retry) {
+            return true;
+        }
+        return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
+    }
+
+    // An access to unmapped guest memory. Dynarmic reads such memory as zeros and drops the
+    // write; skipping the instruction instead leaves a load's destination register untouched,
+    // and a game that walks a stale pointer (Kingdom Hearts 1.5+2.5 at the end of its opening
+    // video) then spins on the same garbage forever. Run the one instruction through the
+    // interpreter, whose memory accessor has dynarmic's unmapped semantics.
+    auto& host_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
+    if (host_ctx.pc != reinterpret_cast<u64>(info->si_addr)) {
+        auto* fpctx = GetFloatingPointState(host_ctx);
+        if (const auto next_pc = MatchAndExecuteOneInstruction(memory, &host_ctx, fpctx)) {
+            host_ctx.pc = *next_pc;
+            return true;
+        }
     }
 
     // We couldn't handle the access.
+    return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
+}
+
+bool ArmNce::HandleGuestIllegalInstruction(GuestContext* guest_ctx, void* raw_info,
+                                           void* raw_context) {
+    // knob2 (debug_knobs bit 2, value 4): skip undefined instructions in guest code instead of
+    // halting the thread, like Dynarmic, which logs them and carries on.
+    if (Settings::GetDebugKnobAt(2)) {
+        static_cast<ucontext_t*>(raw_context)->uc_mcontext.pc += 4;
+        return true;
+    }
+
+    // Halt the guest thread instead of taking down the whole process.
+    // The faulting pc equals si_addr, so this is handled as a prefetch abort.
     return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);
 }
 
@@ -206,6 +294,39 @@ void ArmNce::HandleHostAlignmentFault(int sig, void* raw_info, void* raw_context
 
 void ArmNce::HandleHostAccessFault(int sig, void* raw_info, void* raw_context) {
     ForwardHostFaultOrCrash(sig, g_orig_segv_action, raw_info, raw_context);
+}
+
+// Only SA_SIGINFO is looked at in the previous action's flags; SA_RESETHAND and SA_NODEFER are not
+// emulated. A library that installs its own SIGILL handler after NCE does replaces this one, and
+// guest SIGILLs then reach that handler instead.
+void ArmNce::HandleHostIllegalInstruction(int sig, void* raw_info, void* raw_context) {
+    auto* const info = static_cast<siginfo_t*>(raw_info);
+    if (g_orig_ill_action.sa_flags & SA_SIGINFO) {
+        return g_orig_ill_action.sa_sigaction(sig, info, raw_context);
+    }
+
+    // si_code <= 0 means the signal was sent (kill, tgkill, raise) rather than raised by a faulting
+    // instruction, so returning does not deliver it again.
+    const bool sent = info->si_code <= 0;
+    if (g_orig_ill_action.sa_handler == SIG_IGN) {
+        if (sent) {
+            // Drop it, but keep this handler installed for guest SIGILLs.
+            return;
+        }
+        // The kernel kills on a faulting instruction whose SIGILL is ignored.
+        Common::SigAction(sig, &g_orig_ill_action, nullptr);
+        return;
+    }
+    if (g_orig_ill_action.sa_handler == SIG_DFL) {
+        Common::SigAction(sig, &g_orig_ill_action, nullptr);
+        if (sent) {
+            // Pending until this handler returns, then the default action runs.
+            raise(sig);
+        }
+        // Otherwise the instruction faults again on return.
+        return;
+    }
+    g_orig_ill_action.sa_handler(sig);
 }
 
 void ArmNce::LockThread(Kernel::KThread* thread) {
@@ -235,7 +356,12 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
 
     // Move non-critical operations outside the locked section
     const u64 tpidr_el0_cache = m_guest_ctx.tpidr_el0;
-    const u64 tpidrro_el0_cache = m_guest_ctx.tpidrro_el0;
+    // The TLS pointer is fixed for a thread's life and read-only to guest code, so take it from
+    // the thread rather than this core's cache. The cache could still hold 0 when a new thread
+    // first ran: its first read of TLS (nn::os's ThreadType at TLS+0x1F8) hit address 0x1F8,
+    // and FINAL FANTASY RESONANCE panicked at boot or froze in battle on the Flip 2.
+    const u64 tpidrro_el0_cache = GetInteger(thread->GetTlsAddress());
+    m_guest_ctx.tpidrro_el0 = tpidrro_el0_cache;
 
     // Critical section begins - minimize operations here
     m_running_thread = thread;
@@ -257,7 +383,7 @@ HaltReason ArmNce::RunThread(Kernel::KThread* thread) {
         hr = ReturnToRunCodeByExceptionLevelChange(m_thread_id, thread_params);  // Android: Use "process handle SIGUSR2 -n true -p true -s false" (and SIGURG) in LLDB when debugging
     }
 
-    // Critical section for thread cleanup
+    // Critical section for thread cleanup.
     std::atomic_thread_fence(std::memory_order_acquire);
 
     // Cache values before releasing thread
@@ -328,6 +454,7 @@ void ArmNce::Initialize() {
         sigaddset(&signal_mask, BreakFromRunCodeSignal);
         sigaddset(&signal_mask, GuestAlignmentFaultSignal);
         sigaddset(&signal_mask, GuestAccessFaultSignal);
+        sigaddset(&signal_mask, GuestIllegalInstructionSignal);
 
         struct sigaction return_to_run_code_action {};
         return_to_run_code_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -360,6 +487,14 @@ void ArmNce::Initialize() {
             reinterpret_cast<HandlerType>(&ArmNce::GuestAccessFaultSignalHandler);
         access_fault_action.sa_mask = signal_mask;
         Common::SigAction(GuestAccessFaultSignal, &access_fault_action, &g_orig_segv_action);
+
+        struct sigaction illegal_instruction_action {};
+        illegal_instruction_action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        illegal_instruction_action.sa_sigaction =
+            reinterpret_cast<HandlerType>(&ArmNce::GuestIllegalInstructionSignalHandler);
+        illegal_instruction_action.sa_mask = signal_mask;
+        Common::SigAction(GuestIllegalInstructionSignal, &illegal_instruction_action,
+                          &g_orig_ill_action);
     });
 }
 
@@ -398,8 +533,10 @@ void ArmNce::SetContext(const Kernel::Svc::ThreadContext& ctx) {
 }
 
 void ArmNce::SignalInterrupt(Kernel::KThread* thread) {
-    // Add break loop condition.
-    m_guest_ctx.esr_el1.fetch_or(static_cast<u64>(HaltReason::BreakLoop));
+    // Duet Plus keeps upstream #4530 (return when BreakLoop is already pending), as shipped in
+    // 1.1.18; Eden Duo reverted it for Octopath Traveler 0 (its .upstream/DIVERGENCES.md #30).
+    constexpr u64 break_loop = static_cast<u64>(HaltReason::BreakLoop);
+    if ((m_guest_ctx.esr_el1.fetch_or(break_loop) & break_loop) != 0) return;
 
     auto* params = &thread->GetNativeExecutionParameters();
     LockThreadParameters(params);

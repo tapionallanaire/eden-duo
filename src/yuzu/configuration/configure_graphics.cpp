@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <functional>
 #include <vector>
 #include <QBoxLayout>
@@ -16,6 +17,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QSlider>
+#include <QStandardItemModel>
 #include <QStringLiteral>
 #include <QtCore/qobjectdefs.h>
 #include <qabstractbutton.h>
@@ -34,8 +36,11 @@
 #include "qt_common/util/vk.h"
 #include "ui_configure_graphics.h"
 #include "yuzu/configuration/configuration_shared.h"
+#include "yuzu/configuration/configure_frame_generation.h"
 #include "yuzu/configuration/configure_graphics.h"
+#include "yuzu/configuration/nvidia_dlss_panel.h"
 #include "yuzu/configuration/shared_widget.h"
+#include "yuzu/util/gamescope.h"
 
 #ifdef HAS_RESHADE
 #include "yuzu/configuration/configure_post_processing.h"
@@ -79,7 +84,10 @@ ConfigureGraphics::ConfigureGraphics(
         }
         index++;
     }
-    if (static_cast<unsigned long>(index) < vsync_mode_combobox_enum_map.size()) {
+    // (A mode greyed out for Game Mode is never selected)
+    const auto* vsync_model = qobject_cast<QStandardItemModel*>(vsync_mode_combobox->model());
+    if (static_cast<unsigned long>(index) < vsync_mode_combobox_enum_map.size() &&
+        (!vsync_model || vsync_model->item(index)->isEnabled())) {
         vsync_mode_combobox->setCurrentIndex(index);
     }
 
@@ -169,6 +177,35 @@ void ConfigureGraphics::PopulateVSyncModeSelection(bool use_setting) {
         index++;
     }
 
+    // In Steam's Game Mode, gamescope offers only some present modes: the others are listed
+    // greyed out, saying how to get them, rather than missing without a word
+    const bool gamescope = Gamescope::IsRunningUnder();
+    if (gamescope && backend == Settings::RendererBackend::Vulkan) {
+        auto* model = qobject_cast<QStandardItemModel*>(vsync_mode_combobox->model());
+        for (const auto missing : {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR,
+                                   VK_PRESENT_MODE_MAILBOX_KHR}) {
+            if (std::find(present_modes.begin(), present_modes.end(), missing) !=
+                present_modes.end()) {
+                continue;
+            }
+            const auto mode_name = TranslateVSyncMode(missing, backend);
+            if (mode_name.isEmpty() || !model) {
+                continue;
+            }
+            vsync_mode_combobox->insertItem(index,
+                                            tr("%1 - unavailable in Game Mode").arg(mode_name));
+            vsync_mode_combobox->setItemData(
+                index,
+                tr("Steam's Game Mode does not offer this mode by default. In Steam's Performance "
+                   "settings, turn off Disable Frame Limit and turn on Allow Tearing, then open "
+                   "these settings again."),
+                Qt::ToolTipRole);
+            model->item(index)->setEnabled(false);
+            vsync_mode_combobox_enum_map.push_back(missing);
+            index++;
+        }
+    }
+
     if (!Settings::IsConfiguringGlobal()) {
         vsync_restore_global_button->setVisible(!Settings::values.vsync_mode.UsingGlobal());
 
@@ -218,10 +255,24 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     std::map<u32, QWidget*> hold_graphics;
     std::vector<QWidget*> hold_api;
+    QCheckBox* dlss_checkbox = nullptr;
+    ConfigurationShared::Widget* dlss_quality_widget = nullptr;
+    ConfigurationShared::Widget* scaling_filter_widget = nullptr;
+    ConfigurationShared::Widget* anti_aliasing_widget = nullptr;
 
     for (const auto setting : Settings::values.linkage.by_category[Settings::Category::Renderer]) {
+        if (ConfigureFrameGeneration::IsFrameGenerationSetting(setting->Id())) {
+            continue;
+        }
 #ifndef HAS_RESHADE
         if (setting->Id() == Settings::values.post_shader_enabled.Id()) {
+            continue;
+        }
+#endif
+#ifndef EGLANTINE_STREAMLINE
+        // Only builds with NVIDIA Streamline (Windows) can use it.
+        if (setting->Id() == Settings::values.nvidia_dlss.Id() ||
+            setting->Id() == Settings::values.nvidia_dlss_quality.Id()) {
             continue;
         }
 #endif
@@ -322,6 +373,30 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
             hold_graphics.emplace(setting->Id(), widget);
 #endif
+#ifdef EGLANTINE_STREAMLINE
+        } else if (setting->Id() == Settings::values.nvidia_dlss.Id()) {
+            dlss_checkbox = widget->checkbox;
+            // NVIDIA's files and a download button under the checkbox.
+            QWidget* group = new QWidget(this);
+            QVBoxLayout* group_layout = new QVBoxLayout(group);
+            group_layout->setContentsMargins(0, 0, 0, 0);
+            group_layout->setSpacing(2);
+            group_layout->addWidget(widget);
+            NvidiaDlssPanel* panel = new NvidiaDlssPanel(group);
+            group_layout->addWidget(panel);
+            panel->setVisible(widget->checkbox->isChecked());
+            connect(widget->checkbox, &QCheckBox::toggled, panel, &QWidget::setVisible);
+            hold_graphics.emplace(setting->Id(), group);
+        } else if (setting->Id() == Settings::values.nvidia_dlss_quality.Id()) {
+            dlss_quality_widget = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+#endif
+        } else if (setting->Id() == Settings::values.scaling_filter.Id()) {
+            scaling_filter_widget = widget;
+            hold_graphics.emplace(setting->Id(), widget);
+        } else if (setting->Id() == Settings::values.anti_aliasing.Id()) {
+            anti_aliasing_widget = widget;
+            hold_graphics.emplace(setting->Id(), widget);
         } else {
             hold_graphics.emplace(setting->Id(), widget);
         }
@@ -329,6 +404,47 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
 
     for (const auto& [id, widget] : hold_graphics) {
         graphics_layout.addWidget(widget);
+    }
+
+    if (dlss_checkbox != nullptr) {
+        const auto apply_dlss_lock = [this, scaling_filter_widget, anti_aliasing_widget,
+                                      dlss_quality_widget](bool checked) {
+            if (dlss_quality_widget != nullptr && dlss_quality_widget->combobox != nullptr) {
+                dlss_quality_widget->combobox->setEnabled(checked);
+            }
+            if (scaling_filter_widget != nullptr && scaling_filter_widget->combobox != nullptr) {
+                if (checked) {
+                    const int bilinear_idx =
+                        FindIndex(Settings::EnumMetadata<Settings::ScalingFilter>::Index(),
+                                  static_cast<int>(Settings::ScalingFilter::Bilinear));
+                    if (bilinear_idx >= 0) {
+                        scaling_filter_widget->combobox->setCurrentIndex(bilinear_idx);
+                    }
+                    if (scaling_filter_widget->restore_button != nullptr) {
+                        scaling_filter_widget->restore_button->setEnabled(true);
+                        scaling_filter_widget->restore_button->setVisible(false);
+                    }
+                }
+                scaling_filter_widget->combobox->setEnabled(!checked);
+            }
+            if (anti_aliasing_widget != nullptr && anti_aliasing_widget->combobox != nullptr) {
+                if (checked) {
+                    const int none_idx =
+                        FindIndex(Settings::EnumMetadata<Settings::AntiAliasing>::Index(),
+                                  static_cast<int>(Settings::AntiAliasing::None));
+                    if (none_idx >= 0) {
+                        anti_aliasing_widget->combobox->setCurrentIndex(none_idx);
+                    }
+                    if (anti_aliasing_widget->restore_button != nullptr) {
+                        anti_aliasing_widget->restore_button->setEnabled(true);
+                        anti_aliasing_widget->restore_button->setVisible(false);
+                    }
+                }
+                anti_aliasing_widget->combobox->setEnabled(!checked);
+            }
+        };
+        apply_dlss_lock(dlss_checkbox->isChecked());
+        connect(dlss_checkbox, &QCheckBox::toggled, this, apply_dlss_lock);
     }
 
     for (auto widget : hold_api) {

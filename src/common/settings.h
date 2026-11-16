@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -202,6 +204,66 @@ struct Values {
 
     // Core
     SwitchableSetting<bool> use_multi_core{linkage, true, "use_multi_core", Category::Core};
+
+    /// Show the controller debug overlay (the real pad state plus the logic's actions)
+    SwitchableSetting<bool> console_debug_overlay{linkage, true, "console_debug_overlay",
+                                                  Category::LibraryApplet,
+                                                  Specialization::Default, true, true};
+    /// Modern Console: each player's starting input profile, comma-separated in player order
+    Setting<std::string> modern_seat_profiles{linkage, std::string{}, "modern_seat_profiles",
+                                              Category::LibraryApplet};
+    /// Name a controller on screen for a moment when it takes a player or leaves one
+    SwitchableSetting<bool> console_hints{linkage, true, "console_hints", Category::LibraryApplet,
+                                          Specialization::Default, true, true};
+    /// The overlay's button history: shown, how many inputs it keeps, how long each lasts (in
+    /// seconds), and the time between inputs
+    SwitchableSetting<bool> console_history{linkage, true, "console_history",
+                                            Category::LibraryApplet};
+    SwitchableSetting<int, true> console_history_size{
+        linkage, 10, 5, 20, "console_history_size", Category::LibraryApplet};
+    SwitchableSetting<int, true> console_history_seconds{
+        linkage, 5, 1, 30, "console_history_seconds", Category::LibraryApplet};
+    SwitchableSetting<bool> console_history_gaps{linkage, false, "console_history_gaps",
+                                                 Category::LibraryApplet};
+    /// Under Steam: Eden reads the real controllers instead of Steam's virtual ones. At startup.
+    SwitchableSetting<bool> console_bypass_steam{linkage, false, "console_bypass_steam",
+                                                 Category::LibraryApplet};
+    /// Modern Console: when a game only takes Joy-Cons, controllers act as Joy-Cons
+    SwitchableSetting<bool> console_joycon_auto{linkage, true, "console_joycon_auto",
+                                                Category::LibraryApplet};
+    /// Modern Console: pause when a player's controller is turned off or gone for 3 seconds,
+    /// resume when a controller takes the player again
+    SwitchableSetting<bool> console_pause_disconnect{linkage, true, "console_pause_disconnect",
+                                                     Category::LibraryApplet};
+    /// Modern Console: controllers' player lights and light bars show their player
+    SwitchableSetting<bool> console_player_lights{linkage, true, "console_player_lights",
+                                                  Category::LibraryApplet};
+    /// Modern Console: Xbox and PlayStation style buttons by label instead of position
+    SwitchableSetting<bool> console_button_labels{linkage, false, "console_button_labels",
+                                                  Category::LibraryApplet};
+    /// Detailed controller traces in the log, for bug reports
+    SwitchableSetting<bool> console_debug_probes{linkage, false, "console_debug_probes",
+                                                 Category::LibraryApplet};
+
+    /// The user picked the handheld's own pad (picker or Identify): auto-detect keeps it
+    SwitchableSetting<bool> builtin_pad_manual{linkage, false, "builtin_pad_manual",
+                                               Category::Core};
+
+    /// The handheld's own pad identity, latched when Handheld Console Mode engages
+    SwitchableSetting<std::string> builtin_pad_identity{linkage, std::string{},
+                                                        "builtin_pad_identity", Category::Core};
+
+    /// A controller the user removed as the handheld's own (Steam handle, else identity):
+    /// auto-detect skips it until it is allowed again
+    SwitchableSetting<std::string> builtin_pad_blocked{linkage, std::string{},
+                                                       "builtin_pad_blocked", Category::Core};
+    /// Under Steam, the handheld's own pad's Steam handle: stable across sessions, unlike the
+    /// virtual pads' shared GUID
+    SwitchableSetting<std::string> builtin_pad_steam_handle{
+        linkage, std::string{}, "builtin_pad_steam_handle", Category::Core};
+    /// The user picked the Steam handle (picker or Identify): kept whatever the pad reports
+    SwitchableSetting<bool> builtin_pad_steam_manual{linkage, false, "builtin_pad_steam_manual",
+                                                     Category::Core};
     SwitchableSetting<MemoryLayout, true> memory_layout_mode{linkage,
                                                              MemoryLayout::Memory_4Gb,
                                                              "memory_layout_mode",
@@ -247,6 +309,7 @@ struct Values {
 
     SwitchableSetting<bool> sync_core_speed{linkage, false, "sync_core_speed", Category::Core,
                                             Specialization::Default};
+    SwitchableSetting<bool> enable_cheats_by_default{linkage, true, "enable_cheats_by_default", Category::Core};
 
     // Cpu
     SwitchableSetting<CpuBackend, true> cpu_backend{linkage,
@@ -291,6 +354,14 @@ struct Values {
                                            true,
                                            true,
                                            &use_custom_cpu_ticks};
+
+    SwitchableSetting<bool> prefer_3d_vcache{linkage,
+                                             true,
+                                             "prefer_3d_vcache",
+                                             Category::Cpu,
+                                             Specialization::Default,
+                                             true,
+                                             true};
 
     Setting<bool> cpuopt_page_tables{linkage, true, "cpuopt_page_tables", Category::CpuDebug};
     Setting<bool> cpuopt_block_linking{linkage, true, "cpuopt_block_linking", Category::CpuDebug};
@@ -377,6 +448,24 @@ struct Values {
                                                            Specialization::Percentage,
                                                        true,
                                                        true};
+    // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
+    SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    SwitchableSetting<DlssQuality> nvidia_dlss_quality{linkage,
+                                                       DlssQuality::Quality,
+                                                       "nvidia_dlss_quality",
+                                                       Category::Renderer,
+                                                       Specialization::Default,
+                                                       true,
+                                                       true};
+    // What draws a game's DLSS evaluation when NVIDIA DLSS doesn't: Auto is FSR 3.1 on PC and the
+    // temporal stand-in on Android; SGSR 2 is Qualcomm's temporal upscaler for Adreno.
+    SwitchableSetting<DlssReplacement> dlss_replacement{linkage,
+                                                        DlssReplacement::Auto,
+                                                        "dlss_replacement",
+                                                        Category::Renderer,
+                                                        Specialization::Default,
+                                                        true,
+                                                        true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -419,6 +508,15 @@ struct Values {
 
     SwitchableSetting<bool> frame_gen{linkage, false, "frame_gen", Category::Renderer,
                                       Specialization::Default, true, false};
+
+    SwitchableSetting<FrameGenType> frame_gen_type{linkage,
+                                                   FrameGenType::Fsr3,
+                                                   "frame_gen_type",
+                                                   Category::Renderer,
+                                                   Specialization::Default,
+                                                   true,
+                                                   false,
+                                                   &frame_gen};
 
     SwitchableSetting<u32, true> frame_gen_multiplier{linkage,
                                                       2,
@@ -563,8 +661,10 @@ struct Values {
                                                                true,
                                                                true};
 
+    // BC3 by default: GPUs without ASTC otherwise keep ASTC textures as RGBA8, four times the
+    // VRAM (Mario Kart World: 7.3-7.8 GB of an 8 GB card, the rest paged into system RAM).
     SwitchableSetting<AstcRecompression, true> astc_recompression{linkage,
-                                                                  AstcRecompression::Uncompressed,
+                                                                  AstcRecompression::Bc3,
                                                                   "astc_recompression",
                                                                   Category::RendererAdvanced};
 
@@ -587,11 +687,56 @@ struct Values {
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
 
+    // Off: task/mesh draws take the compute fallback even when the device has VK_EXT_mesh_shader.
+    SwitchableSetting<bool> use_mesh_shaders{linkage, true, "use_mesh_shaders",
+                                             Category::RendererAdvanced};
+
+    // Linux: the GPU driver's shader cache in a folder of our own (ConfigureDriverShaderCache),
+    // with its size limit in GiB. Applied at startup, before anything loads a driver.
+    Setting<bool> private_driver_shader_cache{linkage, true, "private_driver_shader_cache",
+                                              Category::RendererAdvanced, Specialization::Paired};
+    Setting<u32, true> driver_shader_cache_size{linkage,
+                                                10,
+                                                1,
+                                                1024,
+                                                "driver_shader_cache_size",
+                                                Category::RendererAdvanced,
+                                                Specialization::Countable,
+                                                true,
+                                                false,
+                                                &private_driver_shader_cache};
+
+    // Guest memory of uploaded textures and buffers, which the host GPU holds a copy of
+    // (HostMemory::HintCold): Always pages it out at each pass, which lowers RAM use but stalls the
+    // GPU threads (Mario Kart World: 60-700 ms every 600 frames); WhenRamIsLow only marks it to be
+    // reclaimed first, and pages it out while the system is short of memory.
+    // Duet Plus, Android: on by default. Only Switch 2 titles send hints there (buffer and
+    // texture caches), and without them a phone kills the app for memory (Ocarina of Time).
+    Setting<ColdHintMode> cold_hint_mode{linkage,
+#ifdef __ANDROID__
+                                         ColdHintMode::WhenRamIsLow,
+#else
+                                         ColdHintMode::Off,
+#endif
+                                         "cold_hint_mode",
+                                         Category::RendererMemory,
+                                         Specialization::Default,
+                                         true,
+                                         true};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_video_framerate{linkage, false, "use_video_framerate",
                                                 Category::RendererAdvanced};
+
+    // Mario Kart World: select a fixed or dynamic in-game frame-rate mode (loader/nso.cpp).
+    SwitchableSetting<bool> mkw_30fps{linkage, false, "mkw_30fps", Category::RendererAdvanced};
+    SwitchableSetting<bool> mkw_dynamic_fps{linkage, false, "mkw_dynamic_fps",
+                                            Category::RendererAdvanced};
+    SwitchableSetting<bool> hyrule_dynamic_fps{linkage, false, "hyrule_dynamic_fps",
+                                               Category::RendererAdvanced};
+    SwitchableSetting<bool> hyrule_30fps{linkage, false, "hyrule_30fps", Category::RendererAdvanced};
 
     SwitchableSetting<bool> use_reactive_flushing{linkage,
 #ifdef __ANDROID__
@@ -639,8 +784,6 @@ struct Values {
                                                         Specialization::Default,
                                                         true,
                                                         true};
-    SwitchableSetting<bool> nce_runtime_nro_patch{
-        linkage, false, "nce_runtime_nro_patch", Category::RendererHacks};
     SwitchableSetting<bool> async_presentation{linkage,
 #ifdef __ANDROID__
                                                true,
@@ -745,8 +888,8 @@ struct Values {
                                       false,   true, &custom_rtc_enabled};
     SwitchableSetting<s64, true> custom_rtc_offset{linkage,
                                                    0,
-                                                   (std::numeric_limits<s64>::min)(),
-                                                   (std::numeric_limits<s64>::max)(),
+                                                   (std::numeric_limits<int>::min)(),
+                                                   (std::numeric_limits<int>::max)(),
                                                    "custom_rtc_offset",
                                                    Category::System,
                                                    Specialization::Countable,
@@ -763,11 +906,7 @@ struct Values {
     Setting<s32> current_user{linkage, 0, "current_user", Category::System};
 
     SwitchableSetting<ConsoleMode> use_docked_mode{linkage,
-#ifdef __ANDROID__
                                                    ConsoleMode::Handheld,
-#else
-                                                   ConsoleMode::Docked,
-#endif
                                                    "use_docked_mode",
                                                    Category::System,
                                                    Specialization::Radio,
@@ -871,6 +1010,11 @@ struct Values {
     bool record_frame_times;
     Setting<bool> use_gdbstub{linkage, false, "use_gdbstub", Category::Debugging};
     Setting<u16> gdbstub_port{linkage, 6543, "gdbstub_port", Category::Debugging};
+    // Built-in MCP server (see tools/mcp/README.md). Loopback only, off by default.
+    Setting<bool> enable_mcp_server{linkage, false, "enable_mcp_server", Category::Debugging};
+    Setting<u16> mcp_port{linkage, 6544, "mcp_port", Category::Debugging};
+    Setting<bool> mcp_allow_writes{linkage, false, "mcp_allow_writes", Category::Debugging};
+    Setting<std::string> mcp_token{linkage, std::string{}, "mcp_token", Category::Debugging};
     SwitchableSetting<std::string> program_args{linkage,
                                                 std::string(),
                                                 "program_args",
@@ -955,10 +1099,39 @@ struct Values {
     // Turn fix_fp16_denormals on for the running title unless the player set it for that game
     // (set at load, never saved).
     bool fix_fp16_denormals_by_title{};
+    // Run the running title's GPU macros through the microcode interpreter instead of their HLE
+    // versions (set at load, never saved).
+    bool disable_macro_hle_by_title{};
+    // Don't copy GPU-written buffers back to guest memory for the running title: it never
+    // reads them on the CPU (set at load, never saved).
+    bool skip_buffer_downloads_by_title{};
+    // Give the running title's multisampled render targets one sample per pixel. A title that
+    // reads the samples back through a single-sample texture of the same memory then samples
+    // the render target itself instead of a copy of it (set at load, never saved).
+    bool msaa_single_sample_by_title{};
+    // Most slots a texture handle table indexed at run time gets for the running title (0: the
+    // default, 1024). Every slot is written for every draw (set at load, never saved).
+    u32 bindless_table_max_by_title{};
+    // Texture cache budget for the running title, in MiB (0: from the device's memory): past
+    // expected the garbage collector evicts, past critical it evicts hard. Hogwarts Legacy on an
+    // 11.5 GB Android device: its 4 GB guest RAM plus a 3.2 GB texture budget ends in a
+    // low-memory kill. Set at load, never saved.
+    u32 texture_cache_expected_mib_by_title{};
+    u32 texture_cache_critical_mib_by_title{};
+    // Device-local GPU memory reserved for the running title at start, in MiB (0: none): images
+    // and device-local buffers come from this pool and its blocks are never returned, so the
+    // driver's large allocations (and the kernel's memory compaction for them) happen once,
+    // while the process is small, not while the title streams. Set at load, never saved.
+    u32 gpu_memory_pinned_mib_by_title{};
 
 };
 
 extern Values values;
+
+// Guest vblank length relative to 1/60 s, set by the presenter so a game's frame period is a whole
+// number of the host panel's real refreshes (the AYN Thor's "120 Hz" panel runs at 117.9 Hz).
+// 1 when the host refresh is unknown or too far from a 60 Hz multiple. Never saved.
+inline std::atomic<float> host_vsync_scale{1.f};
 
 constexpr u32 MIN_FRAME_GEN_MULTIPLIER = 2;
 constexpr u32 MAX_FRAME_GEN_MULTIPLIER = 4;
@@ -988,6 +1161,15 @@ bool IsNceEnabled();
 
 void SetCurrentProgramID(u64 program_id);
 u64 GetCurrentProgramID();
+
+// Whether the program being loaded is a Switch 2 one (set by the core before the GPU starts).
+void SetCurrentProgramIsSwitch2(bool is_switch2);
+bool CurrentProgramIsSwitch2();
+
+// The ASTC recompression in effect: astc_recompression, unless the renderer picked another one
+// for the running program (the configuration is left as is). The core clears it on load.
+AstcRecompression GetAstcRecompression();
+void SetAstcRecompressionOverride(std::optional<AstcRecompression> recompression);
 
 bool IsOpenGL();
 

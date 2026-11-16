@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdlib>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -24,6 +27,14 @@ class InputSubsystem;
 enum class MouseButton;
 } // namespace InputCommon
 
+// EDEN_NX2_HIDE_WINDOW=1 (anything but 0) creates the render window hidden and without focus, for unattended
+// test runs that must not cover or interrupt the desktop.
+inline SDL_WindowFlags Nx2HiddenWindowFlags() {
+    const char* hide = std::getenv("EDEN_NX2_HIDE_WINDOW");
+    return hide != nullptr && hide[0] != '0' ? SDL_WINDOW_HIDDEN | SDL_WINDOW_NOT_FOCUSABLE
+                                                         : SDL_WindowFlags{0};
+}
+
 class EmuWindow_SDL3 : public Core::Frontend::EmuWindow {
 public:
     explicit EmuWindow_SDL3(InputCommon::InputSubsystem* input_subsystem_, Core::System& system_);
@@ -32,8 +43,14 @@ public:
     /// Whether the window is still open, and a close request hasn't yet been sent
     bool IsOpen() const;
 
+    /// Sets the title the titlebar timer prepared; call from the main thread.
+    void ApplyPendingTitle();
+
     /// Returns if window is shown (not minimized)
     bool IsShown() const override;
+
+    /// Advances TAS playback/recording once per presented frame, as the Qt render window does.
+    void OnFrameDisplayed() override;
 
     /// Wait for the next event on the main thread.
     void OnEvent(SDL_Event& event);
@@ -83,6 +100,7 @@ protected:
 
     /// Periodic changer of titlebar (independent of event loop)
     SDL_TimerID titlebar_timer;
+    std::atomic<std::string*> pending_title{};
 
     // Mouse resetter once it
     SDL_TimerID mouse_timer;

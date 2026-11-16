@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <array>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include <ranges>
 #include "shader_recompiler/frontend/ir/type.h"
@@ -21,6 +21,12 @@ enum class Opcode {
 #include "opcodes.inc"
 #undef OPCODE
 };
+
+inline constexpr size_t NUM_OPCODES = 0
+#define OPCODE(...) +1
+#include "opcodes.inc"
+#undef OPCODE
+    ;
 
 namespace Detail {
 struct OpcodeMeta {
@@ -57,12 +63,12 @@ static constexpr Type F64x2{Type::F64x2};
 static constexpr Type F64x3{Type::F64x3};
 static constexpr Type F64x4{Type::F64x4};
 
-extern OpcodeMeta META_TABLE[536];
+extern OpcodeMeta META_TABLE[NUM_OPCODES];
 constexpr size_t CalculateNumArgsOf(Opcode op) noexcept {
     const auto& arg_types = META_TABLE[size_t(op)].arg_types;
     return size_t(std::distance(arg_types.begin(), std::ranges::find(arg_types, Type::Void)));
 }
-extern u8 NUM_ARGS[536];
+extern u8 NUM_ARGS[NUM_OPCODES];
 } // namespace Detail
 
 /// Get return type of an opcode
@@ -86,12 +92,12 @@ extern u8 NUM_ARGS[536];
 } // namespace Shader::IR
 
 template <>
-struct fmt::formatter<Shader::IR::Opcode> {
+struct std::formatter<Shader::IR::Opcode> {
     constexpr auto parse(format_parse_context& ctx) {
         return ctx.begin();
     }
     template <typename FormatContext>
     auto format(const Shader::IR::Opcode& op, FormatContext& ctx) const {
-        return fmt::format_to(ctx.out(), "{}", Shader::IR::NameOf(op));
+        return std::format_to(ctx.out(), "{}", Shader::IR::NameOf(op));
     }
 };

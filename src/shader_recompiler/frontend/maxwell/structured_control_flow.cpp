@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include <fmt/ranges.h>
+#include <format>
 
 #include <boost/intrusive/list.hpp>
 
@@ -154,15 +154,15 @@ struct Statement : ListBaseHook {
 std::string DumpExpr(const Statement* stmt) {
     switch (stmt->type) {
     case StatementType::Identity:
-        return fmt::format("{}", stmt->guest_cond);
+        return std::format("{}", stmt->guest_cond);
     case StatementType::Not:
-        return fmt::format("!{}", DumpExpr(stmt->op));
+        return std::format("!{}", DumpExpr(stmt->op));
     case StatementType::Or:
-        return fmt::format("{} || {}", DumpExpr(stmt->op_a), DumpExpr(stmt->op_b));
+        return std::format("{} || {}", DumpExpr(stmt->op_a), DumpExpr(stmt->op_b));
     case StatementType::Variable:
-        return fmt::format("goto_L{}", stmt->id);
+        return std::format("goto_L{}", stmt->id);
     case StatementType::IndirectBranchCond:
-        return fmt::format("(indirect_branch == {:x})", stmt->location);
+        return std::format("(indirect_branch == {:x})", stmt->location);
     default:
         return "<invalid type>";
     }
@@ -174,44 +174,44 @@ std::string DumpExpr(const Statement* stmt) {
     for (auto stmt = tree.begin(); stmt != tree.end(); ++stmt) {
         switch (stmt->type) {
         case StatementType::Code:
-            ret += fmt::format("{}    Block {:04x} -> {:04x} ({:#016x});\n", indent,
+            ret += std::format("{}    Block {:04x} -> {:04x} ({:#016x});\n", indent,
                                stmt->block->begin.Offset(), stmt->block->end.Offset(),
                                reinterpret_cast<uintptr_t>(stmt->block));
             break;
         case StatementType::Goto:
-            ret += fmt::format("{}    if ({}) goto L{};\n", indent, DumpExpr(stmt->cond),
+            ret += std::format("{}    if ({}) goto L{};\n", indent, DumpExpr(stmt->cond),
                                stmt->label->id);
             break;
         case StatementType::Label:
-            ret += fmt::format("{}L{}:\n", indent, stmt->id);
+            ret += std::format("{}L{}:\n", indent, stmt->id);
             break;
         case StatementType::If:
-            ret += fmt::format("{}    if ({}) {{\n", indent, DumpExpr(stmt->cond));
+            ret += std::format("{}    if ({}) {{\n", indent, DumpExpr(stmt->cond));
             ret += DumpTree(stmt->children, indentation + 4);
-            ret += fmt::format("{}    }}\n", indent);
+            ret += std::format("{}    }}\n", indent);
             break;
         case StatementType::Loop:
-            ret += fmt::format("{}    do {{\n", indent);
+            ret += std::format("{}    do {{\n", indent);
             ret += DumpTree(stmt->children, indentation + 4);
-            ret += fmt::format("{}    }} while ({});\n", indent, DumpExpr(stmt->cond));
+            ret += std::format("{}    }} while ({});\n", indent, DumpExpr(stmt->cond));
             break;
         case StatementType::Break:
-            ret += fmt::format("{}    if ({}) break;\n", indent, DumpExpr(stmt->cond));
+            ret += std::format("{}    if ({}) break;\n", indent, DumpExpr(stmt->cond));
             break;
         case StatementType::Return:
-            ret += fmt::format("{}    return;\n", indent);
+            ret += std::format("{}    return;\n", indent);
             break;
         case StatementType::Kill:
-            ret += fmt::format("{}    kill;\n", indent);
+            ret += std::format("{}    kill;\n", indent);
             break;
         case StatementType::Unreachable:
-            ret += fmt::format("{}    unreachable;\n", indent);
+            ret += std::format("{}    unreachable;\n", indent);
             break;
         case StatementType::SetVariable:
-            ret += fmt::format("{}    goto_L{} = {};\n", indent, stmt->id, DumpExpr(stmt->op));
+            ret += std::format("{}    goto_L{} = {};\n", indent, stmt->id, DumpExpr(stmt->op));
             break;
         case StatementType::SetIndirectBranchVariable:
-            ret += fmt::format("{}    indirect_branch = {} + {};\n", indent, stmt->branch_reg,
+            ret += std::format("{}    indirect_branch = {} + {};\n", indent, stmt->branch_reg,
                                stmt->branch_offset);
             break;
         case StatementType::Function:
@@ -298,13 +298,26 @@ Node SiblingFromNephew(Node uncle, Node nephew) noexcept {
 }
 
 bool AreOrdered(Node left_sibling, Node right_sibling) noexcept {
+    if (left_sibling == right_sibling) {
+        return false;
+    }
+    // Walk forward from both siblings at once: whichever meets the other or the end first
+    // decides, so the cost is the shorter walk instead of everything after right_sibling.
     const Node end{right_sibling->up->children.end()};
-    for (auto it = right_sibling; it != end; ++it) {
-        if (it == left_sibling) {
+    for (Node left = left_sibling, right = right_sibling;;) {
+        if (++right == left_sibling) {
+            return false;
+        }
+        if (right == end) {
+            return true;
+        }
+        if (++left == right_sibling) {
+            return true;
+        }
+        if (left == end) {
             return false;
         }
     }
-    return true;
 }
 
 bool NeedsLift(Node goto_stmt, Node label_stmt) noexcept {
@@ -314,7 +327,8 @@ bool NeedsLift(Node goto_stmt, Node label_stmt) noexcept {
 
 class GotoPass {
 public:
-    explicit GotoPass(Flow::CFG& cfg, ObjectPool<Statement>& stmt_pool) : pool{stmt_pool} {
+    explicit GotoPass(Flow::CFG& cfg, ObjectPool<Statement>& stmt_pool, bool converge_exits_)
+        : pool{stmt_pool}, converge_exits{converge_exits_} {
         std::vector gotos{BuildTree(cfg)};
         const auto end{gotos.rend()};
         for (auto goto_stmt = gotos.rbegin(); goto_stmt != end; ++goto_stmt) {
@@ -381,7 +395,17 @@ private:
         u32 label_id{0};
         std::vector<Node> gotos;
         Flow::Function& first_function{cfg.Functions().front()};
-        BuildTree(cfg, first_function, label_id, gotos, root_stmt.children.end(), std::nullopt);
+        Node insert_point{root_stmt.children.end()};
+        if (converge_exits) {
+            // Every EXIT jumps to one return at the end, so all invocations reach the same
+            // epilogue (task and mesh programs emit their outputs there, after a barrier).
+            Tree& root{root_stmt.children};
+            exit_label = root.insert(root.end(), *pool.Create(Label{}, label_id, &root_stmt));
+            ++label_id;
+            root.insert(root.end(), *pool.Create(Return{}, &root_stmt));
+            insert_point = *exit_label;
+        }
+        BuildTree(cfg, first_function, label_id, gotos, insert_point, std::nullopt);
         return gotos;
     }
 
@@ -454,7 +478,14 @@ private:
                 break;
             }
             case Flow::EndClass::Exit:
-                root.insert(ip, *pool.Create(Return{}, &root_stmt));
+                if (exit_label) {
+                    Statement* const always_cond{
+                        pool.Create(Identity{}, IR::Condition{true}, &root_stmt)};
+                    gotos.push_back(root.insert(
+                        ip, *pool.Create(Goto{}, always_cond, *exit_label, &root_stmt)));
+                } else {
+                    root.insert(ip, *pool.Create(Return{}, &root_stmt));
+                }
                 break;
             case Flow::EndClass::Return: {
                 Statement* const always_cond{pool.Create(Identity{}, block.cond, &root_stmt)};
@@ -618,6 +649,8 @@ private:
 
     ObjectPool<Statement>& pool;
     Statement root_stmt{FunctionTag{}};
+    bool converge_exits{};
+    std::optional<Node> exit_label;
 };
 
 [[nodiscard]] Statement* TryFindForwardBlock(Statement& stmt) {
@@ -884,16 +917,18 @@ private:
             if (node.type != Type::Block) {
                 continue;
             }
-            if (branch_depth > 1) {
-                // Skip reordering nested demote branches.
-                continue;
-            }
             for (const IR::Inst& inst : node.data.block->Instructions()) {
                 const IR::Opcode op{inst.GetOpcode()};
                 if (op == IR::Opcode::DemoteToHelperInvocation) {
-                    demote_blocks.push_back(node.data.block);
+                    // Skip reordering nested demote branches.
+                    if (branch_depth <= 1) {
+                        demote_blocks.push_back(node.data.block);
+                    }
                     break;
                 }
+                // Returns count at any depth: a nested early return (an EXIT under two
+                // conditions, as native fragment programs end their discarded invocations) would
+                // otherwise leave before the demote moved to the end, and write its colours.
                 if (op == IR::Opcode::Epilogue) {
                     ++num_epilogues;
                 }
@@ -987,7 +1022,8 @@ IR::AbstractSyntaxList BuildASL(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::
                                 Environment& env, Flow::CFG& cfg,
                                 const HostTranslateInfo& host_info) {
     ObjectPool<Statement> stmt_pool{64};
-    GotoPass goto_pass{cfg, stmt_pool};
+    const Stage stage{env.ShaderStage()};
+    GotoPass goto_pass{cfg, stmt_pool, stage == Stage::Task || stage == Stage::Mesh};
     Statement& root{goto_pass.RootStatement()};
     IR::AbstractSyntaxList syntax_list;
     TranslatePass{inst_pool, block_pool, stmt_pool, env, root, syntax_list, host_info};

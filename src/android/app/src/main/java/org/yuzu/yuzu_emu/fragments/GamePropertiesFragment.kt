@@ -33,9 +33,12 @@ import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.GamePropertiesAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentGamePropertiesBinding
+import org.yuzu.yuzu_emu.duo.SaveZipImport
 import org.yuzu.yuzu_emu.features.DocumentProvider
 import org.yuzu.yuzu_emu.features.settings.model.Settings
+import org.yuzu.yuzu_emu.features.settings.model.StringSetting
 import org.yuzu.yuzu_emu.features.settings.ui.SettingsSubscreen
+import org.yuzu.yuzu_emu.features.settings.utils.SettingsFile
 import org.yuzu.yuzu_emu.model.AddonViewModel
 import org.yuzu.yuzu_emu.model.DriverViewModel
 import org.yuzu.yuzu_emu.model.GameProperty
@@ -50,7 +53,10 @@ import org.yuzu.yuzu_emu.utils.FileUtil
 import org.yuzu.yuzu_emu.utils.GameHelper
 import org.yuzu.yuzu_emu.utils.GameIconUtils
 import org.yuzu.yuzu_emu.utils.GpuDriverHelper
+import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.MemoryUtil
+import org.yuzu.yuzu_emu.utils.NativeConfig
+import org.yuzu.yuzu_emu.utils.OptimalDriver
 import org.yuzu.yuzu_emu.utils.ViewUtils.marquee
 import org.yuzu.yuzu_emu.utils.ViewUtils.updateMargins
 import org.yuzu.yuzu_emu.utils.collect
@@ -260,6 +266,44 @@ class GamePropertiesFragment : Fragment() {
         dialog.show()
     }
 
+    /** Writes the game's tuned settings into its own config, replacing what was set for them. */
+    private fun applyOptimalSettings() {
+        val game = args.game
+        viewLifecycleOwner.lifecycleScope.launch {
+            // A tuned GPU driver this device lacks is fetched first.
+            val wanted = OptimalDriver.forTitle(game.programIdHex)
+            val driver = wanted?.let {
+                withContext(Dispatchers.IO) { OptimalDriver.ensure(it, YuzuApplication.appContext) }
+            }
+            val message = if (NativeLibrary.isRunning()) {
+                // Loading another per-game config here would replace the running game's settings.
+                R.string.apply_optimal_settings_running
+            } else {
+                SettingsFile.loadCustomConfig(game)
+                try {
+                    if (NativeConfig.applyOptimalSettings(game.programId)) {
+                        if (driver != null && driver != StringSetting.DRIVER_PATH.getString(false)) {
+                            StringSetting.DRIVER_PATH.setString(driver)
+                            OptimalDriver.wipeShaders(game.settingsName)
+                        }
+                        NativeConfig.savePerGameConfig()
+                        if (wanted != null && driver == null) {
+                            R.string.apply_optimal_settings_no_driver
+                        } else {
+                            R.string.apply_optimal_settings_done
+                        }
+                    } else {
+                        R.string.apply_optimal_settings_failed
+                    }
+                } finally {
+                    NativeConfig.unloadPerGameConfig()
+                }
+            }
+            Toast.makeText(YuzuApplication.appContext, message, Toast.LENGTH_LONG).show()
+            homeViewModel.reloadPropertiesList(true)
+        }
+    }
+
     private fun reloadList() {
         _binding ?: return
 
@@ -332,6 +376,24 @@ class GamePropertiesFragment : Fragment() {
                     }
                 )
             )
+
+            if (NativeConfig.hasOptimalSettings(args.game.programId)) {
+                add(
+                    SubmenuProperty(
+                        R.string.apply_optimal_settings,
+                        R.string.apply_optimal_settings_description,
+                        R.drawable.ic_check_circle,
+                        action = {
+                            MessageDialogFragment.newInstance(
+                                requireActivity(),
+                                titleId = R.string.apply_optimal_settings,
+                                descriptionId = R.string.apply_optimal_settings_warning,
+                                positiveAction = { applyOptimalSettings() }
+                            ).show(parentFragmentManager, MessageDialogFragment.TAG)
+                        }
+                    )
+                )
+            }
 
             if (!args.game.isHomebrew) {
                 add(
@@ -426,7 +488,13 @@ class GamePropertiesFragment : Fragment() {
                             MessageDialogFragment.newInstance(
                                 requireActivity(),
                                 titleId = R.string.import_save_warning,
-                                descriptionId = R.string.import_save_warning_description,
+                                // Eden Duo: name the profile the saves go to (saves are per profile).
+                                descriptionString = getString(R.string.import_save_warning_description) +
+                                    "\n\n" + getString(
+                                        R.string.duo_save_import_profile,
+                                        NativeLibrary.getCurrentUser()?.let { NativeLibrary.getUserUsername(it) }
+                                            ?.takeIf { it.isNotBlank() } ?: "—"
+                                    ),
                                 positiveAction = { homeViewModel.setOpenImportSaves(true) }
                             ).show(parentFragmentManager, MessageDialogFragment.TAG)
                         },
@@ -505,6 +573,58 @@ class GamePropertiesFragment : Fragment() {
                         )
                     )
                 }
+                // Eden Duo: shader warm-up. A cache only grows while the game runs, so this is a
+                // time-boxed run of the title with its saves put back afterwards.
+                add(
+                    SubmenuProperty(
+                        R.string.warm_up_shaders,
+                        R.string.warm_up_shaders_description,
+                        R.drawable.ic_play,
+                        details = {
+                            val game = args.game
+                            val count = org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(game)
+                            requireContext().getString(R.string.warm_up_shader_count, count)
+                        },
+                        action = { showWarmUpPicker() }
+                    )
+                )
+
+                // Eden Duo: record shaders and compile them (see ShaderRuns). Recording keeps the
+                // pipelines a play session meets for the first time; compiling warms what is
+                // already known, and Compile max also builds shader combinations no draw has made.
+                val recorded = org.yuzu.yuzu_emu.utils.ShaderRuns.recordingCount(args.game)
+                add(
+                    SubmenuProperty(
+                        R.string.shader_record,
+                        R.string.shader_record_description,
+                        R.drawable.ic_play,
+                        details = {
+                            if (recorded > 0) {
+                                requireContext().getString(R.string.shader_record_last, recorded)
+                            } else {
+                                requireContext().getString(R.string.shader_record_none)
+                            }
+                        },
+                        action = { startShaderRun(record = true) }
+                    )
+                )
+                add(
+                    SubmenuProperty(
+                        R.string.shader_compile,
+                        R.string.shader_compile_description,
+                        R.drawable.ic_build,
+                        action = { startShaderRun(compile = true) }
+                    )
+                )
+                add(
+                    SubmenuProperty(
+                        R.string.shader_compile_max,
+                        R.string.shader_compile_max_description,
+                        R.drawable.ic_build,
+                        action = { startShaderRun(compile = true, max = true) }
+                    )
+                )
+
                 if (NativeLibrary.playTimeManagerGetPlayTime(args.game.programId) > 0) {
                     add(
                         SubmenuProperty(
@@ -600,60 +720,77 @@ class GamePropertiesFragment : Fragment() {
                 return@registerForActivityResult
             }
 
-            val savesFolder = File(args.game.saveDir)
-            val cacheSaveDir = File("${requireContext().cacheDir.path}/saves/")
-            cacheSaveDir.mkdir()
+            // Eden Duo: the game's folder is found anywhere in the zip and only its entries are
+            // unpacked (SaveZipImport); the old saves are replaced only after that worked, and
+            // every outcome is the task result, shown on the main thread.
+            val activity = requireActivity()
+            val game = args.game
+            val savesFolder = File(game.saveDir)
+            val stagingDir = File(activity.cacheDir, "duo_save_import")
 
             ProgressDialogFragment.newInstance(
-                requireActivity(),
+                activity,
                 R.string.save_files_importing,
                 false
             ) { _, _ ->
                 try {
-                    FileUtil.unzipToInternalStorage(result.toString(), cacheSaveDir)
-                    val files = cacheSaveDir.listFiles()
-                    var savesFolderFile: File? = null
-                    if (files != null) {
-                        val savesFolderName = args.game.programIdHex
-                        for (file in files) {
-                            if (file.isDirectory && file.name == savesFolderName) {
-                                savesFolderFile = file
-                                break
+                    val staged = SaveZipImport.stage(
+                        { FileUtil.getInputStream(result.toString()) },
+                        game.programIdHex,
+                        stagingDir
+                    )
+                    when (staged) {
+                        is SaveZipImport.Result.Staged -> {
+                            if (!SaveZipImport.replaceDirectory(stagingDir, savesFolder)) {
+                                return@newInstance withContext(Dispatchers.Main) {
+                                    MessageDialogFragment.newInstance(
+                                        activity,
+                                        titleId = R.string.import_failed,
+                                        descriptionString = activity.getString(
+                                            R.string.duo_save_import_failed_description,
+                                            savesFolder.path
+                                        )
+                                    )
+                                }
                             }
+                            withContext(Dispatchers.Main) {
+                                homeViewModel.reloadPropertiesList(true)
+                            }
+                            activity.getString(R.string.save_file_imported_success)
                         }
-                    }
 
-                    if (savesFolderFile != null) {
-                        savesFolder.deleteRecursively()
-                        savesFolder.mkdir()
-                        savesFolderFile.copyRecursively(savesFolder)
-                        savesFolderFile.deleteRecursively()
-                    }
-
-                    withContext(Dispatchers.Main) {
-                        if (savesFolderFile == null) {
+                        is SaveZipImport.Result.NotFound -> withContext(Dispatchers.Main) {
                             MessageDialogFragment.newInstance(
-                                requireActivity(),
+                                activity,
                                 titleId = R.string.save_file_invalid_zip_structure,
-                                descriptionId = R.string.save_file_invalid_zip_structure_description
-                            ).show(parentFragmentManager, MessageDialogFragment.TAG)
-                            return@withContext
+                                descriptionString = if (staged.otherTitleIds.isEmpty()) {
+                                    activity.getString(
+                                        R.string.save_file_invalid_zip_structure_description
+                                    )
+                                } else {
+                                    activity.getString(
+                                        R.string.duo_save_import_other_title,
+                                        staged.otherTitleIds.joinToString(", "),
+                                        game.programIdHex
+                                    )
+                                }
+                            )
                         }
-                        Toast.makeText(
-                            YuzuApplication.appContext,
-                            getString(R.string.save_file_imported_success),
-                            Toast.LENGTH_LONG
-                        ).show()
-                        homeViewModel.reloadPropertiesList(true)
-                    }
 
-                    cacheSaveDir.deleteRecursively()
-                } catch (e: Exception) {
-                    Toast.makeText(
-                        YuzuApplication.appContext,
-                        getString(R.string.fatal_error),
-                        Toast.LENGTH_LONG
-                    ).show()
+                        is SaveZipImport.Result.Failed -> withContext(Dispatchers.Main) {
+                            Log.error("[GameProperties] Save import failed: ${staged.error}")
+                            MessageDialogFragment.newInstance(
+                                activity,
+                                titleId = R.string.import_failed,
+                                descriptionString = activity.getString(
+                                    R.string.duo_save_import_error_description,
+                                    staged.error.toString()
+                                )
+                            )
+                        }
+                    }
+                } finally {
+                    stagingDir.deleteRecursively()
                 }
             }.show(parentFragmentManager, ProgressDialogFragment.TAG)
         }
@@ -772,4 +909,52 @@ class GamePropertiesFragment : Fragment() {
             ).show()
         }
     }
+    /** Eden Duo: asks how long the warm-up runs, then starts it with the saves backed up. */
+    private fun showWarmUpPicker() {
+        val labels = org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS
+            .map { getString(R.string.warm_up_minutes, it) }
+            .toTypedArray()
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.warm_up_duration_title)
+            .setMessage(R.string.warm_up_confirmation)
+            .setItems(labels) { _, which -> startWarmUp(org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS[which]) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun startWarmUp(minutes: Int) {
+        val game = args.game
+        viewLifecycleOwner.lifecycleScope.launch {
+            val backup = withContext(Dispatchers.IO) {
+                org.yuzu.yuzu_emu.utils.WarmUp.backupSaves(requireContext(), game)
+            }
+            val before = org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(game)
+            startActivity(
+                game.launchIntent.apply {
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, minutes)
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_BACKUP, backup?.absolutePath)
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SHADERS_BEFORE, before)
+                }
+            )
+        }
+    }
+
+    /**
+     * Eden Duo: launches the title to record the shaders it builds, or to compile the plan (and,
+     * with max, the shader combinations) without playing. See ShaderRuns.
+     */
+    private fun startShaderRun(
+        record: Boolean = false,
+        compile: Boolean = false,
+        max: Boolean = false
+    ) {
+        startActivity(
+            args.game.launchIntent.apply {
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_RECORD, record)
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_COMPILE, compile)
+                putExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_MAX, max)
+            }
+        )
+    }
+
 }

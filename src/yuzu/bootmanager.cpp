@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include "hid_core/hid_core.h"
 
 #ifdef HAS_OPENGL
 #include <glad/glad.h>
@@ -118,7 +119,7 @@ struct NullRenderWidget : public RenderWidget {
 GRenderWindow::GRenderWindow(MainWindow* parent,
                              std::shared_ptr<InputCommon::InputSubsystem> input_subsystem_)
     : QWidget(parent), input_subsystem{std::move(input_subsystem_)} {
-    setWindowTitle(QStringLiteral("Eden %1 | %2-%3")
+    setWindowTitle(QStringLiteral("Eglantine %1 | %2-%3")
                        .arg(QString::fromUtf8(Common::g_build_name),
                             QString::fromUtf8(Common::g_scm_branch),
                             QString::fromUtf8(Common::g_scm_desc)));
@@ -131,7 +132,8 @@ GRenderWindow::GRenderWindow(MainWindow* parent,
     strict_context_required = QGuiApplication::platformName() == QStringLiteral("wayland") ||
                               QGuiApplication::platformName() == QStringLiteral("wayland-egl");
 
-    connect(this, &GRenderWindow::FirstFrameDisplayed, parent, &MainWindow::OnLoadComplete);
+    connect(this, &GRenderWindow::FirstFrameDisplayed, parent, &MainWindow::OnLoadComplete,
+            Qt::QueuedConnection);
     connect(this, &GRenderWindow::ExecuteProgramSignal, parent, &MainWindow::OnExecuteProgram,
             Qt::QueuedConnection);
     connect(this, &GRenderWindow::ExitSignal, parent, &MainWindow::OnExit, Qt::QueuedConnection);
@@ -154,6 +156,9 @@ void GRenderWindow::Exit() {
 }
 
 GRenderWindow::~GRenderWindow() {
+    if (QtCommon::system)
+        QtCommon::system->HIDCore().UnloadInputDevices();
+
     input_subsystem->Shutdown();
 }
 
@@ -178,11 +183,6 @@ bool GRenderWindow::IsShown() const {
     return !isMinimized();
 }
 
-// On Qt 5.0+, this correctly gets the size of the framebuffer (pixels).
-//
-// Older versions get the window size (density independent pixels),
-// and hence, do not support DPI scaling ("retina" displays).
-// The result will be a viewport that is smaller than the extent of the window.
 void GRenderWindow::OnFramebufferSizeChanged() {
     // Screen changes potentially incur a change in screen DPI, hence we should update the
     // framebuffer size
@@ -764,12 +764,15 @@ bool GRenderWindow::InitRenderTarget() {
     // Update the Window System information with the new render target
     window_info = QtCommon::GetWindowSystemInfo(child_widget->windowHandle());
 
-    child_widget->resize(Layout::ScreenUndocked::Width, Layout::ScreenUndocked::Height);
+    const auto target_width = Settings::IsDockedMode() ? Layout::ScreenDocked::Width : Layout::ScreenUndocked::Width;
+    const auto target_height = Settings::IsDockedMode() ? Layout::ScreenDocked::Height : Layout::ScreenUndocked::Height;
+
+    child_widget->resize(target_width, target_height);
     layout()->addWidget(child_widget);
     // Reset minimum required size to avoid resizing issues on the main window after restarting.
     setMinimumSize(1, 1);
 
-    resize(Layout::ScreenUndocked::Width, Layout::ScreenUndocked::Height);
+    resize(target_width, target_height);
 
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
     OnFramebufferSizeChanged();
@@ -860,7 +863,7 @@ bool GRenderWindow::InitializeOpenGL() {
     return true;
 #else
     QMessageBox::warning(this, tr("OpenGL not available!"),
-                         tr("Eden has not been compiled with OpenGL support."));
+                         tr("Eglantine has not been compiled with OpenGL support."));
     return false;
 #endif
 }

@@ -42,10 +42,6 @@ add_library(qt_common STATIC
     render/context.h
     render/emu_thread.h render/emu_thread.cpp)
 
-if (UNIX)
-    target_sources(qt_common PRIVATE gui_settings.cpp gui_settings.h)
-endif()
-
 create_target_directory_groups(qt_common)
 
 if (USE_DISCORD_PRESENCE)
@@ -53,7 +49,7 @@ if (USE_DISCORD_PRESENCE)
         discord/discord_impl.cpp
         discord/discord_impl.h
     )
-    target_link_libraries(qt_common PUBLIC DiscordRPC::discord-rpc httplib::httplib)
+    target_link_libraries(qt_common PUBLIC DiscordRPC::discord-rpc)
 
     if (YUZU_USE_BUNDLED_OPENSSL)
         target_link_libraries(qt_common PUBLIC OpenSSL::SSL OpenSSL::Crypto)
