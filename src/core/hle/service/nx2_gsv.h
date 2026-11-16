@@ -3713,7 +3713,27 @@ private:
     void DumpFrame(const std::vector<u8>& bytes, const Nx2DecoderImageLayout& layout, u32 width,
                    u32 height) {
         static const char* const directory = std::getenv("EDEN_NX2_VDEC_DUMP");
-        if (directory == nullptr || (m_frames_out % 120) != 0) {
+        if (directory == nullptr) {
+            return;
+        }
+        // EDEN_NX2_VDEC_DUMP_NV12=<n>: also save frames 1..n whole, as written (NV12 at the image's
+        // pitch, nx2-vdec-<frame>-<pitch>x<height>.nv12), to tell decode faults from upload races.
+        static const u32 whole_frames = [] {
+            const char* value = std::getenv("EDEN_NX2_VDEC_DUMP_NV12");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+        }();
+        if (m_frames_out < whole_frames &&
+            layout.format == Tegra::Host1x::Nx2PictureFormat::Nv12) {
+            const std::string path = std::format("{}/nx2-vdec-{:05}-{}x{}.nv12", directory,
+                                                 m_frames_out + 1, layout.pitch, height);
+            if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
+                std::fwrite(bytes.data(), 1, layout.pitch * height, file);
+                std::fwrite(bytes.data() + layout.chroma_offset, 1,
+                            layout.pitch * ((height + 1) / 2), file);
+                std::fclose(file);
+            }
+        }
+        if ((m_frames_out % 120) != 0) {
             return;
         }
         const u32 bpp = layout.format == Tegra::Host1x::Nx2PictureFormat::Nv12 ? 1 : 4;
