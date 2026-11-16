@@ -74,12 +74,6 @@ private:
     u64 generation{1};
     std::array<u64, FRAMES_IN_FLIGHT> frame_ticks{};
     bool frame_reused{};
-    // Logged every 10 s: frames that ran out of room and waited for the GPU, and the peak use.
-    u64 exhausted_stalls{};
-    u64 frames{};
-    VkDeviceSize frame_bytes{};
-    VkDeviceSize peak_frame_bytes{};
-    u64 next_report_frame{600};
 };
 
 } // namespace Vulkan
