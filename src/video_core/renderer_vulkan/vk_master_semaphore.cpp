@@ -35,7 +35,7 @@ namespace {
 // by call chain (module offsets, for addr2line), every 5 s. Frame-pointer samplers lose the
 // chain at MasterSemaphore::Wait; this unwinds from the unwind tables.
 struct BackWaitCallers {
-    static constexpr int Depth = 8;
+    static constexpr int Depth = 16;
     struct Chain {
         std::array<uintptr_t, Depth> pcs{};
         u64 count{};
@@ -92,7 +92,7 @@ struct BackWaitCallers {
         next_report = now + std::chrono::seconds{5};
         std::ranges::sort(chains, [](const Chain& a, const Chain& b) { return a.ns > b.ns; });
         std::string text;
-        for (size_t i = 0; i < chains.size() && i < 8; ++i) {
+        for (size_t i = 0; i < chains.size() && i < 6; ++i) {
             text += std::format("\n  {} waits {} ms:", chains[i].count, chains[i].ns / 1000000);
             for (const uintptr_t pc : chains[i].pcs) {
                 if (pc == 0) {
