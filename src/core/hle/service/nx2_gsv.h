@@ -1884,7 +1884,13 @@ private:
             // commands, then crashes, with a slow GPU). Wait for this frame too then. Not when a
             // suspended channel brought us here: this frame can't finish before the present
             // returns.
-            const bool gpu_behind = frames_ahead == 1 && m_previous_fence_id < 192 &&
+            // EDEN_NX2_AHEAD_CATCH_UP=0 skips that: the game stays a frame ahead (it still waits
+            // for the previous frame) while the GPU thread is the limit.
+            static const bool catch_up = [] {
+                const char* value = std::getenv("EDEN_NX2_AHEAD_CATCH_UP");
+                return value == nullptr || value[0] != '0';
+            }();
+            const bool gpu_behind = frames_ahead == 1 && catch_up && m_previous_fence_id < 192 &&
                                     !system.Host1x().GetSyncpointManager().IsReadyGuest(
                                         m_previous_fence_id, m_previous_fence_value);
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
