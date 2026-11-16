@@ -228,6 +228,7 @@ bool DmaPusher::Step() {
         bool gpu_written =
             IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+            MayBeGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32)) &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
@@ -930,6 +931,35 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
             rasterizer->NoteGpuWrittenCommandListSynced(*device);
         }
     }
+}
+
+// Whether the queued compute and copy work may have written these commands. Fortune's Weave reads
+// ~11,000 command list entries a second on its battle map; waiting for every queued writer before
+// each one ran the split's front and back one after the other (43 ms frames on an Odin 2). It
+// writes its GPU-built lists into the same pages every frame: only pages that have held
+// GPU-written commands before wait (g_nx2_command_list_pages, sticky). A page whose first such
+// list is still queued reads stale once. Other titles keep the wait for every entry
+// (EDEN_NX2_WRITER_WAIT=all|known overrides).
+bool DmaPusher::MayBeGpuWrittenCommands(GPUVAddr address, size_t size) const {
+    static const char setting = [] {
+        const char* value = std::getenv("EDEN_NX2_WRITER_WAIT");
+        return value == nullptr ? '\0' : value[0];
+    }();
+    const bool known_only = setting == '\0' ? keep_submit_copies : setting == 'k';
+    if (!known_only) {
+        return true;
+    }
+    if (!Tegra::g_nx2_has_command_list_pages.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    const GPUVAddr end = address + size;
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < end; page += 0x1000) {
+        if (const auto device = memory_manager.GpuToCpuAddress(page);
+            device && Tegra::Nx2IsCommandListPage(*device)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void DmaPusher::ReportUnboundSubchannel() {

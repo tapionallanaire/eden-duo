@@ -267,6 +267,7 @@ public:
     /// again at the resume, the list ran those words (a macro's arguments spilling into the next
     /// entry, then QMD words parsed as methods: a channel bound to class 0xff30, a Fermi2D register
     /// flood and a GPU waiting forever on semaphore 0).
+    [[nodiscard]] bool MayBeGpuWrittenCommands(GPUVAddr address, size_t size) const;
     bool keep_submit_copies = false;
     MemoryManager& memory_manager;
     Control::ChannelState& channel_state;
