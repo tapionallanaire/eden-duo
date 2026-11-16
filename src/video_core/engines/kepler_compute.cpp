@@ -718,6 +718,30 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                    (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
         };
         const auto& [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        // EDEN_NX2_NET_IO_LOG=1 (diagnostic): each compute program's image reads and stores
+        // (handle offset: address, size, format), its first 2 dispatches, to find a network's
+        // input and output.
+        if (static const bool io_log = std::getenv("EDEN_NX2_NET_IO_LOG") != nullptr; io_log) {
+            static std::unordered_map<GPUVAddr, u32> seen;
+            if (seen[regs.code_loc.Address()]++ < 2) {
+                std::string text;
+                const auto list = [&](const char* kind, const std::vector<u32>& offsets) {
+                    for (const u32 offset : offsets) {
+                        const auto tic = image(offset);
+                        text += tic ? std::format(" {} +{:#x}: {:#x} {}x{} fmt {}", kind, offset,
+                                                  tic->Address(), tic->Width(), tic->Height(),
+                                                  static_cast<u32>(tic->format.Value()))
+                                    : std::format(" {} +{:#x}: -", kind, offset);
+                    }
+                };
+                list("read", reads);
+                list("store", stores);
+                LOG_INFO(HW_GPU, "Compute program {:#x} grid {}x{}x{}:{}",
+                         regs.code_loc.Address(), launch_description.grid_dim_x.Value(),
+                         launch_description.grid_dim_y.Value(),
+                         launch_description.grid_dim_z.Value(), text);
+            }
+        }
         std::optional<Texture::TICEntry> replacement_input;
         std::optional<Texture::TICEntry> replacement_output;
         if (native_upscale_input && !stores.empty()) {
@@ -725,6 +749,23 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                                                            upscale_pair)) {
                 replacement_input = native_upscale_input;
                 replacement_output = image(*store);
+            }
+        }
+        // Donkey Kong Bananza's upscaler network (one program: colour at +0x60 in, the image at
+        // twice the size at +0x70 out; 960x540 -> 1920x1080 on the desktop): EDEN_NX2_DKB_NETWORK=
+        // blit draws a bilinear upscale of its input instead (25 ms of the Odin 2's GPU frame).
+        static const bool dkb_network_blit = [] {
+            const char* value = std::getenv("EDEN_NX2_DKB_NETWORK");
+            return value != nullptr && std::string_view{value} == "blit";
+        }();
+        if (dkb_network_blit && !replacement_input && reads.size() == 1 && stores.size() == 1 &&
+            reads.front() == 0x60 && stores.front() == 0x70 &&
+            Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL) {
+            const auto from = image(0x60);
+            const auto to = image(0x70);
+            if (upscale_pair(from, to, true)) {
+                replacement_input = from;
+                replacement_output = to;
             }
         }
         bool skipping{};
