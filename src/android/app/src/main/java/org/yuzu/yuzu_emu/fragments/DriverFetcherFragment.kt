@@ -88,7 +88,8 @@ class DriverFetcherFragment : Fragment() {
         IntRange(600, 639) to "Mr. Purple EOL-24.3.4",
         IntRange(640, 699) to "Mr. Purple T19",
         IntRange(700, 710) to "Mr. Purple T29",
-        IntRange(711, 899) to "Mr. Purple T30",
+        IntRange(711, 799) to "StevenMXZ Turnip v27.0.0-R2", // Adreno 720-750 (Odin 2, Thor, ROG 9 FE)
+        IntRange(800, 899) to "Mr. Purple T30",
         IntRange(900, Int.MAX_VALUE) to "Unsupported"
     )
 
