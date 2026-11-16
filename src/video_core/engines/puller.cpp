@@ -238,14 +238,18 @@ bool AcquireNoDrain() {
 // can be a value an earlier round left (Donkey Kong Bananza's flag words cycle 1, 2, 3 and
 // 0xffffffff, 0, 2 every frame). Returns the word's device address when it applies.
 std::optional<DAddr> BackCheckDevice(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
-    // Donkey Kong Bananza by default (dma_pusher.cpp, BananzaListDefaults).
+    // Donkey Kong Bananza by default on the desktop (dma_pusher.cpp, BananzaListDefaults).
     static const char setting = [] {
         const char* value = std::getenv("EDEN_NX2_ACQ_BACK_CHECK");
         return value == nullptr ? '\0' : value[0];
     }();
+#ifdef __ANDROID__
+    const bool on = setting == '1';
+#else
     const bool on = setting == '\0'
                         ? Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL
                         : setting == '1';
+#endif
     auto& split = VideoCommon::GpuSplit::Get();
     if (!on || acquire.WaitsToReach() || !split.Active() || !split.FrontMacros() ||
         !ReleasesLandAtOnce()) {

@@ -201,8 +201,14 @@ constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
 /// set). Desktop, 3 minutes of digging and punching in the mining tunnel: 36.4 -> 25.8 ms a frame,
 /// 178,875 speculated lists matched the GPU's copy, 0 differed. Checked per call: the Android app
 /// runs the next game in the same process.
+// Desktop only: on the Odin 2 (Turnip) 32 speculated lists differed from the GPU's copy as the
+// mining tunnel loaded (a wrong read is reported, not undone) for 2 ms a frame (104.6 -> 102.6).
 bool BananzaListDefaults() {
+#ifdef __ANDROID__
+    return false;
+#else
     return Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId;
+#endif
 }
 
 /// EDEN_NX2_WRITER_WAIT: 'a'(ll), 'k'(nown), 's'(ynced), '\0' unset (MayBeGpuWrittenCommands).
