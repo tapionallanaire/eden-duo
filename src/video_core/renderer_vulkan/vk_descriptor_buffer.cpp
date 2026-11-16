@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -26,7 +27,12 @@ DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
                                              props.samplerDescriptorBufferAddressSpaceSize,
                                              props.resourceDescriptorBufferAddressSpaceSize,
                                              props.descriptorBufferAddressSpaceSize})};
-    const VkDeviceSize frame_size{device.IsTiler() ? TILER_FRAME_SIZE : DESKTOP_FRAME_SIZE};
+    VkDeviceSize frame_size{device.IsTiler() ? TILER_FRAME_SIZE : DESKTOP_FRAME_SIZE};
+    // EDEN_NX2_DESC_FRAME_MB=<n>: descriptor bytes per frame before the ring waits for the GPU.
+    if (const char* value = std::getenv("EDEN_NX2_DESC_FRAME_MB"); value != nullptr) {
+        frame_size = (std::max)(VkDeviceSize{1}, static_cast<VkDeviceSize>(std::atoll(value))) *
+                     1024 * 1024;
+    }
     const VkDeviceSize chunk_size{
         Common::AlignDown((std::min)(frame_size, max_bound), alignment)};
     if (chunk_size <= alignment) {
@@ -79,6 +85,18 @@ DescriptorBufferRing::DescriptorBufferRing(const Device& device_,
 DescriptorBufferRing::~DescriptorBufferRing() = default;
 
 void DescriptorBufferRing::TickFrame() {
+    peak_frame_bytes = (std::max)(peak_frame_bytes, frame_bytes);
+    frame_bytes = 0;
+    if (++frames >= next_report_frame) {
+        next_report_frame = frames + 600;
+        LOG_INFO(Render_Vulkan,
+                 "Descriptor buffer: {} GPU stalls for a full frame in the last 600 frames, peak "
+                 "{} KiB of {} KiB a frame",
+                 exhausted_stalls, peak_frame_bytes / 1024,
+                 chunks_per_frame * (chunk_capacity + alignment) / 1024);
+        exhausted_stalls = 0;
+        peak_frame_bytes = 0;
+    }
     if (++frame_index >= FRAMES_IN_FLIGHT) {
         frame_index = 0;
     }
@@ -110,6 +128,7 @@ DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& sched
             ++chunk_cursor;
         } else {
             LOG_DEBUG(Render_Vulkan, "Descriptor buffer frame exhausted, stalling on the GPU");
+            ++exhausted_stalls;
             scheduler.Finish();
             chunk_cursor = 0;
             ++generation;
@@ -119,6 +138,7 @@ DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& sched
     const size_t chunk{frame_index * chunks_per_frame + chunk_cursor};
     const VkDeviceSize offset{cursor};
     cursor += needed;
+    frame_bytes += needed;
     frame_ticks[frame_index] = scheduler.CurrentTick();
     return Allocation{
         .host = chunk_hosts[chunk] + offset,
