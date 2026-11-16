@@ -2864,6 +2864,149 @@ VkImage TextureCacheRuntime::AcquireMsaaScratchImage(const VkImageCreateInfo& im
     return handle;
 }
 
+VkImageView TextureCacheRuntime::CopyForSelfSample(Image& image, const ImageView& view) {
+    // Donkey Kong Bananza applies its guide movie's gamma in place: one draw samples the 640x360
+    // picture and renders into it. Each pixel reads only itself, which the Switch's GPU allows;
+    // in Vulkan the attachment is sampled while it is written (undefined), and NVIDIA returned
+    // tiles that were written already, gamma applied twice: dark squares over the panel's lower
+    // part (RenderDoc capture, draw 33112 of frame 5070). Sample a copy taken before the draw.
+    // ponytail: whole level-0 copies only; layered, mipmapped and multisampled targets still
+    // sample themselves.
+    const VideoCommon::ImageInfo& info = image.info;
+    if (info.type != ImageType::e2D || info.resources.levels != 1 || info.resources.layers != 1 ||
+        info.num_samples != 1 || image.IsRescaled() || view.format != info.format ||
+        image.AspectMask() != VK_IMAGE_ASPECT_COLOR_BIT) {
+        return VK_NULL_HANDLE;
+    }
+    VkImageCreateInfo image_ci = MakeImageCreateInfo(device, info);
+    image_ci.pNext = nullptr;
+    image_ci.flags = 0;
+    image_ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    const VkFormat view_format =
+        MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, view.format).format;
+    const VkComponentMapping& swizzle = view.SwizzleMapping();
+    const auto same_swizzle = [&swizzle](const VkComponentMapping& other) {
+        return other.r == swizzle.r && other.g == swizzle.g && other.b == swizzle.b &&
+               other.a == swizzle.a;
+    };
+    SelfSampleCopy* copy = nullptr;
+    for (SelfSampleCopy& candidate : self_sample_copies) {
+        if (candidate.format == image_ci.format && candidate.view_format == view_format &&
+            candidate.width == image_ci.extent.width &&
+            candidate.height == image_ci.extent.height && same_swizzle(candidate.swizzle) &&
+            scheduler.IsFree(candidate.tick)) {
+            copy = &candidate;
+            break;
+        }
+    }
+    if (copy == nullptr) {
+        // ponytail: kept for the session (one per size, format and swizzle in use at once);
+        // Bananza needs one. Evict on TickFrame if a game ever cycles many.
+        vk::Image scratch = memory_allocator.CreateImage(image_ci);
+        vk::ImageView scratch_view = device.GetLogical().CreateImageView(VkImageViewCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *scratch,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = view_format,
+            .components = swizzle,
+            .subresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        });
+        self_sample_copies.push_back(SelfSampleCopy{
+            .format = image_ci.format,
+            .view_format = view_format,
+            .width = image_ci.extent.width,
+            .height = image_ci.extent.height,
+            .swizzle = swizzle,
+            .image = std::move(scratch),
+            .view = std::move(scratch_view),
+            .tick = 0,
+        });
+        copy = &self_sample_copies.back();
+    }
+    copy->tick = scheduler.CurrentTick();
+    const VkImage src_image = image.Handle();
+    const VkImage dst_image = *copy->image;
+    const VkImageCopy region{
+        .srcSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .srcOffset{0, 0, 0},
+        .dstSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .dstOffset{0, 0, 0},
+        .extent = image_ci.extent,
+    };
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([src_image, dst_image, region](vk::CommandBuffer cmdbuf) {
+        static constexpr VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const std::array pre_barriers{
+            VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = src_image,
+                .subresourceRange = range,
+            },
+            VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = dst_image,
+                .subresourceRange = range,
+            },
+        };
+        const std::array post_barriers{
+            VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = src_image,
+                .subresourceRange = range,
+            },
+            VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = dst_image,
+                .subresourceRange = range,
+            },
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, nullptr, pre_barriers);
+        cmdbuf.CopyImage(src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                               0, nullptr, nullptr, post_barriers);
+    });
+    return *copy->view;
+}
+
 void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     for (MsaaScratchImage& scratch : msaa_scratch_images) {
         if (*scratch.image == image) {

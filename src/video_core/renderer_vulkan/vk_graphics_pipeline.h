@@ -321,6 +321,9 @@ private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
+    /// Points this draw's sampled views of its own colour targets at copies taken before it.
+    void SampleColorTargetCopies(std::span<const VideoCommon::ImageViewInOut> views);
+
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are, bool is_indexed);
 

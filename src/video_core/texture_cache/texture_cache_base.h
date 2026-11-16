@@ -262,6 +262,10 @@ public:
         return slot_images[id];
     }
 
+    [[nodiscard]] Runtime& GetRuntime() noexcept {
+        return runtime;
+    }
+
     /// Eden Duo (runtime 24): visit every live image as (id, image), to find the one a module
     /// texture readback names. Call with `mutex` held.
     template <typename Func>
