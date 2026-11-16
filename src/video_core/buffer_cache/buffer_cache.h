@@ -1676,6 +1676,9 @@ void BufferCache<P>::BindHostDrawIndirectBuffers() {
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+        // The draw reads these words on the GPU: a later upload to them in this batch must not
+        // be reordered ahead of it (DK Bananza resets its terrain draw records with inline
+        // writes right after the draws that read them; hoisted, every record read zero).
         buffer.MarkUsage(buffer.Offset(binding.device_addr), binding.size);
     };
     if (current_draw_indirect->include_count) {
@@ -2762,6 +2765,20 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                     std::scoped_lock lock{nx2_list_mutex};
                     Nx2ListPage& entry = nx2_list_pages[page_addr];
                     ++entry.writes;
+                    if (!entry.gpu_ranges.known) {
+                        // Writes before the page became a list page were not noted: start from
+                        // what guest memory may not hold (this write among it).
+                        entry.gpu_ranges = Nx2StaleListRanges(page_addr, Nx2SeedOrigins(entry));
+                    }
+                    if (Nx2ListStats()) [[unlikely]] {
+                        entry.notes[entry.note_count++ % entry.notes.size()] = {
+                            device_addr, size, static_cast<s8>(nx2_graphics_stage)};
+                    }
+                    constexpr DAddr list_page_size = DAddr{1} << page_bits;
+                    const DAddr write_begin = (std::max)(device_addr, page_addr);
+                    const DAddr write_end = (std::min)(device_addr + size, page_addr + list_page_size);
+                    entry.gpu_ranges.Note(static_cast<u32>(write_begin - page_addr),
+                                          static_cast<u32>(write_end - page_addr));
                     if (!nx2_collect_list_copies && !entry.draw_written) {
                         entry.draw_written = true;
                         LOG_INFO(HW_GPU, "Command list page {:#x} is written by draws too: its "
@@ -2781,6 +2798,87 @@ void BufferCache<P>::Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64
                 }
             }
             ++page;
+        }
+    }
+}
+
+template <class P>
+bool BufferCache<P>::Nx2ListSpeculationAllowed(DAddr page) {
+    if constexpr (IS_OPENGL) {
+        return false;
+    } else {
+        std::scoped_lock lock{nx2_list_mutex};
+        const auto it = nx2_list_pages.find(page);
+        return it == nx2_list_pages.end() || !it->second.speculation_hazard;
+    }
+}
+
+template <class P>
+void BufferCache<P>::Nx2CheckSpeculatedList(DAddr addr, u32 size, u64 hash) {
+    if constexpr (!IS_OPENGL) {
+        constexpr DAddr page_size = DAddr{1} << Tegra::Nx2WrittenPageBits;
+        const DAddr page = addr & ~(page_size - 1);
+        const u32 offset = static_cast<u32>(addr - page);
+        {
+            std::scoped_lock lock{nx2_list_mutex};
+            const auto it = nx2_list_pages.find(page);
+            // The writers before the read ran: a page they wrote has a copy made after them.
+            if (it == nx2_list_pages.end() || !it->second.copy ||
+                it->second.copy_writes != it->second.writes || offset < it->second.copy_begin ||
+                offset + size > it->second.copy_end) {
+                ++nx2_list_checks_unverifiable;
+            } else if (nx2_list_checks.size() < 8192) {
+                nx2_list_checks.push_back(
+                    {page, offset, size, hash, it->second.copy_tick, it->second.writes});
+            } else {
+                ++nx2_list_checks_unverifiable;
+            }
+        }
+        Nx2ProcessListChecks();
+    }
+}
+
+template <class P>
+void BufferCache<P>::Nx2ProcessListChecks() {
+    if constexpr (!IS_OPENGL) {
+        std::scoped_lock lock{nx2_list_mutex};
+        std::erase_if(nx2_list_checks, [this](const Nx2ListCheck& check) {
+            if (!runtime.IsFree(check.tick)) {
+                return false;
+            }
+            const auto it = nx2_list_pages.find(check.page);
+            if (it == nx2_list_pages.end() || !it->second.copy ||
+                it->second.copy_tick != check.tick || it->second.copy_writes != check.writes) {
+                ++nx2_list_checks_unverifiable; // a newer copy replaced it
+                return true;
+            }
+            const u8* const words = it->second.copy->mapped_span.data() + check.offset;
+            if (Common::CityHash64(reinterpret_cast<const char*>(words), check.size) ==
+                check.hash) {
+                ++nx2_list_checks_matched;
+                return true;
+            }
+            ++nx2_list_checks_differed;
+            it->second.speculation_hazard = true;
+            Nx2Profile::Add(Nx2Profile::Counter::ListSpeculationHazards, 1);
+            if (nx2_list_checks_differed <= 32) {
+                LOG_ERROR(HW_GPU,
+                          "List speculation hazard: the list at {:#x}+{:#x} read from guest "
+                          "memory differs from the GPU's copy; its page waits from now on",
+                          check.page + check.offset, check.size);
+            }
+            return true;
+        });
+        const u64 total =
+            nx2_list_checks_matched + nx2_list_checks_differed + nx2_list_checks_unverifiable;
+        static u64 last_logged{};
+        if (total >= last_logged + 20000) {
+            last_logged = total;
+            LOG_INFO(HW_GPU,
+                     "List speculation checks: {} matched the GPU's copy, {} differed, {} "
+                     "unverifiable",
+                     nx2_list_checks_matched, nx2_list_checks_differed,
+                     nx2_list_checks_unverifiable);
         }
     }
 }
@@ -2832,6 +2930,8 @@ bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
                 nx2_retired_list_copies.emplace_back(entry.copy_tick, std::move(*entry.copy));
             }
             entry.copy = staging;
+            // Exact again now: noted writes only add up, while downloads make guest memory current.
+            entry.gpu_ranges = Nx2StaleListRanges(page, Nx2SeedOrigins(entry));
             entry.copy_writes = entry.writes;
             entry.copy_tick = tick;
             entry.copy_time = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
@@ -2851,8 +2951,8 @@ bool BufferCache<P>::Nx2CopyListPages(u64 tick) {
 }
 
 template <class P>
-auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync)
-    -> Nx2ListRead {
+auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
+                                     u64* pending_tick) -> Nx2ListRead {
     if constexpr (IS_OPENGL) {
         return Nx2ListRead::Unknown;
     } else {
@@ -2885,12 +2985,60 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
                 if (!past_sync) {
                     return Nx2ListRead::NeedsSync;
                 }
-                return entry.synced_writes == entry.writes ? Nx2ListRead::Synced
-                                                           : Nx2ListRead::Unknown;
+                if (entry.synced_writes == entry.writes) {
+                    return Nx2ListRead::Synced;
+                }
+                if (!entry.gpu_ranges.Wrote(offset, offset + out.size())) {
+                    Nx2Profile::Add(Nx2Profile::Counter::ListGuestReads, 1);
+                    return Nx2ListRead::Synced;
+                }
+                return Nx2ListRead::Unknown;
             }
             // Pages the CPU writes the lists of (GPU-written once, long before) stay synced.
             if (entry.synced_writes == entry.writes) {
                 return Nx2ListRead::Synced;
+            }
+            // GPU work wrote the page since, but not these bytes: guest memory holds the list.
+            if (!entry.gpu_ranges.Wrote(offset, offset + out.size())) {
+                Nx2Profile::Add(Nx2Profile::Counter::ListGuestReads, 1);
+                return Nx2ListRead::Synced;
+            }
+            if (static const bool stats = std::getenv("EDEN_NX2_LIST_STATS") != nullptr;
+                stats) [[unlikely]] {
+                static u32 logged{};
+                if (logged < 24) {
+                    ++logged;
+                    std::string ranges;
+                    for (const auto& [begin, end] : entry.gpu_ranges.ranges) {
+                        ranges += std::format(" [{:#x}, {:#x})", begin, end);
+                    }
+                    static constexpr std::array source_names{"modified", "uncommitted",
+                                                             "committed", "downloading"};
+                    std::string seed;
+                    for (size_t i = 0; i < entry.seed_origins.size(); ++i) {
+                        const auto& o = entry.seed_origins[i];
+                        if (o.count != 0) {
+                            seed += std::format(" {} {}x [{:#x}, {:#x})", source_names[i],
+                                                o.count, o.begin, o.end);
+                        }
+                    }
+                    std::string notes;
+                    const u32 note_total = entry.note_count;
+                    const u32 shown = (std::min<u32>)(note_total, entry.notes.size());
+                    for (u32 i = note_total - shown; i < note_total; ++i) {
+                        const auto& n = entry.notes[i % entry.notes.size()];
+                        notes += std::format(" {:#x}+{:#x}{}", n.addr, n.size,
+                                             n.stage >= 0 ? std::format(" (draw, stage {})", n.stage)
+                                                          : std::string{" (compute/copy)"});
+                    }
+                    LOG_INFO(HW_GPU,
+                             "List stats: list at {:#x}+{:#x} on page {:#x} overlaps GPU ranges "
+                             "(known {}, merged {}):{} | seeded at write {} of {} from:{} | "
+                             "last of {} noted writes:{}",
+                             offset, out.size(), page, entry.gpu_ranges.known,
+                             entry.gpu_ranges.merged, ranges, entry.seed_at_write, entry.writes,
+                             seed.empty() ? std::string{" nothing"} : seed, note_total, notes);
+                }
             }
             if (!current(entry)) {
                 return Nx2ListRead::Unknown;
@@ -2903,6 +3051,10 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
             tick = entry.copy_tick;
             writes = entry.copy_writes;
             copy_time = entry.copy_time;
+            if (pending_tick != nullptr) {
+                *pending_tick = tick;
+                return Nx2ListRead::Pending;
+            }
         }
         // Submitted with the work that wrote the page (Nx2CopyListPages's caller flushes).
         {
@@ -2922,11 +3074,62 @@ auto BufferCache<P>::Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool 
 }
 
 template <class P>
+bool BufferCache<P>::Nx2ListStats() {
+    static const bool stats = std::getenv("EDEN_NX2_LIST_STATS") != nullptr;
+    return stats;
+}
+
+template <class P>
+void* BufferCache<P>::Nx2SeedOrigins(Nx2ListPage& entry) {
+    if (!Nx2ListStats()) {
+        return nullptr;
+    }
+    entry.seed_origins = {};
+    entry.seed_at_write = static_cast<u32>(entry.writes);
+    return entry.seed_origins.data();
+}
+
+template <class P>
+Nx2ListRanges BufferCache<P>::Nx2StaleListRanges(DAddr page, void* origins) const {
+    Nx2ListRanges result;
+    result.Reset();
+    constexpr DAddr page_size = DAddr{1} << Tegra::Nx2WrittenPageBits;
+    auto* const origin = static_cast<typename Nx2ListPage::Origin*>(origins);
+    size_t source = 0;
+    const auto note = [&](DAddr begin, DAddr end) {
+        begin = (std::max)(begin, page);
+        end = (std::min)(end, page + page_size);
+        if (begin < end) {
+            result.Note(static_cast<u32>(begin - page), static_cast<u32>(end - page));
+            if (origin != nullptr) {
+                auto& o = origin[source];
+                o.begin = (std::min)(o.begin, static_cast<u32>(begin - page));
+                o.end = (std::max)(o.end, static_cast<u32>(end - page));
+                ++o.count;
+            }
+        }
+    };
+    gpu_modified_ranges.ForEachInRange(page, page_size, note);
+    source = 1;
+    uncommitted_gpu_modified_ranges.ForEachInRange(page, page_size, note);
+    source = 2;
+    for (const auto& ranges : committed_gpu_modified_ranges) {
+        ranges.ForEachInRange(page, page_size, note);
+    }
+    source = 3;
+    for (const auto& ranges : pending_download_ranges) {
+        ranges.ForEachInRange(page, page_size, note);
+    }
+    return result;
+}
+
+template <class P>
 void BufferCache<P>::Nx2NoteListSynced(DAddr page) {
     if constexpr (!IS_OPENGL) {
         std::scoped_lock lock{nx2_list_mutex};
         Nx2ListPage& entry = nx2_list_pages[page];
         entry.synced_writes = entry.writes;
+        entry.gpu_ranges.Reset();
     }
 }
 
@@ -2956,6 +3159,24 @@ void BufferCache<P>::Nx2NoteListHostWrite(DAddr device_addr, u64 size, std::span
             const bool synced = entry.synced_writes == entry.writes;
             const bool copy_valid = entry.copy && entry.copy_writes == entry.writes;
             ++entry.writes;
+            {
+                constexpr u64 list_page_size = u64{1} << Tegra::Nx2WrittenPageBits;
+                const u64 clear_begin = (std::max<u64>)(device_addr, page_addr);
+                const u64 clear_end = (std::min<u64>)(device_addr + size, page_addr + list_page_size);
+                if (clear_begin < clear_end) {
+                    entry.gpu_ranges.Clear(static_cast<u32>(clear_begin - page_addr),
+                                           static_cast<u32>(clear_end - page_addr));
+                }
+                if (static const bool stats = std::getenv("EDEN_NX2_LIST_STATS") != nullptr;
+                    stats) [[unlikely]] {
+                    static std::atomic<u64> host_writes{};
+                    const u64 count = host_writes.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if ((count & 0x3fff) == 0 || count <= 4) {
+                        LOG_INFO(HW_GPU, "List stats: {} host writes to list pages (last {:#x}+{:#x})",
+                                 count, device_addr, size);
+                    }
+                }
+            }
             if (synced) {
                 entry.synced_writes = entry.writes;
             }

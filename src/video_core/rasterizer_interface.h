@@ -112,11 +112,32 @@ public:
         /// Draws write the page: ask again with `past_sync` once the split's back ran the work
         /// before the last host-level wait (GpuSplit::WaitForSync)
         NeedsSync,
+        /// Only with `pending_tick`: the copy is not done yet, `*pending_tick` is the host GPU
+        /// tick that completes it. Ask again once IsGpuTickDone(*pending_tick).
+        Pending,
     };
+    /// With `pending_tick`, a copy the GPU is still making returns Pending instead of waiting.
     virtual GpuWrittenList ReadGpuWrittenCommandList([[maybe_unused]] DAddr addr,
                                                      [[maybe_unused]] std::span<u8> out,
-                                                     [[maybe_unused]] bool past_sync) {
+                                                     [[maybe_unused]] bool past_sync,
+                                                     [[maybe_unused]] u64* pending_tick = nullptr) {
         return GpuWrittenList::Unknown;
+    }
+
+    /// EDEN_NX2_LIST_SPECULATE (front): whether lists on this GPU-written page may be read from
+    /// guest memory without waiting for their writers (no speculated read of it differed yet).
+    virtual bool Nx2ListSpeculationAllowed([[maybe_unused]] DAddr page) {
+        return false;
+    }
+    /// EDEN_NX2_LIST_SPECULATE (back, after the writers queued before the read ran): compares
+    /// the words the front read (`hash`) with the page's copy once the GPU made it.
+    virtual void Nx2CheckSpeculatedList([[maybe_unused]] DAddr addr, [[maybe_unused]] u32 size,
+                                        [[maybe_unused]] u64 hash) {}
+
+    /// Whether the host GPU passed `tick`, without waiting. Asks for deferred work to be
+    /// submitted when the tick is not submitted yet, so it completes.
+    virtual bool IsGpuTickDone([[maybe_unused]] u64 tick) {
+        return true;
     }
 
     /// Switch 2: the front flushed this command list page with the split drained.

@@ -27,6 +27,7 @@
 #include <boost/container/static_vector.hpp>
 #include "common/container/unordered_map.h"
 
+#include "common/cityhash.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
 #include "common/literals.h"
@@ -38,6 +39,7 @@
 #include "common/spin_recursive_mutex.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/nx2_list_ranges.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
@@ -517,13 +519,20 @@ public:
     }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
-    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync };
+    /// EDEN_NX2_LIST_SPECULATE: see RasterizerInterface::Nx2ListSpeculationAllowed and
+    /// Nx2CheckSpeculatedList.
+    [[nodiscard]] bool Nx2ListSpeculationAllowed(DAddr page);
+    void Nx2CheckSpeculatedList(DAddr addr, u32 size, u64 hash);
+    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };
     /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
     /// written by no GPU work since), else Copied with `out` filled from the copy of its last
     /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
     /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
     /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
-    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
+    /// With `pending_tick`, a copy the GPU has not finished returns Pending and sets the tick
+    /// instead of waiting for it.
+    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
+                                u64* pending_tick = nullptr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
@@ -779,6 +788,14 @@ private:
     /// Counts a GPU write to the command list pages in the range (invalidating their copies) and,
     /// while collecting, asks for new copies.
     void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size);
+    /// Back: the bytes of the list page at `page` whose guest memory may be older than the GPU's
+    /// (GPU-modified, committed or being downloaded), as Nx2ListRanges.
+    /// `origins` (EDEN_NX2_LIST_STATS), when given, gets each source's part.
+    Nx2ListRanges Nx2StaleListRanges(DAddr page, void* origins = nullptr) const;
+    static bool Nx2ListStats();
+    struct Nx2ListPage;
+    /// EDEN_NX2_LIST_STATS: clears and returns `entry`'s seed origins, else nullptr.
+    static void* Nx2SeedOrigins(Nx2ListPage& entry);
 
     [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible);
 
@@ -1107,10 +1124,42 @@ private:
         /// the page's lists read guest memory once the back ran the work before the last such
         /// wait and no write came since the front flushed the page (Nx2ReadListCopy).
         bool draw_written{};
+        Nx2ListRanges gpu_ranges; ///< GPU-written bytes since the front last flushed the page
         std::optional<Nx2Staging> copy;
+        /// EDEN_NX2_LIST_STATS: what gpu_ranges came from. The last seed's bounding range per
+        /// source (GPU-modified, uncommitted, committed, downloading) and the last noted writes.
+        struct Origin {
+            u32 begin{~0U};
+            u32 end{};
+            u32 count{};
+        };
+        struct Note {
+            DAddr addr{};
+            u64 size{};
+            s8 stage{-1}; ///< Graphics stage writing it, -1 outside draws (compute, copies)
+        };
+        bool speculation_hazard{}; ///< A speculated read of it differed from its copy
+        std::array<Origin, 4> seed_origins{};
+        u32 seed_at_write{}; ///< `writes` when last seeded
+        std::array<Note, 4> notes{};
+        u32 note_count{};
     };
     std::vector<DAddr> nx2_rewritten_pages; ///< MappedUploadMemory: pages to mark CPU-modified
     size_t nx2_untracked_pages{}; ///< How many of them have their write tracking taken off
+    /// EDEN_NX2_LIST_SPECULATE: speculated list reads waiting for their copy (back only).
+    struct Nx2ListCheck {
+        DAddr page;
+        u32 offset;
+        u32 size;
+        u64 hash;
+        u64 tick;
+        u64 writes;
+    };
+    std::vector<Nx2ListCheck> nx2_list_checks;
+    u64 nx2_list_checks_matched{};
+    u64 nx2_list_checks_differed{};
+    u64 nx2_list_checks_unverifiable{};
+    void Nx2ProcessListChecks();
     std::mutex nx2_list_mutex; ///< nx2_list_pages: the split's front reads the copies
     std::unordered_map<DAddr, Nx2ListPage> nx2_list_pages;
     /// Copies replaced while the GPU may still write them: freed once it is past their tick.
