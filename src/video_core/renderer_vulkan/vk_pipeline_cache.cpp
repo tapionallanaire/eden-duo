@@ -721,8 +721,11 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_user_clip_distances = device.GetMaxUserClipDistances()};
-    profile.support_cooperative_hmma =
-        device.IsCooperativeHmmaSupported() && TestCooperativeHmma(device);
+    // EDEN_NX2_NO_COOP_HMMA=1: the software HMMA (what Adreno runs) on a device that has
+    // cooperative matrices, to check it against them.
+    profile.support_cooperative_hmma = std::getenv("EDEN_NX2_NO_COOP_HMMA") == nullptr &&
+                                       device.IsCooperativeHmmaSupported() &&
+                                       TestCooperativeHmma(device);
 
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
