@@ -637,6 +637,15 @@ abstract class SettingsItem(
                 )
             )
             put(
+                SingleChoiceSetting(
+                    IntSetting.RENDERER_DLSS_REPLACEMENT,
+                    titleId = R.string.renderer_dlss_replacement,
+                    descriptionId = R.string.renderer_dlss_replacement_description,
+                    choicesId = R.array.rendererDlssReplacementNames,
+                    valuesId = R.array.rendererDlssReplacementValues
+                )
+            )
+            put(
                 SliderSetting(
                     IntSetting.FSR_SHARPENING_SLIDER,
                     titleId = R.string.fsr_sharpness,

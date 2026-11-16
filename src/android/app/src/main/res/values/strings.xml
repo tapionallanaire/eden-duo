@@ -551,6 +551,12 @@
     <!-- Graphics settings strings -->
     <string name="renderer_resolution">Resolution (Handheld/Docked)</string>
     <string name="renderer_vsync">VSync mode</string>
+    <string name="renderer_dlss_replacement">DLSS replacement</string>
+    <string name="renderer_dlss_replacement_description">Upscaler for Switch 2 games that use DLSS. SGSR 2 is Qualcomm\'s temporal upscaler for Adreno.</string>
+    <string name="dlss_replacement_auto">Automatic</string>
+    <string name="dlss_replacement_sgsr2">SGSR 2</string>
+    <string name="dlss_replacement_fsr3">FSR 3.1</string>
+    <string name="dlss_replacement_standin">Simple temporal</string>
     <string name="renderer_scaling_filter">Window adapting filter</string>
     <string name="fsr_sharpness">FSR/SGSR sharpness</string>
     <string name="fsr_sharpness_description">Determines how sharpened the image will look while using FSR or SGSR filters</string>

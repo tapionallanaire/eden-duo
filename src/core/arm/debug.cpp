@@ -365,4 +365,26 @@ std::vector<BacktraceEntry> GetBacktrace(const Kernel::KThread* thread) {
     return GetBacktraceFromContext(thread->GetOwnerProcess(), ctx);
 }
 
+void LogGuestThreads(Kernel::KProcess* process) {
+    if (process == nullptr) {
+        return;
+    }
+    Kernel::KScopedLightLock lock{process->GetListLock()};
+    for (const auto& thread : process->GetThreadList()) {
+        std::string frames;
+        size_t count = 0;
+        for (const auto& frame : GetBacktrace(&thread)) {
+            if (count++ == 8) {
+                break;
+            }
+            frames += std::format(" | {}+{:#x} {}", frame.module, frame.offset, frame.name);
+        }
+        LOG_INFO(Core, "Guest thread {} '{}' {} wait={} prio={} core={} cv={:#x} arb={:#x} cpu={}{}",
+                 thread.GetThreadId(), GetThreadName(&thread).value_or(""), GetThreadState(&thread),
+                 GetThreadWaitReason(&thread), thread.GetPriority(), thread.GetActiveCore(),
+                 thread.GetConditionVariableKey(), thread.GetAddressArbiterKey(), thread.GetCpuTime(),
+                 frames);
+    }
+}
+
 } // namespace Core

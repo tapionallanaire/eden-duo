@@ -535,6 +535,7 @@ class SettingsFragmentPresenter(
                 add(IntSetting.FSR_SHARPENING_SLIDER.key)
             }
             add(IntSetting.RENDERER_ANTI_ALIASING.key)
+            add(IntSetting.RENDERER_DLSS_REPLACEMENT.key)
 
             add(HeaderSetting(R.string.advanced))
 

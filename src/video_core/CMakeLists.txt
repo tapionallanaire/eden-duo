@@ -324,6 +324,8 @@ add_library(video_core STATIC
 target_sources(video_core PRIVATE
     renderer_vulkan/vk_fsr3_upscaler.cpp
     renderer_vulkan/vk_fsr3_upscaler.h
+    renderer_vulkan/vk_sgsr2_upscaler.cpp
+    renderer_vulkan/vk_sgsr2_upscaler.h
 )
 if (NOT ANDROID)
     target_sources(video_core PRIVATE

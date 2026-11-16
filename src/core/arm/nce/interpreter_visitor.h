@@ -61,6 +61,11 @@ public:
     // Loads and stores - Load/Store register pair
     bool STP_LDP_gen(Imm<2> opc, bool not_postindex, bool wback, Imm<1> L, Imm<7> imm7, Reg Rt2,
                      Reg Rn, Reg Rt) override;
+    bool ST1_sngl_1(bool Q, Imm<2> upper_opcode, bool S, Imm<2> size, Reg Rn, Vec Vt) override;
+    bool ST1_sngl_2(bool Q, Reg Rm, Imm<2> upper_opcode, bool S, Imm<2> size, Reg Rn,
+                    Vec Vt) override;
+    bool StoreSingleLane(bool wback, bool Q, std::optional<Reg> Rm, Imm<2> upper_opcode, bool S,
+                         Imm<2> size, Reg Rn, Vec Vt);
     bool STP_LDP_fpsimd(Imm<2> opc, bool not_postindex, bool wback, Imm<1> L, Imm<7> imm7, Vec Vt2,
                         Reg Rn, Vec Vt) override;
 

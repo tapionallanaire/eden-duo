@@ -457,6 +457,15 @@ struct Values {
                                                        Specialization::Default,
                                                        true,
                                                        true};
+    // What draws a game's DLSS evaluation when NVIDIA DLSS doesn't: Auto is FSR 3.1 on PC and the
+    // temporal stand-in on Android; SGSR 2 is Qualcomm's temporal upscaler for Adreno.
+    SwitchableSetting<DlssReplacement> dlss_replacement{linkage,
+                                                        DlssReplacement::Auto,
+                                                        "dlss_replacement",
+                                                        Category::Renderer,
+                                                        Specialization::Default,
+                                                        true,
+                                                        true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",

@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "common/common_types.h"
+#include "common/settings.h"
 #include "video_core/textures/texture.h"
 
 namespace VideoCommon::OcarinaUpscale {
@@ -72,6 +73,13 @@ constexpr u32 JitterPhases = 16;
         return value != nullptr && value[0] != '0';
     }();
     return requested;
+}
+
+/// Whether the camera-motion upscale runs without NVIDIA DLSS: EDEN_OOT_FSR3, or SGSR 2 chosen as
+/// the DLSS replacement (Settings dlss_replacement).
+[[nodiscard]] inline bool CameraMotionUpscaleRequested() {
+    return Fsr3Requested() ||
+           Settings::values.dlss_replacement.GetValue() == Settings::DlssReplacement::Sgsr2;
 }
 
 using Matrix = std::array<f64, 16>; ///< Row-major 4x4.

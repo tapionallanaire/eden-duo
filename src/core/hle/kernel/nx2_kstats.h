@@ -19,7 +19,9 @@
 // sampler thread logs them every 10 s per presented frame.
 namespace Kernel::Nx2KStats {
 
-inline const bool g_enabled = std::getenv("EDEN_NX2_KSTATS") != nullptr;
+/// Read again at each game load (StartGuestSampler): Android sets the environment from env.txt
+/// after the library loads.
+inline bool g_enabled = std::getenv("EDEN_NX2_KSTATS") != nullptr;
 
 inline u64 NowNs() {
     return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -73,7 +75,7 @@ inline std::atomic<u64> g_main_base{}, g_main_size{}, g_sdk_base{}, g_sdk_size{}
 /// EDEN_NX2_SVC_CALLERS=1: for every 4th waiting, yielding or signalling SVC of each core, the
 /// frame-pointer chain is walked to the first two return addresses inside main; calls and time
 /// in the call are summed per (SVC, thread, sdk return address, main return addresses).
-inline const bool g_callers_enabled = std::getenv("EDEN_NX2_SVC_CALLERS") != nullptr;
+inline bool g_callers_enabled = std::getenv("EDEN_NX2_SVC_CALLERS") != nullptr;
 using CallerKey = std::tuple<u32, u64, u64, u64, u64>;
 inline std::mutex g_callers_mutex;
 inline std::map<CallerKey, std::pair<u64, u64>> g_callers; ///< Calls, ns

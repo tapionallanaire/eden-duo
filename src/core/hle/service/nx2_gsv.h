@@ -34,6 +34,7 @@
 #include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "core/arm/debug.h"
 #include "core/core.h"
 #include "core/device_memory.h"
 #include "video_core/nx2_diag.h"
@@ -1824,6 +1825,21 @@ private:
                 LOG_INFO(Service, "nx2:vi2 present #{}: RenderDoc capture requested", m_presents);
             }
         }
+        // Diagnostic: EDEN_NX2_THREAD_DUMP=<seconds> logs every guest thread and where it waits,
+        // at most that often (from a present, so a game that slows to a crawl still logs).
+        if (static const int dump_seconds = [] {
+                const char* value = std::getenv("EDEN_NX2_THREAD_DUMP");
+                return value != nullptr ? std::atoi(value) : 0;
+            }();
+            dump_seconds > 0) {
+            static auto last_dump = std::chrono::steady_clock::time_point{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_dump >= std::chrono::seconds{dump_seconds}) {
+                last_dump = now;
+                LOG_INFO(Service, "nx2:vi2 present #{}: guest threads", m_presents);
+                Core::LogGuestThreads(system.ApplicationProcess());
+            }
+        }
         if (m_presents <= 4 || (m_presents % 600) == 0) {
             LOG_INFO(Service, "nx2:vi2 229 present #{} token={:#x} slot={} image={}", m_presents,
                      u64{w[2]} | (u64{w[3]} << 32), w[4], w[5]);
@@ -1856,6 +1872,19 @@ private:
                                    app_program_id == OcarinaOfTimeProgramId)) {
             frames_ahead = 0;
         }
+        // Fortune's Weave a frame ahead: its battle map runs the game's CPU (~12 ms, then every
+        // list at once) and the GPU thread (~21 ms) one after the other otherwise. Odin 2, moving
+        // units at 0.75x: 26 fps, a frame ahead without the catch-up wait 30.0; no one-frame
+        // glitch in 90 s recordings. Android only (the desktop holds its rate without).
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+#ifdef __ANDROID__
+        const bool fortunes_weave = app_program_id == FortunesWeaveProgramId;
+#else
+        const bool fortunes_weave = false;
+#endif
+        if (frames_ahead == -1 && fortunes_weave) {
+            frames_ahead = 1;
+        }
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
@@ -1868,7 +1897,15 @@ private:
             // commands, then crashes, with a slow GPU). Wait for this frame too then. Not when a
             // suspended channel brought us here: this frame can't finish before the present
             // returns.
-            const bool gpu_behind = frames_ahead == 1 && m_previous_fence_id < 192 &&
+            // EDEN_NX2_AHEAD_CATCH_UP=0 skips that: the game stays a frame ahead (it still waits
+            // for the previous frame) while the GPU thread is the limit.
+            static const char catch_up_setting = [] {
+                const char* value = std::getenv("EDEN_NX2_AHEAD_CATCH_UP");
+                return value == nullptr ? ' ' : value[0];
+            }();
+            const bool catch_up =
+                catch_up_setting == ' ' ? !fortunes_weave : catch_up_setting != '0';
+            const bool gpu_behind = frames_ahead == 1 && catch_up && m_previous_fence_id < 192 &&
                                     !system.Host1x().GetSyncpointManager().IsReadyGuest(
                                         m_previous_fence_id, m_previous_fence_value);
             WaitForFrame(m_previous_fence_id, m_previous_fence_value);
@@ -2125,12 +2162,18 @@ private:
 
     /// Returns presentation fences instead of blocking the present thread until the next flip.
     /// This keeps the display wait out of Wonder's CPU frame measurement.
-    /// EDEN_NX2_PRESENT_QUEUE=0 restores blocking presentation pacing.
+    /// EDEN_NX2_PRESENT_QUEUE=0 restores blocking presentation pacing, =1 forces the queue.
     static bool PresentQueue() {
-        static const bool enabled = [] {
+        static const char setting = [] {
             const char* value = std::getenv("EDEN_NX2_PRESENT_QUEUE");
-            return value == nullptr || value[0] != '0';
+            return value == nullptr ? '\0' : value[0];
         }();
+        // Fire Emblem: Fortune's Weave draws its 3D layers black (dialogue backgrounds, the
+        // character creator's models; the HUD stays) when its release fences come back early.
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+        const bool enabled = setting == '\0'
+                                 ? Settings::GetCurrentProgramID() != FortunesWeaveProgramId
+                                 : setting != '0';
         // Single core: CoreTiming counts guest ticks, not wall time, so the release timer would
         // not pace in real time, and DoSpeedLimiting (skipped with the queue) is the only limiter.
         return enabled && Settings::values.use_multi_core.GetValue();

@@ -2937,6 +2937,10 @@ bool RasterizerVulkan::SupportsGameDlssNetwork() const {
            device.CanPartitionGuestWarps();
 }
 
+bool RasterizerVulkan::CreatesGuestWidthComputeShaders() const {
+    return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+}
+
 std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst) {
     std::scoped_lock lock{texture_cache.mutex};
@@ -2963,7 +2967,7 @@ void RasterizerVulkan::NoteCameraMotionDraw() {
     if (!motion.armed) {
         return;
     }
-    if (!UsesNvidiaDlss() && !Ocarina::Fsr3Requested()) {
+    if (!UsesNvidiaDlss() && !Ocarina::CameraMotionUpscaleRequested()) {
         motion.armed = false;
         motion.jitter_active = false;
         motion.jitter_ready = false;

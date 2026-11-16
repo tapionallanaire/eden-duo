@@ -155,6 +155,7 @@ public:
                              const Tegra::Engines::Fermi2D::Config& copy_config,
                              bool done) override;
     bool SupportsGameDlssNetwork() const override;
+    bool CreatesGuestWidthComputeShaders() const override;
     bool UsesNvidiaDlss() const override;
     bool CanProbeGameDlssOutput() const override {
 #ifdef __ANDROID__
