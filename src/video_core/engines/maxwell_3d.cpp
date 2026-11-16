@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <chrono>
+#include <cstdlib>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -931,6 +933,38 @@ void Maxwell3D::ProcessQueryCondition() {
         return;
     }
     const GPUVAddr condition_address{regs.render_enable.Address()};
+    // EDEN_NX2_RENDER_CONDITION (without host conditional rendering, e.g. Turnip): n counts the
+    // condition reads (log every 5 s), a renders regardless, s reads the condition without
+    // waiting for the GPU work that writes it (its last value). Each normal read downloads the
+    // query results the GPU wrote, waiting for that GPU work.
+    static const char condition_mode = [] {
+        const char* value = std::getenv("EDEN_NX2_RENDER_CONDITION");
+        return value == nullptr ? ' ' : value[0];
+    }();
+    const auto read_condition = [&](Regs::ReportSemaphore::Compare& cmp) {
+        if (condition_mode != ' ') {
+            static u64 reads{};
+            static auto next_log = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            ++reads;
+            if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
+                next_log = now + std::chrono::seconds{5};
+                LOG_INFO(HW_GPU, "Render condition reads (last 5 s): {} (mode {})", reads,
+                         condition_mode);
+                reads = 0;
+            }
+        }
+        if (condition_mode == 's') {
+            memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        } else {
+            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+        }
+    };
+    if (condition_mode == 'a' &&
+        regs.render_enable_override == Regs::RenderEnable::Override::UseRenderEnable &&
+        regs.render_enable.mode != Regs::RenderEnable::Mode::False) {
+        execute_on = true;
+        return;
+    }
     switch (regs.render_enable_override) {
     case Regs::RenderEnable::Override::AlwaysRender:
         execute_on = true;
@@ -950,20 +984,20 @@ void Maxwell3D::ProcessQueryCondition() {
         }
         case Regs::RenderEnable::Mode::Conditional: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence != 0U && cmp.initial_mode != 0U;
             break;
         }
         case Regs::RenderEnable::Mode::IfEqual: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence == cmp.current_sequence &&
                          cmp.initial_mode == cmp.current_mode;
             break;
         }
         case Regs::RenderEnable::Mode::IfNotEqual: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence != cmp.current_sequence ||
                          cmp.initial_mode != cmp.current_mode;
             break;

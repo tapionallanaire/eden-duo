@@ -16,6 +16,8 @@
 #if defined(__ANDROID__) || defined(__linux__)
 #include <dlfcn.h>
 #include <unwind.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 #include "common/logging.h"
 #include "common/settings.h"
@@ -30,7 +32,7 @@ constexpr u64 FENCE_RESERVE_SIZE = 8;
 
 namespace {
 
-#if defined(__ANDROID__) || defined(__linux__)
+#if defined(__ANDROID__) || defined(__linux__) || defined(_WIN32)
 // EDEN_NX2_BACK_WAIT_CALLERS=1 (diagnostic): the GPU back thread's blocking waits on the host GPU
 // by call chain (module offsets, for addr2line), every 5 s. Frame-pointer samplers lose the
 // chain at MasterSemaphore::Wait; this unwinds from the unwind tables.
@@ -55,6 +57,26 @@ struct BackWaitCallers {
         int count{};
     };
 
+#ifdef _WIN32
+    static void Unwind(Capture& capture) {
+        std::array<void*, Depth + 2> frames{};
+        capture.count = CaptureStackBackTrace(0, static_cast<DWORD>(frames.size()), frames.data(),
+                                              nullptr);
+        for (int i = 0; i < capture.count; ++i) {
+            capture.pcs[i] = reinterpret_cast<uintptr_t>(frames[i]);
+        }
+    }
+
+    static std::string Name(uintptr_t pc) {
+        HMODULE module{};
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(pc), &module) != 0) {
+            return std::format(" exe+{:#x}", pc - reinterpret_cast<uintptr_t>(module));
+        }
+        return std::format(" {:#x}", pc);
+    }
+#else
     static _Unwind_Reason_Code Trace(_Unwind_Context* context, void* arg) {
         auto* capture = static_cast<Capture*>(arg);
         if (capture->count >= static_cast<int>(capture->pcs.size())) {
@@ -64,9 +86,24 @@ struct BackWaitCallers {
         return _URC_NO_REASON;
     }
 
+    static void Unwind(Capture& capture) {
+        _Unwind_Backtrace(Trace, &capture);
+    }
+
+    static std::string Name(uintptr_t pc) {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fbase != nullptr) {
+            const char* slash = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+            return std::format(" {}+{:#x}", slash ? slash + 1 : "?",
+                               pc - reinterpret_cast<uintptr_t>(info.dli_fbase));
+        }
+        return std::format(" {:#x}", pc);
+    }
+#endif
+
     void Note(u64 ns) {
         Capture capture;
-        _Unwind_Backtrace(Trace, &capture);
+        Unwind(capture);
         Chain chain{};
         // Skip this function and Wait itself.
         for (int i = 2; i < capture.count && i - 2 < Depth; ++i) {
@@ -98,14 +135,7 @@ struct BackWaitCallers {
                 if (pc == 0) {
                     break;
                 }
-                Dl_info info{};
-                if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fbase != nullptr) {
-                    const char* slash = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
-                    text += std::format(" {}+{:#x}", slash ? slash + 1 : "?",
-                                        pc - reinterpret_cast<uintptr_t>(info.dli_fbase));
-                } else {
-                    text += std::format(" {:#x}", pc);
-                }
+                text += Name(pc);
             }
         }
         LOG_INFO(Render_Vulkan, "GPU back thread waits on the host GPU (last 5 s, {} ms):{}",

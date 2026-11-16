@@ -2959,6 +2959,12 @@ void RasterizerVulkan::TickFrame() {
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
     gpu_memory->FlushCaching();
+    // EDEN_NX2_NO_HOST_CONDITIONAL=1: the path of drivers without VK_EXT_conditional_rendering
+    // (Turnip), for tests on other GPUs.
+    static const bool no_host = std::getenv("EDEN_NX2_NO_HOST_CONDITIONAL") != nullptr;
+    if (no_host) {
+        return false;
+    }
     return query_cache.AccelerateHostConditionalRendering();
 }
 
