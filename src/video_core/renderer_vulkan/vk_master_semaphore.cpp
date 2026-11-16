@@ -4,10 +4,22 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <format>
+#include <string>
 #include <thread>
 
 #include <ranges>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <dlfcn.h>
+#include <unwind.h>
+#endif
+#include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -15,6 +27,119 @@
 namespace Vulkan {
 
 constexpr u64 FENCE_RESERVE_SIZE = 8;
+
+namespace {
+
+#if defined(__ANDROID__) || defined(__linux__)
+// EDEN_NX2_BACK_WAIT_CALLERS=1 (diagnostic): the GPU back thread's blocking waits on the host GPU
+// by call chain (module offsets, for addr2line), every 5 s. Frame-pointer samplers lose the
+// chain at MasterSemaphore::Wait; this unwinds from the unwind tables.
+struct BackWaitCallers {
+    static constexpr int Depth = 8;
+    struct Chain {
+        std::array<uintptr_t, Depth> pcs{};
+        u64 count{};
+        u64 ns{};
+    };
+    std::vector<Chain> chains;
+    std::chrono::steady_clock::time_point next_report{};
+    u64 total_ns{};
+
+    static bool Enabled() {
+        static const bool enabled = std::getenv("EDEN_NX2_BACK_WAIT_CALLERS") != nullptr;
+        return enabled;
+    }
+
+    struct Capture {
+        std::array<uintptr_t, Depth + 2> pcs{};
+        int count{};
+    };
+
+    static _Unwind_Reason_Code Trace(_Unwind_Context* context, void* arg) {
+        auto* capture = static_cast<Capture*>(arg);
+        if (capture->count >= static_cast<int>(capture->pcs.size())) {
+            return _URC_END_OF_STACK;
+        }
+        capture->pcs[capture->count++] = _Unwind_GetIP(context);
+        return _URC_NO_REASON;
+    }
+
+    void Note(u64 ns) {
+        Capture capture;
+        _Unwind_Backtrace(Trace, &capture);
+        Chain chain{};
+        // Skip this function and Wait itself.
+        for (int i = 2; i < capture.count && i - 2 < Depth; ++i) {
+            chain.pcs[i - 2] = capture.pcs[i];
+        }
+        total_ns += ns;
+        auto it = std::ranges::find_if(chains, [&](const Chain& c) { return c.pcs == chain.pcs; });
+        if (it == chains.end()) {
+            chain.count = 1;
+            chain.ns = ns;
+            chains.push_back(chain);
+        } else {
+            ++it->count;
+            it->ns += ns;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (next_report.time_since_epoch().count() == 0) {
+            next_report = now + std::chrono::seconds{5};
+        }
+        if (now < next_report) {
+            return;
+        }
+        next_report = now + std::chrono::seconds{5};
+        std::ranges::sort(chains, [](const Chain& a, const Chain& b) { return a.ns > b.ns; });
+        std::string text;
+        for (size_t i = 0; i < chains.size() && i < 8; ++i) {
+            text += std::format("\n  {} waits {} ms:", chains[i].count, chains[i].ns / 1000000);
+            for (const uintptr_t pc : chains[i].pcs) {
+                if (pc == 0) {
+                    break;
+                }
+                Dl_info info{};
+                if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fbase != nullptr) {
+                    const char* slash = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+                    text += std::format(" {}+{:#x}", slash ? slash + 1 : "?",
+                                        pc - reinterpret_cast<uintptr_t>(info.dli_fbase));
+                } else {
+                    text += std::format(" {:#x}", pc);
+                }
+            }
+        }
+        LOG_INFO(Render_Vulkan, "GPU back thread waits on the host GPU (last 5 s, {} ms):{}",
+                 total_ns / 1000000, text);
+        chains.clear();
+        total_ns = 0;
+    }
+};
+
+thread_local BackWaitCallers t_back_wait_callers;
+
+class BackWaitScope {
+public:
+    BackWaitScope()
+        : active{BackWaitCallers::Enabled() && VideoCommon::GpuSplit::OnBackThread()},
+          start{active ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}} {}
+    ~BackWaitScope() {
+        if (active) {
+            t_back_wait_callers.Note(static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count()));
+        }
+    }
+
+private:
+    bool active;
+    std::chrono::steady_clock::time_point start;
+};
+#else
+struct BackWaitScope {};
+#endif
+
+} // Anonymous namespace
 
 MasterSemaphore::MasterSemaphore(const Device& device_) : device(device_) {
     if (!device.HasTimelineSemaphore()) {
@@ -83,6 +208,7 @@ void MasterSemaphore::Wait(u64 tick) {
             return;
         }
 
+        [[maybe_unused]] BackWaitScope back_wait_scope;
         u64 last_tick = gpu_tick.load(std::memory_order_relaxed);
         while (gpu_tick.load(std::memory_order_acquire) < tick) {
             gpu_tick.wait(last_tick, std::memory_order_acquire);
@@ -104,6 +230,7 @@ void MasterSemaphore::Wait(u64 tick) {
     }
 
     // If none of the above is hit, fallback to a regular wait
+    [[maybe_unused]] BackWaitScope back_wait_scope;
     try {
         while (!semaphore.Wait(tick)) {
         }
