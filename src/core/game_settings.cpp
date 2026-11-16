@@ -291,8 +291,11 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             // SGSR 2 (Qualcomm's upscaler for Adreno) draws the DLSS output the network can't run
             // here.
             DefaultForTitle(Settings::values.dlss_replacement, Settings::DlssReplacement::Sgsr2);
+            // 0.75x: with the game a frame ahead (nx2_gsv.h) the battle map is GPU-bound at 1x
+            // (Odin 2, moving units: 23-25 fps); 0.75x holds 30.
+            DefaultForTitle(Settings::values.resolution_setup, Settings::ResolutionSetup::Res3_4X);
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, "
-                           "FifoRelaxed, SGSR 2");
+                           "FifoRelaxed, SGSR 2, 0.75x");
 #else
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
 #endif

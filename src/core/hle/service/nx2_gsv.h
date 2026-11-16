@@ -1872,6 +1872,19 @@ private:
                                    app_program_id == OcarinaOfTimeProgramId)) {
             frames_ahead = 0;
         }
+        // Fortune's Weave a frame ahead: its battle map runs the game's CPU (~12 ms, then every
+        // list at once) and the GPU thread (~21 ms) one after the other otherwise. Odin 2, moving
+        // units at 0.75x: 26 fps, a frame ahead without the catch-up wait 30.0; no one-frame
+        // glitch in 90 s recordings. Android only (the desktop holds its rate without).
+        constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+#ifdef __ANDROID__
+        const bool fortunes_weave = app_program_id == FortunesWeaveProgramId;
+#else
+        const bool fortunes_weave = false;
+#endif
+        if (frames_ahead == -1 && fortunes_weave) {
+            frames_ahead = 1;
+        }
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
@@ -1886,10 +1899,12 @@ private:
             // returns.
             // EDEN_NX2_AHEAD_CATCH_UP=0 skips that: the game stays a frame ahead (it still waits
             // for the previous frame) while the GPU thread is the limit.
-            static const bool catch_up = [] {
+            static const char catch_up_setting = [] {
                 const char* value = std::getenv("EDEN_NX2_AHEAD_CATCH_UP");
-                return value == nullptr || value[0] != '0';
+                return value == nullptr ? ' ' : value[0];
             }();
+            const bool catch_up =
+                catch_up_setting == ' ' ? !fortunes_weave : catch_up_setting != '0';
             const bool gpu_behind = frames_ahead == 1 && catch_up && m_previous_fence_id < 192 &&
                                     !system.Host1x().GetSyncpointManager().IsReadyGuest(
                                         m_previous_fence_id, m_previous_fence_value);
