@@ -723,6 +723,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_user_clip_distances = device.GetMaxUserClipDistances()};
     // EDEN_NX2_NO_COOP_HMMA=1: the software HMMA (what Adreno runs) on a device that has
     // cooperative matrices, to check it against them.
+    profile.max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize();
     profile.support_cooperative_hmma = std::getenv("EDEN_NX2_NO_COOP_HMMA") == nullptr &&
                                        device.IsCooperativeHmmaSupported() &&
                                        TestCooperativeHmma(device);

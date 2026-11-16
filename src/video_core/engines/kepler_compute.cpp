@@ -949,8 +949,15 @@ bool KeplerCompute::UsesCompactTensorPrograms() const {
     // stand-in blits the network's input instead, which leaves the frame flat and far too bright
     // (Kokiri Forest median luma ~0.29 against ~0.10 with the network). The compact form calls a
     // helper that shuffles across 32 lanes, so it needs compute shaders created 32 threads wide.
+    // Donkey Kong Bananza's upscaler network too: expanded, each HMMA rebuilds its fragments with
+    // guest SHFLs, which Turnip runs as loops of rotates (one dispatch 194 ms of a 224 ms GPU frame
+    // on the Odin 2); the compact helper gathers them through workgroup memory in compute. Desktop,
+    // software path: same picture as cooperative matrices, 33.6 ms a frame against 40.8 expanded.
     constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
-    return !dlss_chain.active && Settings::GetCurrentProgramID() == OcarinaOfTimeProgramId &&
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    const u64 program_id = Settings::GetCurrentProgramID();
+    return !dlss_chain.active &&
+           (program_id == OcarinaOfTimeProgramId || program_id == DonkeyKongBananzaProgramId) &&
            rasterizer != nullptr && rasterizer->SupportsGameDlssNetwork();
 }
 

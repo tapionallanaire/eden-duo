@@ -112,6 +112,8 @@ struct Profile {
     u32 max_subgroup_size{};
 
     u32 gl_max_compute_smem_size{};
+    /// maxComputeSharedMemorySize (Vulkan); 0 when unknown
+    u32 max_compute_shared_memory_size{};
 
     /// Maxwell and earlier nVidia architectures have broken robust support
     bool has_broken_robust{};

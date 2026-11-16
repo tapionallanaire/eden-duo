@@ -26,30 +26,41 @@ constexpr u32 HMMA_LANE_WORDS = 6;
 // loop of rotates, one pass per distinct lane distance (BananaNative, docs/reference/shaders.md,
 // "Ampere HMMA and warp shuffles of agl's upscaler on Adreno"). Donkey Kong Bananza's upscaler
 // network took 194 ms of a 224 ms GPU frame on the Odin 2 (Turnip trace, 27x12 groups of 128).
-// Words are stored [word][slot], slot = SubgroupId * SubgroupSize + SubgroupLocalInvocationId.
+// Words are stored [word][LocalInvocationIndex]; a subgroup's lane L is at its first invocation's
+// index + L (LocalInvocationIndex - SubgroupLocalInvocationId), so the lanes are addressed as the
+// shuffles addressed them. SubgroupId * SubgroupSize + lane broke the picture on Turnip.
 // EDEN_NX2_HMMA_LDS=0 keeps the shuffles.
 struct HmmaScratch {
     Id variable;
     Id word_pointer;
     bool block;
     u32 slots;
-    Id subgroup_id;
-    Id subgroup_size;
+    Id local_invocation_index;
 };
 
-bool UsesHmmaScratch(const IR::Program& program) {
+u32 HmmaScratchSlots(const IR::Program& program) {
+    const auto& size = program.workgroup_size;
+    return size[0] * size[1] * size[2];
+}
+
+// Only where the guest's shared memory and the scratch fit the device together (Adreno: 32 KiB);
+// past the limit the driver may not refuse the pipeline but run it wrong.
+bool UsesHmmaScratch(const EmitContext& ctx, const IR::Program& program) {
     static const bool enabled = [] {
         const char* value = std::getenv("EDEN_NX2_HMMA_LDS");
         return value == nullptr || value[0] != '0';
     }();
-    return enabled && program.stage == Stage::Compute;
+    if (!enabled || program.stage != Stage::Compute) {
+        return false;
+    }
+    const u32 limit = ctx.profile.max_compute_shared_memory_size;
+    const u32 needed = Common::AlignUp(program.shared_memory_size, 16U) +
+                       HmmaScratchSlots(program) * HMMA_LANE_WORDS * 4;
+    return limit == 0 || needed <= limit;
 }
 
 HmmaScratch DefineHmmaScratch(EmitContext& ctx, const IR::Program& program) {
-    const auto& size = program.workgroup_size;
-    // NumSubgroups * SubgroupSize <= the workgroup rounded up to a subgroup, and subgroups are at
-    // most 128 lanes on the hosts this runs on.
-    const u32 slots = Common::AlignUp(size[0] * size[1] * size[2], 128U);
+    const u32 slots = HmmaScratchSlots(program);
     const Id array_type = ctx.TypeArray(ctx.U32[1], ctx.Const(slots * HMMA_LANE_WORDS));
     HmmaScratch scratch{};
     scratch.slots = slots;
@@ -78,8 +89,7 @@ HmmaScratch DefineHmmaScratch(EmitContext& ctx, const IR::Program& program) {
         ctx.interfaces.push_back(variable);
         return variable;
     };
-    scratch.subgroup_id = builtin(spv::BuiltIn::SubgroupId);
-    scratch.subgroup_size = builtin(spv::BuiltIn::SubgroupSize);
+    scratch.local_invocation_index = builtin(spv::BuiltIn::LocalInvocationIndex);
     return scratch;
 }
 
@@ -186,7 +196,7 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
     std::optional<HmmaScratch> scratch;
     for (u32 variant = 0; variant < 2; ++variant) {
         if (!needed[variant]) continue;
-        if (!scratch && UsesHmmaScratch(program)) {
+        if (!scratch && UsesHmmaScratch(ctx, program)) {
             scratch = DefineHmmaScratch(ctx, program);
         }
         ctx.AddCapability(spv::Capability::GroupNonUniform);
@@ -266,9 +276,8 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
                                                       spv::MemorySemanticsMask::WorkgroupMemory)));
         };
         if (scratch) {
-            subgroup_base = ctx.OpIMul(u32ty, ctx.OpLoad(u32ty, scratch->subgroup_id),
-                                       ctx.OpLoad(u32ty, scratch->subgroup_size));
-            const Id slot = add(subgroup_base, lane);
+            const Id slot = ctx.OpLoad(u32ty, scratch->local_invocation_index);
+            subgroup_base = ctx.OpISub(u32ty, slot, lane);
             for (u32 word = 0; word < HMMA_LANE_WORDS; ++word) {
                 ctx.OpStore(scratch_pointer(imm(word), slot), inputs[word]);
             }
