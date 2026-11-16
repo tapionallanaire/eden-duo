@@ -147,10 +147,19 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
     eager_publish = Nx2Perf::On(Nx2Perf::Opt::EagerPublish);
-#ifdef ARCHITECTURE_x86_64
-    // Front macros run compiled (macro_turing_jit.h) only.
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
+    // Front macros run compiled only.
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
+#ifdef ARCHITECTURE_arm64
+    // A64: Donkey Kong Bananza by default (EDEN_NX2_MME_JIT=1 for others). With the macros on
+    // the back, each macro reading GPU-written arguments downloads them and waits for the GPU
+    // (~35 a frame there, ~17 % of the back thread on an Odin 2).
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    const bool jit_default = Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId;
+    front_macros = mode == '2' && (jit == nullptr ? jit_default : jit[0] != '0');
+#else
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
+#endif
 #endif
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");

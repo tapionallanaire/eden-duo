@@ -217,6 +217,9 @@ char WriterWaitSetting() {
         const char* value = std::getenv("EDEN_NX2_WRITER_WAIT");
         return value == nullptr ? '\0' : value[0];
     }();
+    if (setting == '0') {
+        return '\0'; // =0: no setting, not even a title's default
+    }
     return setting == '\0' && BananzaListDefaults() ? 's' : setting;
 }
 

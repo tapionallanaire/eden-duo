@@ -37,6 +37,8 @@
 #include "video_core/ocarina_upscale.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 #include "video_core/rasterizer_interface.h"
 #include "video_core/texture_cache/image_info.h"
@@ -205,7 +207,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             CallMethod(system, address, value, true);
             return true;
         };
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
         // Compiled macro code, as for 3D macros (macro_turing_jit.h); EDEN_NX2_MME_JIT=0 off.
         static const bool use_jit = [] {
             const char* value = std::getenv("EDEN_NX2_MME_JIT");
@@ -2212,7 +2214,7 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs) {
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
     const auto positions = FrontMacroPositions(fs);
     const u32 start = positions[((*fs.executing_macro - 0xe00) / 2) % positions.size()];
     fs.executing_macro.reset();
