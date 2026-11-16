@@ -91,6 +91,9 @@ public:
     HaltReason StepThread(Kernel::KThread* thread) override;
 
     void GetContext(Kernel::Svc::ThreadContext& ctx) const override;
+    u64 PeekPC() const override {
+        return m_jit ? m_jit->GetPC() : 0;
+    }
     void SetContext(const Kernel::Svc::ThreadContext& ctx) override;
     void SetTpidrroEl0(u64 value) override;
 

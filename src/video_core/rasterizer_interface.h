@@ -271,6 +271,12 @@ public:
         return false;
     }
 
+    /// Whether compute shaders are created 32 threads wide (not partitioned out of a wider
+    /// subgroup). Fortune's Weave's full DLSS network needs it; Ocarina's compact one does not.
+    [[nodiscard]] virtual bool CreatesGuestWidthComputeShaders() const {
+        return false;
+    }
+
     /// Whether NVIDIA DLSS (the "Use NVIDIA DLSS" setting) would draw a game's DLSS evaluation.
     [[nodiscard]] virtual bool UsesNvidiaDlss() const {
         return false;

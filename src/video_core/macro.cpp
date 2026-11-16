@@ -18,6 +18,8 @@
 #ifdef ARCHITECTURE_x86_64
 #include "common/x64/xbyak.h"
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 
 #include "common/assert.h"
@@ -1327,6 +1329,123 @@ Macro::Opcode MacroJITx64Impl::GetOpCode() const {
 } // Anonymous namespace
 #endif
 
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
+// EDEN_NX2_MME_JIT_VERIFY=1: every macro call runs in the interpreter, whose effects are the ones
+// applied (`read`, `emit`, the data RAM), and then compiled on copies of its inputs: the compiled
+// code gets the interpreter's register reads and DMA results back and its emits are only
+// recorded. Calls whose outcome differs (success, error, FIFO words consumed, emits, register
+// reads, data RAM) are logged, the first 4 of each macro and then 1 in 4096.
+template <typename Read, typename Emit>
+TuringMacroInterpreter::Result VerifyMacroJit(TuringMacroJit& jit, TuringMacroInterpreter& interpreter,
+                                              std::span<const u32> code, u32 start,
+                                              std::span<const u32> parameters,
+                                              std::vector<u32>& fifo, Read&& read, Emit&& emit) {
+    using Pairs = std::vector<std::pair<u32, u32>>;
+    auto& dram = *interpreter.active_dram;
+    const auto dram_before = dram;
+    // What a DMA read emit changed: data RAM words (MME_DMA_READ), FIFO words (_FIFOED).
+    struct DmaEffect {
+        Pairs dram_writes;
+        std::vector<u32> fifo_words;
+    };
+    std::vector<DmaEffect> dma;
+    Pairs reads, emits;
+    fifo.assign(parameters.begin(), parameters.end());
+    const auto result = interpreter.Execute(
+        code, start, fifo,
+        [&](u32 address) {
+            const u32 value = read(address);
+            reads.emplace_back(address, value);
+            return value;
+        },
+        [&](u32 address, u32 value) {
+            emits.emplace_back(address, value);
+            if (address != 0x157 && address != 0x158) {
+                return emit(address, value);
+            }
+            const auto dram_then = dram;
+            const size_t fifo_then = fifo.size();
+            const bool ok = emit(address, value);
+            DmaEffect& effect = dma.emplace_back();
+            for (u32 i = 0; i < dram.size(); ++i) {
+                if (dram[i] != dram_then[i]) effect.dram_writes.emplace_back(i, dram[i]);
+            }
+            effect.fifo_words.assign(fifo.begin() + static_cast<std::ptrdiff_t>(fifo_then), fifo.end());
+            return ok;
+        });
+
+    auto jit_dram = dram_before;
+    std::vector<u32> jit_fifo(parameters.begin(), parameters.end());
+    Pairs jit_reads, jit_emits;
+    size_t dma_index = 0;
+    const auto jit_result = jit.Execute(
+        start, jit_fifo, std::span<u32>{jit_dram},
+        [&](u32 address) {
+            const size_t index = jit_reads.size();
+            const u32 value = index < reads.size() && reads[index].first == address ? reads[index].second
+                                                                                      : read(address);
+            jit_reads.emplace_back(address, value);
+            return value;
+        },
+        [&](u32 address, u32 value) {
+            jit_emits.emplace_back(address, value);
+            if ((address == 0x157 || address == 0x158) && dma_index < dma.size()) {
+                const DmaEffect& effect = dma[dma_index++];
+                for (const auto& [index, word] : effect.dram_writes) jit_dram[index] = word;
+                jit_fifo.insert(jit_fifo.end(), effect.fifo_words.begin(), effect.fifo_words.end());
+            }
+            return address < 0xe00;
+        });
+
+    const bool same = result.success == jit_result.success &&
+                      (result.success ? result.consumed == jit_result.consumed && emits == jit_emits &&
+                                            reads == jit_reads && dram == jit_dram
+                                      : result.error == jit_result.error);
+    static u64 calls{}, mismatches{};
+    if (++calls % (1U << 20) == 0) {
+        LOG_INFO(HW_GPU, "MME JIT verify: {} calls, {} mismatches", calls, mismatches);
+    }
+    if (same) {
+        return result;
+    }
+    ++mismatches;
+    static std::unordered_map<u32, u32> logged_per_start;
+    if (++logged_per_start[start] > 4 && mismatches % 4096 != 1) {
+        return result;
+    }
+    const auto pairs = [](const Pairs& list) {
+        std::string text;
+        for (size_t i = 0; i < list.size() && i < 48; ++i) {
+            text += std::format("{}{:#x}={:#x}", i ? " " : "", list[i].first, list[i].second);
+        }
+        return list.size() > 48 ? text + std::format(" (+{})", list.size() - 48) : text;
+    };
+    const auto ram_writes = [&](const auto& after) {
+        Pairs writes;
+        for (u32 i = 0; i < after.size(); ++i) {
+            if (after[i] != dram_before[i]) writes.emplace_back(i, after[i]);
+        }
+        return pairs(writes);
+    };
+    const auto outcome = [](bool success, std::string_view error, size_t consumed) {
+        return std::format("{} consumed={}", success ? std::string_view{"ok"} : error, consumed);
+    };
+    std::string parameter_text;
+    for (size_t i = 0; i < parameters.size() && i < 32; ++i) {
+        parameter_text += std::format("{}{:#x}", i ? "," : "", parameters[i]);
+    }
+    LOG_ERROR(HW_GPU,
+              "MME JIT verify mismatch #{} (of {} calls): start={:#x} parameters({})=[{}]\n"
+              "  interpreter: {}; emits [{}]; reads [{}]; data RAM writes [{}]\n"
+              "  jit:         {}; emits [{}]; reads [{}]; data RAM writes [{}]",
+              mismatches, calls, start, parameters.size(), parameter_text,
+              outcome(result.success, result.error, result.consumed), pairs(emits), pairs(reads),
+              ram_writes(dram), outcome(jit_result.success, jit_result.error, jit_result.consumed),
+              pairs(jit_emits), pairs(jit_reads), ram_writes(jit_dram));
+    return result;
+}
+#endif
+
 static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
     const auto dump_dir{Common::FS::GetEdenPath(Common::FS::EdenPath::DumpDir)};
     if (!Common::FS::CreateDir(dump_dir)) {
@@ -1475,9 +1594,10 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 }
                 return true;
             };
-#ifdef ARCHITECTURE_x86_64
-        // Macro code runs compiled to x86-64 (macro_turing_jit.h) instead of through the memo
-        // and the interpreter; EDEN_NX2_MME_JIT=0 goes back to those.
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64)
+        // Macro code runs compiled to x86-64 or ARM64 (macro_turing_jit.h,
+        // macro_turing_jit_a64.h) instead of through the memo and the interpreter;
+        // EDEN_NX2_MME_JIT=0 goes back to those.
         static const bool use_jit = [] {
             const char* value = std::getenv("EDEN_NX2_MME_JIT");
             return value == nullptr || value[0] != '0';
@@ -1487,6 +1607,24 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 native_jit = std::make_shared<TuringMacroJit>();
             }
             native_jit->Prepare(native_code, native_code_generation);
+            static const bool verify = [] {
+                const char* value = std::getenv("EDEN_NX2_MME_JIT_VERIFY");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (verify) [[unlikely]] {
+                const auto result = VerifyMacroJit(
+                    *native_jit, native_interpreter, native_code, method, parameters, fifo,
+                    [&](u32 address) {
+                        return address < Maxwell3D::Regs::NUM_REGS ? maxwell3d.GetRegisterValue(address) : 0U;
+                    },
+                    emit);
+                if (!result.success) {
+                    native_execution_failed = true;
+                    LOG_ERROR(HW_GPU, "Native MME (JIT verify, interpreter) failed: start={:#x}, pc={:#x}, consumed={}/{}, error={}",
+                              method, result.pc, result.consumed, parameters.size(), result.error);
+                }
+                return;
+            }
             fifo.assign(parameters.begin(), parameters.end());
             const auto result = native_jit->Execute(
                 method, fifo, std::span<u32>{*native_interpreter.active_dram},

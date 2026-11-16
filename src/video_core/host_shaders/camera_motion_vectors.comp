@@ -5,12 +5,14 @@
 
 // Motion vectors from the camera alone, for an upscaler a game doesn't give any: each pixel's
 // depth puts it back in the world, the previous frame's camera puts it on that frame's screen.
-// Writes the offset to the previous frame's position in render pixels.
+// Writes the offset to the previous frame's position in render pixels, and the depth reversed
+// (1 - depth) for FSR 3.1, whose shaders are built for reversed depth.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding = 0) uniform sampler2D depth_image;
 layout(binding = 1, rg16f) uniform writeonly image2D motion_image;
+layout(binding = 2, r32f) uniform writeonly image2D reversed_depth_image;
 
 layout(push_constant) uniform PushConstants {
     // (pixel x, pixel y, device depth, 1) of this frame to the previous frame's pixel.
@@ -32,4 +34,5 @@ void main() {
         motion = previous.xy / previous.w - position;
     }
     imageStore(motion_image, pixel, vec4(motion, 0.0, 0.0));
+    imageStore(reversed_depth_image, pixel, vec4(1.0 - depth));
 }

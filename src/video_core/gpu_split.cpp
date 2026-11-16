@@ -643,7 +643,23 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     on_back_thread = true;
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
-    Common::SetCurrentThreadToPerformanceCores();
+    // EDEN_NX2_BACK_CORE=critical|prime: let the back thread use the prime core too, or only it.
+    // Odin 2, Ocarina with the write barrier: the back thread sets the frame (~35 ms of CPU) on
+    // cores 3-6 next to the guest threads while the prime core stays nearly idle.
+    // Fire Emblem: Fortune's Weave's battle map: ~32 ms of back CPU a frame on cores 3-6, 27 ms on
+    // the critical cores (20 -> 22 fps, Odin 2); the prime core alone is slower (the front shares it).
+    constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+    const char* core = std::getenv("EDEN_NX2_BACK_CORE");
+    if (core == nullptr && Settings::GetCurrentProgramID() == FortunesWeaveProgramId) {
+        core = "critical";
+    }
+    if (core && std::strcmp(core, "prime") == 0) {
+        Common::SetCurrentThreadToPrimeCore();
+    } else if (core && std::strcmp(core, "critical") == 0) {
+        Common::SetCurrentThreadToCriticalCores();
+    } else {
+        Common::SetCurrentThreadToPerformanceCores();
+    }
     system->RegisterHostThread();
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);

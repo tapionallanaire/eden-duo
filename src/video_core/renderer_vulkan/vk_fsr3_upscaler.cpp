@@ -300,7 +300,9 @@ Fsr3Upscaler::Fsr3Upscaler(const Device& device_, Scheduler& scheduler_,
 Fsr3Upscaler::~Fsr3Upscaler() = default;
 
 bool Fsr3Upscaler::IsSupported(const Device& device) {
-    if (!device.IsStorageImageExtendedFormatsSupported()) {
+    // The accumulate and RCAS passes load storage images without a format.
+    if (!device.IsStorageImageExtendedFormatsSupported() ||
+        !device.IsFormatlessImageLoadSupported()) {
         return false;
     }
     constexpr VkFormatFeatureFlags storage =

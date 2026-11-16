@@ -233,8 +233,22 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
         ++refused;
         // An instruction the interpreter does not run (an exclusive store, say): the page-wide
         // path, which lets the instruction run again natively.
-        if (memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE, true) ==
-            Memory::NCEAccessFaultAction::Retry) {
+        const auto page_wide_start = std::chrono::steady_clock::now();
+        const auto page_wide = memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE, true);
+        {
+            // Diagnostic: the slow ones (they wait for the page's GPU-written bytes).
+            static std::atomic<u32> slow_logged{};
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - page_wide_start)
+                                .count();
+            if (us >= 1000 && slow_logged.fetch_add(1) < 60) {
+                const u32 word = *reinterpret_cast<const u32*>(instruction_ctx.pc);
+                LOG_INFO(Core_ARM, "NCE page-wide fault: {} us, addr {:#x} (si {:#x}), pc {:#x} {:08x}",
+                         us, GetInteger(addr), reinterpret_cast<u64>(info->si_addr),
+                         instruction_ctx.pc, word);
+            }
+        }
+        if (page_wide == Memory::NCEAccessFaultAction::Retry) {
             return true;
         }
         return HandleFailedGuestFault(guest_ctx, raw_info, raw_context);

@@ -1,0 +1,129 @@
+//============================================================================================================
+//
+//
+//                  Copyright (c) 2024, Qualcomm Innovation Center, Inc. All rights reserved.
+//                              SPDX-License-Identifier: BSD-3-Clause
+//
+//============================================================================================================
+
+// Snapdragon Game Super Resolution 2, 2-pass compute variant (github.com/SnapdragonStudios/snapdragon-gsr,
+// sgsr/v2/include/glsl_2_pass_cs), adapted for Eden's DLSS replacement: separate textures and
+// samplers (bindings 1000/1001, as the FSR 3.1 passes), reversed depth, and the game's own motion
+// vectors (no camera matrices), scaled by params.motionScale.
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 1) uniform texture2D InputColor;
+layout(binding = 2) uniform texture2D InputDepth;
+layout(binding = 3) uniform texture2D InputVelocity;
+layout(binding = 4, rgba16f) uniform writeonly image2D MotionDepthClipAlphaBuffer;
+layout(binding = 5, r32ui) uniform writeonly uimage2D YCoCgColor;
+layout(binding = 1000) uniform sampler PointSampler;
+layout(binding = 1001) uniform sampler LinearSampler;
+
+layout(std140, binding = 0) uniform Params
+{
+    uvec2                renderSize;
+    uvec2                displaySize;
+    vec2                 renderSizeRcp;
+    vec2                 displaySizeRcp;
+    vec2                 jitterOffset;
+    vec2                 motionScale;    // Eden: game motion vector -> SGSR motion (NDC, current - previous)
+    float                preExposure;
+    float                cameraFovAngleHor;
+    float                cameraNear;
+    float                MinLerpContribution;
+    uint                 sameCameraFrmNum;
+    uint                 reset;
+} params;
+
+
+void main()
+{
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, params.renderSize))) {
+        return;
+    }
+    float Exposure_co_rcp = params.preExposure;
+    vec2 ViewportSizeInverse = params.renderSizeRcp;
+    uvec2 InputPos = gl_GlobalInvocationID.xy;
+
+    vec2 gatherCoord = vec2(gl_GlobalInvocationID.xy) * ViewportSizeInverse;
+    vec2 ViewportUV = gatherCoord + vec2(0.5) * ViewportSizeInverse;
+
+    //derived from ffx_fsr2_reconstruct_dilated_velocity_and_previous_depth.h
+    //FindNearestDepth
+
+    vec4 topleft = 1.0 - textureGather(sampler2D(InputDepth, PointSampler), gatherCoord, 0);
+    vec2 v10 = vec2(ViewportSizeInverse.x*2.0, 0.0);
+    vec4 topRight = 1.0 - textureGather(sampler2D(InputDepth, PointSampler),(gatherCoord+v10), 0);
+    vec2 v12 = vec2(0.0, ViewportSizeInverse.y*2.0);
+	vec4 bottomLeft = 1.0 - textureGather(sampler2D(InputDepth, PointSampler),(gatherCoord+v12), 0);
+	vec2 v14 = vec2(ViewportSizeInverse.x*2.0, ViewportSizeInverse.y*2.0);
+	vec4 bottomRight = 1.0 - textureGather(sampler2D(InputDepth, PointSampler),(gatherCoord+v14), 0);
+	float maxC = min(min(min(topleft.y,topRight.x),bottomLeft.z),bottomRight.w);
+	float topleft4 = min(min(min(topleft.y,topleft.x),topleft.z),topleft.w);
+	float topLeftMax9 = min(bottomLeft.w,min(min(maxC,topleft4),topRight.w));
+
+    float depthclip = 0.0;
+    if (maxC < 1.0 - 1.0e-05f)
+    {
+        float topRight4 = min(min(min(topRight.y,topRight.x),topRight.z),topRight.w);
+        float bottomLeft4 = min(min(min(bottomLeft.y,bottomLeft.x),bottomLeft.z),bottomLeft.w);
+        float bottomRight4 = min(min(min(bottomRight.y,bottomRight.x),bottomRight.z),bottomRight.w);
+
+        float Wdepth = 0.0;
+        float Ksep = 1.37e-05f;
+        float Kfov = params.cameraFovAngleHor;
+        float diagonal_length = length(vec2(params.renderSize));
+        float Ksep_Kfov_diagonal = Ksep * Kfov * diagonal_length;
+
+		float Depthsep = Ksep_Kfov_diagonal * (1.0 - maxC);
+		float EPSILON = 1.19e-07f;
+		Wdepth += clamp((Depthsep / (abs(maxC - topleft4) + EPSILON)), 0.0, 1.0);
+		Wdepth += clamp((Depthsep / (abs(maxC - topRight4) + EPSILON)), 0.0, 1.0);
+		Wdepth += clamp((Depthsep / (abs(maxC - bottomLeft4) + EPSILON)), 0.0, 1.0);
+		Wdepth += clamp((Depthsep / (abs(maxC - bottomRight4) + EPSILON)), 0.0, 1.0);
+        depthclip = clamp(1.0f - Wdepth*0.25, 0.0, 1.0);
+    }
+
+    //refer to ue/fsr2 PostProcessFFX_FSR2ConvertVelocity.usf, and using nearest depth for dilated motion
+
+    // The game's motion vectors (render-size, from the current to the previous frame), as SGSR's
+    // current-minus-previous NDC motion.
+    vec2 motion = texelFetch(sampler2D(InputVelocity, PointSampler), ivec2(gl_GlobalInvocationID.xy), 0).xy *
+                  params.motionScale;
+    if (params.reset != 0u) {
+        motion = vec2(0.0);
+    }
+
+    ////////////compute luma
+    vec3 Colorrgb = texelFetch(sampler2D(InputColor, PointSampler), ivec2(InputPos), 0).xyz;
+    // A pixel the game left infinite or NaN (Fortune's Weave's first unit selection effect) would
+    // pack to garbage and, through the inverse tonemap and history, flash white for several frames.
+    // Checked on the bits: drivers may fold isnan/isinf away.
+    if (any(equal(floatBitsToUint(Colorrgb) & uvec3(0x7f800000u), uvec3(0x7f800000u)))) {
+        Colorrgb = vec3(0.0);
+    }
+    Colorrgb = max(Colorrgb, vec3(0.0));
+
+    ///simple tonemap
+    float ColorMax = max(max(Colorrgb.x, Colorrgb.y), Colorrgb.z) + Exposure_co_rcp;
+    Colorrgb /= vec3(ColorMax);
+
+    vec3 Colorycocg;
+    Colorycocg.x = 0.25 * (Colorrgb.x + 2.0 * Colorrgb.y + Colorrgb.z);
+    Colorycocg.y = clamp(0.5 * Colorrgb.x + 0.5 - 0.5 * Colorrgb.z, 0.0, 1.0);
+    Colorycocg.z = clamp(Colorycocg.x + Colorycocg.y - Colorrgb.x, 0.0, 1.0);
+
+    //now color YCoCG all in the range of [0,1]
+    uint x11 = uint(Colorycocg.x * 2047.5);
+    uint y11 = uint(Colorycocg.y * 2047.5);
+    uint z10 = uint(Colorycocg.z * 1023.5);
+
+    imageStore(YCoCgColor, ivec2(gl_GlobalInvocationID.xy), uvec4(((x11 << 21u) | (y11 << 10u)) | z10));
+
+    vec4 v29 = vec4(motion, depthclip, ColorMax);
+    imageStore(MotionDepthClipAlphaBuffer, ivec2(gl_GlobalInvocationID.xy), v29);
+}

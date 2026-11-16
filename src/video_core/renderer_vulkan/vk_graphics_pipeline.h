@@ -278,6 +278,14 @@ public:
         return key;
     }
 
+    /// EDEN_NX2_PIPELINE_STATS=<hex key>[,...]|all: logs the driver's statistics of each stage
+    /// (VK_KHR_pipeline_executable_properties) once, the first time a pipeline with one of these
+    /// native program keys draws. native_keys: ShaderCache::GraphicsNativeKeys of its stages.
+    void LogExecutableStatistics(const std::array<u64, 6>& native_keys);
+    [[nodiscard]] bool StatisticsLogged() const noexcept {
+        return statistics_logged.load(std::memory_order_relaxed);
+    }
+
     /// Forgets the transitions, which may point to pipelines the cache evicted.
     void ClearTransitions() noexcept {
         transitions.clear();
@@ -373,6 +381,7 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    std::atomic_bool statistics_logged{false};
     bool is_template{};
     /// The build runs once, on whichever thread claims it first.
     std::function<void()> build_func;

@@ -15,9 +15,11 @@ class MemoryAllocator;
 
 /// Motion vectors from the camera alone (host_shaders/camera_motion_vectors.comp), for games that
 /// give an upscaler none: render-pixel offsets to the previous frame, RG16F in the GENERAL layout.
+/// Also stores the depth reversed (1 - depth, R32F) for FSR 3.1.
 class CameraMotionPass final : public ComputePass {
 public:
     static constexpr VkFormat FORMAT = VK_FORMAT_R16G16_SFLOAT;
+    static constexpr VkFormat REVERSED_DEPTH_FORMAT = VK_FORMAT_R32_SFLOAT;
 
     explicit CameraMotionPass(const Device& device, Scheduler& scheduler,
                               DescriptorPool& descriptor_pool,
@@ -36,6 +38,9 @@ public:
     [[nodiscard]] VkImageView View() const noexcept {
         return *view;
     }
+    [[nodiscard]] VkImageView ReversedDepthView() const noexcept {
+        return *reversed_depth_view;
+    }
 
 private:
     void CreateImage(VkExtent2D size);
@@ -46,6 +51,8 @@ private:
     vk::Sampler sampler;
     vk::Image image;
     vk::ImageView view;
+    vk::Image reversed_depth_image;
+    vk::ImageView reversed_depth_view;
     VkExtent2D extent{};
 };
 
