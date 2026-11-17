@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/nx2_timeline.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -545,7 +546,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     draws_since_submit = 0;
 
     const u64 signal_value = master_semaphore->NextTick();
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
+    // EDEN_NX2_TIMELINE: how long a submission waits between the recording thread asking for it
+    // and the worker handing it to the driver, and how long the driver call takes.
+    const auto requested = std::chrono::steady_clock::now();
+    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value, requested,
                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
         static constexpr VkMemoryBarrier WRITE_BARRIER{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -569,8 +573,27 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         }
 
         std::scoped_lock lock{submit_mutex};
-        switch (const VkResult result = master_semaphore->SubmitQueue(
-                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value)) {
+        const auto submit_start = std::chrono::steady_clock::now();
+        const VkResult submit_result = master_semaphore->SubmitQueue(
+            cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value);
+        if (VideoCommon::Nx2Timeline::Enabled()) {
+            static u64 count, lag_ns, lag_max_ns, call_ns;
+            static auto reported = submit_start;
+            const auto done = std::chrono::steady_clock::now();
+            const u64 lag = static_cast<u64>((submit_start - requested).count());
+            ++count;
+            lag_ns += lag;
+            lag_max_ns = (std::max)(lag_max_ns, lag);
+            call_ns += static_cast<u64>((done - submit_start).count());
+            if (done - reported >= std::chrono::seconds{5}) {
+                LOG_INFO(Render_Vulkan,
+                         "Submits (last 5 s): {}, worker lag avg {} us max {} us, driver call avg {} us",
+                         count, lag_ns / count / 1000, lag_max_ns / 1000, call_ns / count / 1000);
+                count = lag_ns = lag_max_ns = call_ns = 0;
+                reported = done;
+            }
+        }
+        switch (const VkResult result = submit_result) {
         case VK_SUCCESS:
             // Log successful queue submission
             if (GPU::Logging::IsActive() &&
