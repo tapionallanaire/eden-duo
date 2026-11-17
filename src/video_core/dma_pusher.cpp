@@ -252,6 +252,10 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 {
     constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
     keep_submit_copies = system.GetApplicationProcessProgramID() == FortunesWeaveProgramId;
+    // EDEN_NX2_KEEP_SUBMIT_COPIES=1|0: every title runs its submit-time copies only, or none does.
+    if (const char* value = std::getenv("EDEN_NX2_KEEP_SUBMIT_COPIES"); value != nullptr) {
+        keep_submit_copies = value[0] == '1';
+    }
 }
 
 DmaPusher::~DmaPusher() = default;
