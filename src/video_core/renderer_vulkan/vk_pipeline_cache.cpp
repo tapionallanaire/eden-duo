@@ -2593,6 +2593,17 @@ void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
                                      const VideoCore::DiskResourceLoadCallback& callback,
                                      const RecordedPairs& recorded) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
+#ifndef __ANDROID__
+    // The desktop has no "compile first?" prompt, and this is minutes of builds at a title's
+    // first boot (Donkey Kong Bananza: 49,009 pairs, 155 s): only with EDEN_NX2_SHADER_PAIRS=1.
+    static const bool pairs_on = [] {
+        const char* value = std::getenv("EDEN_NX2_SHADER_PAIRS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!pairs_on) {
+        return;
+    }
+#endif
     const auto file{ShaderWarm::PairsWarmPath(title_id)};
     const auto stamp{ShaderWarm::CurrentWarmStamp(file, 0, device.GetDriverVersion(),
                                                   device.GetDeviceID(), CACHE_VERSION)};
