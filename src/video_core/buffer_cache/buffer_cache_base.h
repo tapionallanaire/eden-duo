@@ -677,6 +677,8 @@ public:
     };
     std::array<std::array<BindMemo, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES> uniform_bind_memo{};
     std::array<std::array<BindMemo, NUM_STORAGE_BUFFERS>, NUM_STAGES> storage_bind_memo{};
+    /// Nx2Perf geometry_memo: the same for each vertex stream (touch and sync only).
+    std::array<BindMemo, NUM_VERTEX_BUFFERS> vertex_bind_memo{};
     u64 bind_memo_mismatches = 0;
     bool bind_memo_would_hit = false; ///< Verify: the last BindMemoHit would have skipped the sync
     u64 bind_memo_hit_uploads = 0;
@@ -826,9 +828,10 @@ private:
     /// The CPU epoch a bind memo of this range goes by: the tracker's global one, or with Nx2Perf
     /// region_epoch that of the range's regions.
     [[nodiscard]] u64 BindMemoEpoch(DAddr device_addr, u32 size) const;
+    [[nodiscard]] static bool GeometryMemoEnabled();
     [[nodiscard]] bool BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId buffer_id,
                                    DAddr device_addr, u32 size, u32 offset, const char* kind,
-                                   size_t stage, u32 index);
+                                   size_t stage, u32 index, bool geometry = false);
     void BindMemoNote(BindMemo& memo, BufferId buffer_id, DAddr device_addr, u32 size,
                       u64 cpu_epoch_before);
     void BindMemoNoteUsage(BindMemo& memo);

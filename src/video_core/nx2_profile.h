@@ -309,6 +309,8 @@ enum class Counter : u32 {
     DownloadAgeNone,
     BindMemoHits,        ///< Nx2Perf bind_memo: binds that skipped touch, sync and usage
     BindMemoMisses,      ///< Nx2Perf bind_memo: binds that took the full path
+    GeometryMemoHits,    ///< Nx2Perf geometry_memo: vertex streams that skipped touch and sync
+    GeometryMemoMisses,  ///< Nx2Perf geometry_memo: vertex streams that took the full path
     DmaReadsWriterSet,   ///< Of DmaReadsEarly: read with proven draws still queued (MacroReadWriterSet)
     DmaReadsWriterSetFallback, ///< Drained instead: a queued proven draw's proof no longer held
     DmaReadsOverlayNoWait, ///< Of DmaReadsEarly: constant buffer overlay reads with no wait
@@ -652,6 +654,11 @@ inline void Report(const char* thread_name = "GPU thread") {
         line += std::format(" | bind memo {:.0f} hits, {:.0f} misses",
                             static_cast<double>(data.counters[static_cast<size_t>(Counter::BindMemoHits)]) * 1e9 / window,
                             static_cast<double>(data.counters[static_cast<size_t>(Counter::BindMemoMisses)]) * 1e9 / window);
+    }
+    if (data.counters[static_cast<size_t>(Counter::GeometryMemoHits)] != 0 || data.counters[static_cast<size_t>(Counter::GeometryMemoMisses)] != 0) {
+        line += std::format(" | geometry memo {:.0f} hits, {:.0f} misses",
+                            static_cast<double>(data.counters[static_cast<size_t>(Counter::GeometryMemoHits)]) * 1e9 / window,
+                            static_cast<double>(data.counters[static_cast<size_t>(Counter::GeometryMemoMisses)]) * 1e9 / window);
     }
     line += std::format(" | MME DMA reads past proven draws {:.0f} ({:.0f} drained: proof changed)",
                         static_cast<double>(data.counters[static_cast<size_t>(Counter::DmaReadsWriterSet)]) * 1e9 / window,

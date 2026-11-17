@@ -1606,8 +1606,23 @@ void BufferCache<P>::BindHostVertexBuffers() {
             enabled_mask &= (enabled_mask - 1);
             const Binding& binding = VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
-            TouchBuffer(buffer, binding.buffer_id);
-            SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            // Nx2Perf geometry_memo: the stream was synced clean in this frame and command
+            // buffer and nothing marked its regions since, so the sync has nothing to upload.
+            BindMemo* const memo = GeometryMemoEnabled() ? &vertex_bind_memo[index] : nullptr;
+            if (memo == nullptr ||
+                !BindMemoHit(*memo, buffer, binding.buffer_id, binding.device_addr, binding.size,
+                             0, "vertex", 0, index, true)) {
+                const u64 cpu_epoch =
+                    memo != nullptr ? BindMemoEpoch(binding.device_addr, binding.size) : 0;
+                TouchBuffer(buffer, binding.buffer_id);
+                const bool clean =
+                    SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+                if (memo != nullptr) {
+                    BindMemoVerifySync(clean, "vertex", binding.device_addr, binding.size);
+                    BindMemoNote(*memo, binding.buffer_id, binding.device_addr, binding.size,
+                                 cpu_epoch);
+                }
+            }
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
@@ -3416,6 +3431,13 @@ bool BufferCache<P>::BindMemoEnabled() {
 }
 
 template <class P>
+bool BufferCache<P>::GeometryMemoEnabled() {
+    static const bool enabled = !IS_OPENGL && Nx2Perf::On(Nx2Perf::Opt::GeometryMemo) &&
+                                Nx2Perf::On(Nx2Perf::Opt::RegionEpoch);
+    return enabled;
+}
+
+template <class P>
 u64 BufferCache<P>::BindMemoEpoch(DAddr device_addr, u32 size) const {
     static const bool regional = Nx2Perf::On(Nx2Perf::Opt::RegionEpoch);
     return regional ? memory_tracker.RegionEpoch(device_addr, size) : memory_tracker.CpuEpoch();
@@ -3424,7 +3446,7 @@ u64 BufferCache<P>::BindMemoEpoch(DAddr device_addr, u32 size) const {
 template <class P>
 bool BufferCache<P>::BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId buffer_id,
                                  DAddr device_addr, u32 size, u32 offset, const char* kind,
-                                 size_t stage, u32 index) {
+                                 size_t stage, u32 index, bool geometry) {
     if constexpr (IS_OPENGL) {
         return false;
     } else {
@@ -3434,10 +3456,14 @@ bool BufferCache<P>::BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId 
             memo.cpu_epoch != BindMemoEpoch(device_addr, size) ||
             memo.gpu_epoch != memory_tracker.GpuEpoch() || memo.frame != frame_tick ||
             memo.tick != runtime.CurrentTick()) {
-            Nx2Profile::Add(Nx2Profile::Counter::BindMemoMisses, 1);
+            Nx2Profile::Add(geometry ? Nx2Profile::Counter::GeometryMemoMisses
+                                     : Nx2Profile::Counter::BindMemoMisses,
+                            1);
             return false;
         }
-        Nx2Profile::Add(Nx2Profile::Counter::BindMemoHits, 1);
+        Nx2Profile::Add(geometry ? Nx2Profile::Counter::GeometryMemoHits
+                                 : Nx2Profile::Counter::BindMemoHits,
+                        1);
         if (!Nx2Perf::Verify()) {
             return true;
         }
