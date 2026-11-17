@@ -64,9 +64,13 @@ object ShaderRuns {
     @Volatile
     var precacheBoot = false
 
-    /** Hides the loading card once such a boot has finished compiling (set by EmulationFragment). */
+    /** Removes the "Preparing shaders" screen once such a boot has finished (set by EmulationFragment). */
     @Volatile
     var onPrecacheBootDone: (() -> Unit)? = null
+
+    /** Built / total of such a boot, for the "Preparing shaders" screen (set by EmulationFragment). */
+    @Volatile
+    var onPrecacheProgress: ((Int, Int) -> Unit)? = null
 
     /**
      * Switch 2 titles (program IDs 04...) always have programs to compile; a Switch 1 title only
@@ -88,8 +92,12 @@ object ShaderRuns {
     }
 
     /** The scan's "done" marker: the boot-time precache already ran for this title on this driver. */
-    fun precacheDone(game: Game): Boolean =
-        File(WarmUp.shaderDir(game), "warm-compute.done").exists()
+    fun precacheDone(game: Game): Boolean {
+        val dir = WarmUp.shaderDir(game)
+        // A skipped compile leaves its pair file without the marker: ask again next time.
+        return File(dir, "warm-compute.done").exists() &&
+            (!File(dir, "warm-pairs.bin").exists() || File(dir, "warm-pairs.done").exists())
+    }
 
     /**
      * Copies the pipeline list shipped for this title (no game code in it) next to its shader

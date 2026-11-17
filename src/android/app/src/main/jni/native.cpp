@@ -1057,6 +1057,11 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_pauseEmulation(JNIEnv* env, jclass cl
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderPrecache(JNIEnv* env, jclass clazz,
                                                           jboolean enabled) {
     g_shader_precache.store(enabled != JNI_FALSE);
+    VideoCore::g_shader_precache_skip.store(false);
+}
+
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_skipShaderPrecache(JNIEnv* env, jclass clazz) {
+    VideoCore::g_shader_precache_skip.store(true);
 }
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderRunMode(JNIEnv* env, jclass clazz,

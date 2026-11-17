@@ -2655,6 +2655,9 @@ void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
     const auto load_pair{[&](std::ifstream& stream, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         stream.read(reinterpret_cast<char*>(&key), sizeof(key));
+        if (VideoCore::ShaderPrecacheSkipped()) {
+            return;
+        }
         if (index++ < resume) {
             return;
         }
@@ -2698,6 +2701,11 @@ void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
     }
     callback(VideoCore::LoadCallbackStage::Build, index, total);
     save(index);
+    if (VideoCore::ShaderPrecacheSkipped()) {
+        LOG_INFO(Render_Vulkan, "Shader pairs: skipped at {} of {}, the next compile continues there",
+                 index, total);
+        return;
+    }
     ShaderWarm::WriteWarmMarker(file, *stamp);
     const size_t attempted{(index - (std::min)(resume, index)) * shared->states.size()};
     const size_t built{shared->built.load()};

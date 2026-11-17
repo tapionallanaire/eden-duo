@@ -38,6 +38,7 @@ object DiskShaderCacheProgress {
                     // is what its toast says (see EmulationFragment).
                     org.yuzu.yuzu_emu.utils.ShaderRuns.lastBuilt = progress
                     org.yuzu.yuzu_emu.utils.ShaderRuns.lastTotal = max
+                    org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheProgress?.invoke(progress, max)
                     emulationViewModel.updateProgress(
                         emulationActivity.getString(R.string.building_shaders),
                         progress,
@@ -51,6 +52,7 @@ object DiskShaderCacheProgress {
                         org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot = false
                         org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone?.invoke()
                         org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone = null
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheProgress = null
                     }
                     // Eden Duo: a compile run is over once the plan (and, with Compile max, the
                     // shader combinations) is compiled and the driver cache is written; stop the

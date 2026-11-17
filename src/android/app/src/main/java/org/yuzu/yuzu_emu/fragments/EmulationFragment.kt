@@ -123,6 +123,84 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
     private var _binding: FragmentEmulationBinding? = null
 
+    /**
+     * Eden Duo: the screen a "compile shaders first" start shows in place of the game until its
+     * shaders are built: what is happening, how far it is, and a way out. The game's own picture
+     * only appears once this is gone.
+     */
+    private fun showShaderPrepareScreen() {
+        val context = requireContext()
+        val host = binding.loadingIndicator.parent as? android.view.ViewGroup ?: return
+        ViewUtils.hideView(binding.loadingIndicator)
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+        val screen = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER
+            setBackgroundColor(android.graphics.Color.BLACK)
+            setPadding(dp(48), dp(24), dp(48), dp(24))
+            isClickable = true // touches stay here, not on the game's controls underneath
+        }
+        fun text(size: Float, color: Int, bold: Boolean = false) =
+            android.widget.TextView(context).apply {
+                textSize = size
+                setTextColor(color)
+                gravity = android.view.Gravity.CENTER
+                if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            }
+        val icon = android.widget.ImageView(context)
+        game?.let { GameIconUtils.loadGameIcon(it, icon) }
+        val title = text(22f, android.graphics.Color.WHITE, true).apply { text = game?.title ?: "" }
+        val heading = text(18f, android.graphics.Color.WHITE).apply {
+            setText(R.string.shader_prepare_heading)
+        }
+        val detail = text(15f, 0xFFCCCCCC.toInt()).apply { setText(R.string.shader_prepare_scanning) }
+        val bar = com.google.android.material.progressindicator.LinearProgressIndicator(context).apply {
+            isIndeterminate = true
+        }
+        val hint = text(13f, 0xFF999999.toInt()).apply { setText(R.string.shader_prepare_hint) }
+        val skip = com.google.android.material.button.MaterialButton(context).apply {
+            setText(R.string.shader_prepare_skip)
+            setOnClickListener {
+                isEnabled = false
+                detail.setText(R.string.shader_prepare_skipping)
+                NativeLibrary.skipShaderPrecache()
+            }
+        }
+        val wrap = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        fun row(view: android.view.View, width: Int, height: Int, top: Int) = screen.addView(
+            view,
+            android.widget.LinearLayout.LayoutParams(width, height).apply { topMargin = dp(top) }
+        )
+        row(icon, dp(112), dp(112), 0)
+        row(title, wrap, wrap, 12)
+        row(heading, wrap, wrap, 20)
+        row(detail, wrap, wrap, 8)
+        row(bar, dp(420), wrap, 14)
+        row(hint, wrap, wrap, 14)
+        row(skip, wrap, wrap, 20)
+        host.addView(
+            screen,
+            android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheProgress = { done, total ->
+            if (total > 0) {
+                bar.isIndeterminate = false
+                bar.max = total
+                bar.progress = done
+                if (skip.isEnabled) {
+                    detail.text = getString(
+                        R.string.shader_prepare_progress, done, total, done * 100L / total
+                    )
+                }
+            }
+        }
+        org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone = { host.removeView(screen) }
+    }
+
     private val binding get() = _binding!!
 
     private val args by navArgs<EmulationFragmentArgs>()
@@ -1100,9 +1178,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 // Eden Duo: a "compile shaders first" boot keeps the card and its progress bar
                 // until the compile is done.
                 if (org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot) {
-                    org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone = {
-                        _binding?.let { ViewUtils.hideView(it.loadingIndicator) }
-                    }
+                    showShaderPrepareScreen()
                 } else {
                     ViewUtils.hideView(binding.loadingIndicator)
                 }
