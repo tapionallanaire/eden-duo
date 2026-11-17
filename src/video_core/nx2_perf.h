@@ -106,6 +106,9 @@ enum class Opt : unsigned {
     /// Opt-in, needs region_epoch. A vertex stream bound again with the same range in the same
     /// frame and command buffer skips the touch and the sync (bind_memo's rule for uniforms)
     GeometryMemo,
+    /// Opt-in. Small uniform buffers streamed with reuse (uniform_stream_reuse.h) are compared
+    /// with the guest's bytes in place when they lie in one page, not copied to a scratch first
+    UniformDirect,
     Count,
 };
 
@@ -120,7 +123,7 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(Opt::Count)> o
     "handle_page_cache", "dma_forward", "draw_begin_coalesce", "pending_wake", "diag_draw_lite",
     "shader_build_budget", "compute_rebuild_async", "compute_preload_variants", "stale_target_skip",
     "geometry_consistency", "build_order_priority", "replay_disk_recordings", "region_epoch",
-    "geometry_memo",
+    "geometry_memo", "uniform_direct",
 };
 
 static_assert(static_cast<size_t>(Opt::Count) <= 64, "the off-mask is 64 bits");
@@ -161,7 +164,7 @@ inline constexpr u64 DefaultOffMask() {
 
 /// Off unless EDEN_NX2_PERF_ON names them: switches not yet measured on a device.
 inline constexpr u64 OptInMask() {
-    return Bit(Opt::RegionEpoch) | Bit(Opt::GeometryMemo);
+    return Bit(Opt::RegionEpoch) | Bit(Opt::GeometryMemo) | Bit(Opt::UniformDirect);
 }
 
 /// The off-mask from EDEN_NX2_PERF_SAFE (safe), EDEN_NX2_PERF_ON (on) and EDEN_NX2_PERF_OFF (off).
