@@ -1311,6 +1311,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // loading only ever adds entries (see OrderComputeTranslations), and take the next when a
     // translation fails.
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<FileEnvironment>> compute_envs;
+    bool loading_filled_file = false;
 
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
@@ -1318,6 +1319,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_compute{[&](std::ifstream& file, FileEnvironment env) {
         ComputePipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        if (loading_filled_file && compute_envs.contains(key)) {
+            return;
+        }
         compute_envs[key].push_back(std::move(env));
     }};
     const bool preload_variants =
@@ -1429,7 +1433,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         {
             std::scoped_lock lock{state.mutex};
-            disk_pipelines.insert(hash);
+            if (!disk_pipelines.insert(hash).second && loading_filled_file) {
+                return;
+            }
         }
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
@@ -1474,6 +1480,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics, false, MIN_COMPATIBLE_CACHE_VERSION, &main_upgrade);
+    // The title's pipeline list, filled with the code of its game files: the pipelines the cache
+    // doesn't hold yet.
+    loading_filled_file = true;
+    VideoCommon::LoadPipelines(stop_loading, VideoCommon::ShaderWarm::GraphicsWarmPath(title_id),
+                               CACHE_VERSION, load_compute, load_graphics);
+    loading_filled_file = false;
     if (device.IsExtMeshShaderSupported()) {
         loading_mesh_file = true;
         VideoCommon::LoadPipelines(stop_loading, mesh_pipeline_cache_filename, CACHE_VERSION,

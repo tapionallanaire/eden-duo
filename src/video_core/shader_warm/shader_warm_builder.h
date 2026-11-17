@@ -23,6 +23,15 @@ namespace VideoCommon::ShaderWarm {
 /// files, in pipeline cache format with no recorded reads.
 std::filesystem::path ComputeWarmPath(u64 title_id);
 
+/// The title's pipeline list (<shader dir>/<title id>/plan.bin, see PlanRecord): pipeline cache
+/// records without their shader code. EDEN_NX2_PLAN_EXPORT=1 writes it from the title's
+/// vulkan.bin at boot.
+std::filesystem::path PlanPath(u64 title_id);
+
+/// The list's pipelines with the code found in the game files, in pipeline cache format
+/// (<shader dir>/<title id>/warm-graphics.bin). The disk cache load reads it after vulkan.bin.
+std::filesystem::path GraphicsWarmPath(u64 title_id);
+
 /// "Already precached" marker of a precache file (same folder, extension .done), written by the
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.
 std::filesystem::path WarmMarkerPath(const std::filesystem::path& warm_file);
@@ -94,7 +103,9 @@ struct Result {
 std::optional<std::string> WarmFilesStale(const std::filesystem::path& warm_file);
 
 /// At boot, before the disk cache loads: builds the precache file of the running Switch 2
-/// program from its game file when WarmFilesStale. Returns true when it built one.
+/// program from its game file when WarmFilesStale, or when the title has a pipeline list newer
+/// than its warm-graphics.bin. Returns true when it built one. EDEN_NX2_PLAN_VERIFY=1 exports
+/// the list, builds and then logs how many vulkan.bin records came back byte for byte.
 bool RefreshWarmFiles(Core::System& system, u64 title_id, std::stop_token stop);
 
 /// Builds the precache file for the game at `game_path` (any format the loader opens, Switch 2
@@ -107,7 +118,7 @@ Result BuildWarmFiles(Core::System& system, const std::filesystem::path& game_pa
 
 /// Overrides for BuildWarmFilesWith (tests and tools).
 struct BuildOptions {
-    /// Folder for warm-compute.bin; empty: <shader dir>/<title id>.
+    /// Folder for warm-compute.bin, plan.bin and warm-graphics.bin; empty: <shader dir>/<title id>.
     std::filesystem::path output_dir;
     /// Conversion threads, 0: a quarter of the CPU threads, 2 to 6.
     size_t threads{};
