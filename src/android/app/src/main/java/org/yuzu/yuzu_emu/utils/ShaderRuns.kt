@@ -49,6 +49,37 @@ object ShaderRuns {
     @Volatile
     var lastTotal = 0
 
+    /**
+     * Set by the launch dialog when the player answers yes to "compile shaders first": this boot
+     * finds the game's shaders in its files and builds them on the loading screen.
+     */
+    @Volatile
+    var precacheNext = false
+
+    /** Only Switch 2 titles have a file scanner so far (program IDs 04...). */
+    fun canPrecache(game: Game): Boolean = game.programIdHex.startsWith("04")
+
+    /** The scan's "done" marker: the boot-time precache already ran for this title on this driver. */
+    fun precacheDone(game: Game): Boolean =
+        File(WarmUp.shaderDir(game), "warm-compute.done").exists()
+
+    /**
+     * Copies the pipeline list shipped for this title (no game code in it) next to its shader
+     * cache, where the boot fills it from the game's own files. Nothing to do without one.
+     */
+    fun installShippedPlan(context: android.content.Context, game: Game) {
+        val target = File(WarmUp.shaderDir(game), "plan.bin")
+        if (target.exists()) return
+        try {
+            context.assets.open("shader_plans/" + game.programIdHex.uppercase() + ".bin").use { input ->
+                target.parentFile?.mkdirs()
+                target.outputStream().use { input.copyTo(it) }
+            }
+        } catch (_: java.io.IOException) {
+            // No list shipped for this title.
+        }
+    }
+
     fun recordingLog(game: Game): File =
         File(cacheDir(game), "recording.log")
 

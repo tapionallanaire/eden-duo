@@ -8,11 +8,13 @@ import android.content.DialogInterface
 import android.os.Bundle
 import androidx.fragment.app.DialogFragment
 import androidx.navigation.fragment.findNavController
+import androidx.preference.PreferenceManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.yuzu.yuzu_emu.HomeNavigationDirections
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.SerializableHelper.parcelable
+import org.yuzu.yuzu_emu.utils.ShaderRuns
 
 class LaunchGameDialogFragment : DialogFragment() {
     private var selectedItem = 1
@@ -28,9 +30,35 @@ class LaunchGameDialogFragment : DialogFragment() {
         return MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.launch_options)
             .setPositiveButton(android.R.string.ok) { _: DialogInterface, _: Int ->
-                val action = HomeNavigationDirections
-                    .actionGlobalEmulationActivity(game, selectedItem != 0)
-                requireParentFragment().findNavController().navigate(action)
+                val navController = requireParentFragment().findNavController()
+                val launch = {
+                    navController.navigate(
+                        HomeNavigationDirections.actionGlobalEmulationActivity(game, selectedItem != 0)
+                    )
+                }
+                // Eden Duo: ask once per title whether to compile its shaders first.
+                val context = requireContext()
+                val preferences = PreferenceManager.getDefaultSharedPreferences(context)
+                val declinedKey = "shader_precache_declined_" + (game?.programIdHex ?: "")
+                if (game == null || !ShaderRuns.canPrecache(game) || ShaderRuns.precacheDone(game) ||
+                    preferences.getBoolean(declinedKey, false)
+                ) {
+                    launch()
+                } else {
+                    MaterialAlertDialogBuilder(context)
+                        .setTitle(R.string.shader_precache_title)
+                        .setMessage(R.string.shader_precache_message)
+                        .setPositiveButton(R.string.shader_precache_yes) { _, _ ->
+                            ShaderRuns.installShippedPlan(context, game)
+                            ShaderRuns.precacheNext = true
+                            launch()
+                        }
+                        .setNegativeButton(R.string.shader_precache_no) { _, _ ->
+                            preferences.edit().putBoolean(declinedKey, true).apply()
+                            launch()
+                        }
+                        .show()
+                }
             }
             .setSingleChoiceItems(launchOptions, 1) { _: DialogInterface, i: Int ->
                 selectedItem = i

@@ -466,7 +466,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 finishShaderRunIfAny()
             },
             // Eden Duo: this launch records shaders or compiles them (see ShaderRuns).
-            { NativeLibrary.setShaderRunMode(recordShaders, compileShaders, compileMax) }
+            {
+                NativeLibrary.setShaderRunMode(recordShaders, compileShaders, compileMax)
+                NativeLibrary.setShaderPrecache(org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext)
+                org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext = false
+            }
         )
     }
 

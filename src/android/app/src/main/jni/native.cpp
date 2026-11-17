@@ -459,6 +459,9 @@ void EmulationSession::HaltEmulation() {
     m_cv.notify_one();
 }
 
+// The launch dialog's answer for the next boot (NativeLibrary.setShaderPrecache).
+static std::atomic<bool> g_shader_precache{false};
+
 void EmulationSession::RunEmulation() {
     {
         std::scoped_lock lock(m_mutex);
@@ -471,8 +474,9 @@ void EmulationSession::RunEmulation() {
         // The shader precache file (the compute programs found in the game's files), as the
         // desktop builds it before the disk cache loads. EDEN_NX2_SHADER_PRECACHE=1 until the
         // launch dialog asks: the scan reads the whole RomFS.
-        if (const char* value = std::getenv("EDEN_NX2_SHADER_PRECACHE");
-            value != nullptr && value[0] == '1') {
+        const char* precache_env = std::getenv("EDEN_NX2_SHADER_PRECACHE");
+        if (g_shader_precache.exchange(false) ||
+            (precache_env != nullptr && precache_env[0] == '1')) {
             const auto scan_start = std::chrono::steady_clock::now();
             const bool built = VideoCommon::ShaderWarm::RefreshWarmFiles(
                 m_system, m_system.GetApplicationProcessProgramID(), {});
@@ -1050,6 +1054,11 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_pauseEmulation(JNIEnv* env, jclass cl
 
 // Eden Duo: set before run(). Record writes this session's new pipelines to recording.bin; compile
 // max makes the boot warm build every vertex/fragment pair the plan knows.
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderPrecache(JNIEnv* env, jclass clazz,
+                                                          jboolean enabled) {
+    g_shader_precache.store(enabled != JNI_FALSE);
+}
+
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderRunMode(JNIEnv* env, jclass clazz,
                                                            jboolean record, jboolean compile,
                                                            jboolean compile_max) {
