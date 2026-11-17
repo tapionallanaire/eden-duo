@@ -568,6 +568,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             ? options.threads
             : std::clamp<size_t>(std::thread::hardware_concurrency() / 4, 2, 6);
     auto converter = std::make_unique<Converter>(threads, stop);
+    u64 other_stage_records = 0;
 
     // Consumes finished conversions in submission order (first program wins on equal keys).
     const auto consume = [&](JobResult&& r) {
@@ -605,6 +606,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         const auto name = archive.path.substr(archive.path.rfind('/') + 1);
         const auto on_record = [&](const ShaderRecord& record) {
             if (record.stage != ProgramStage::Compute) {
+                // Counted for the log: the graphics programs a precache could cover.
+                ++other_stage_records;
                 return;
             }
             if (!compute_identities.insert(PairHash{Hash128(record.code), Hash128(record.control)})
@@ -673,6 +676,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     WriteWarmCount(compute_path, result.compute_programs);
     report(StageWriting, 1, 1);
     result.ok = true;
+    LOG_INFO(Render_Vulkan, "Shader precache build: {} records of other stages (not precached)",
+             other_stage_records);
     LOG_INFO(Render_Vulkan,
              "Shader precache build for {:016x}: {} compute entries, {} programs skipped, {} "
              "archive and {} member errors, {:.1f} s",

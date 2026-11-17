@@ -5,8 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #define VMA_IMPLEMENTATION
+#include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/vulkan_common/vma.h"
 
+#include <cstdlib>
+#include <chrono>
 #include <codecvt>
 #include <cstdio>
 #include <cstring>
@@ -465,6 +468,19 @@ void EmulationSession::RunEmulation() {
     // Load the disk shader cache.
     if (Settings::values.use_disk_shader_cache.GetValue() || VideoCore::CompileRun()) {
         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
+        // The shader precache file (the compute programs found in the game's files), as the
+        // desktop builds it before the disk cache loads. EDEN_NX2_SHADER_PRECACHE=1 until the
+        // launch dialog asks: the scan reads the whole RomFS.
+        if (const char* value = std::getenv("EDEN_NX2_SHADER_PRECACHE");
+            value != nullptr && value[0] == '1') {
+            const auto scan_start = std::chrono::steady_clock::now();
+            const bool built = VideoCommon::ShaderWarm::RefreshWarmFiles(
+                m_system, m_system.GetApplicationProcessProgramID(), {});
+            LOG_INFO(Frontend, "Shader precache file {} in {} ms", built ? "built" : "not built",
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - scan_start)
+                         .count());
+        }
         m_system.Renderer().ReadRasterizer()->LoadDiskResources(
             m_system.GetApplicationProcessProgramID(), std::stop_token{}, LoadDiskCacheProgress);
         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Complete, 0, 0);
