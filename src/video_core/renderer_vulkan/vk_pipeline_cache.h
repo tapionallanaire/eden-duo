@@ -436,6 +436,15 @@ private:
     /// shader cache, so a dispatch that converts to the same SPIR-V finds the driver's work done.
     /// A marker skips it after it ran to the end for this driver and device.
     void StartShaderPrecache(u64 title_id);
+
+    /// Builds the title's vertex + fragment pairs (ShaderWarm::PairsWarmPath) on the boot workers,
+    /// each with every state of `states` and guessed reads, and drops them: a pipeline made of
+    /// guesses must never serve a draw, only the driver's cache keeps it. `callback` gets the
+    /// pairs done and their count. Once per driver and file; a run that is stopped goes on where
+    /// its last save was.
+    void BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
+                          const VideoCore::DiskResourceLoadCallback& callback,
+                          std::vector<FixedPipelineState> states);
     void StopShaderPrecache();
     /// Precache builds wait while the game builds pipelines (queued translations or driver
     /// compiles, or a pipeline built in the last moments): they share the CPU and the driver.

@@ -36,10 +36,15 @@ std::filesystem::path GraphicsWarmPath(u64 title_id);
 /// PeanutsList), used when the title has no pipeline list.
 std::filesystem::path PeanutsListPath(u64 title_id);
 
-/// The Peanuts list's vertex and fragment pairs found in the game files
-/// (<shader dir>/<title id>/warm-pairs.bin, see PairEntry). The disk cache load builds them once
-/// per driver, only for the driver's cache.
+/// The vertex + fragment pairs the game files define (the stages of each BNSH variation of a
+/// Switch 2 title) and those of a Peanuts list, without the ones a filled pipeline list record
+/// covers (<shader dir>/<title id>/warm-pairs.bin, see PairEntry). The disk cache load builds
+/// them once per driver, only for the driver's cache.
 std::filesystem::path PairsWarmPath(u64 title_id);
+
+/// A name whose marker (WarmMarkerPath) holds how many pairs a run that did not finish has
+/// built, in its entry count, so the next run goes on from there.
+std::filesystem::path PairsProgressPath(u64 title_id);
 
 /// "Already precached" marker of a precache file (same folder, extension .done), written by the
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.

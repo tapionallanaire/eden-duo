@@ -88,6 +88,7 @@ struct Record {
     Bytes code;
     Bytes control;
     bool maxwell{};
+    u32 group{}; ///< The variation inside its file, from 1; 0 when the format has none
 };
 
 /// What Switch 1 control sections and graphics and compute code areas start with.
@@ -485,7 +486,7 @@ std::vector<Record> ParseBnsh(Bytes data) {
                      (!Is(code, 0, MaxwellGraphicsMagic) || code.size() <= 0x80))) {
                     throw ArchiveError("invalid BNSH Maxwell stage data");
                 }
-                result.push_back({stage, code, control, true});
+                result.push_back({stage, code, control, true, variation + 1});
                 continue;
             }
             if (!native_version) {
@@ -512,7 +513,7 @@ std::vector<Record> ParseBnsh(Bytes data) {
                     throw ArchiveError("BNSH graphics stage disagrees with native header");
                 }
             }
-            result.push_back({stage, code, control});
+            result.push_back({stage, code, control, false, variation + 1});
         }
     }
     return result;
@@ -858,12 +859,18 @@ struct Walker {
     const std::function<void(const ShaderRecord&)>& on_record;
     const std::function<void(const std::string&)>& on_member_error;
     std::stop_token stop;
+    mutable u32 groups{}; ///< Program numbers given out so far
 
-    /// Passes every record to the caller's record callback.
+    /// Passes every record to the caller's record callback, with its file's program numbers
+    /// made unique in the walk.
     void Emit(const std::vector<Record>& records) const {
+        u32 highest = 0;
         for (const auto& record : records) {
-            on_record(ShaderRecord{record.stage, record.code, record.control, record.maxwell});
+            highest = (std::max)(highest, record.group);
+            on_record(ShaderRecord{record.stage, record.code, record.control, record.maxwell,
+                                   record.group != 0 ? groups + record.group : 0});
         }
+        groups += highest;
     }
 
     /// Walks one archive member, reporting its error to the caller instead of stopping the walk.

@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -159,7 +160,7 @@ struct Job {
     ComputeControl control{};
     bool graphics{}; ///< A graphics program, lowered for the pipeline list only
     bool geometry{};
-    u64 list_key{}; ///< Its Peanuts key when the Peanuts list names it
+    u32 pair_program{}; ///< A vertex or fragment program kept for the pairs: its number, from 1
 };
 
 struct JobResult {
@@ -170,10 +171,10 @@ struct JobResult {
     u64 hash{};           ///< StageHash of `code`
     std::vector<u8> code; ///< The lowered code
     u32 texture_buffer{~0U};
-    u64 list_key{};
+    u32 pair_program{};
 };
 
-/// A shader of the Peanuts list found in the game files.
+/// A program of the game files kept for the pairs (and a shader of the Peanuts list).
 struct ListShader {
     ProgramStage stage{};
     LoweredCode lowered; ///< Empty unless a vertex or fragment program that lowered
@@ -267,7 +268,7 @@ private:
     static JobResult Convert(const Job& job) {
         JobResult result;
         result.graphics = job.graphics;
-        result.list_key = job.list_key;
+        result.pair_program = job.pair_program;
         try {
             LoweredCode lowered;
             if (const auto error =
@@ -373,6 +374,10 @@ fs::path PairsWarmPath(u64 title_id) {
     return TitleDir(title_id) / "warm-pairs.bin";
 }
 
+fs::path PairsProgressPath(u64 title_id) {
+    return TitleDir(title_id) / "warm-pairs-progress";
+}
+
 fs::path WarmMarkerPath(const fs::path& warm_file) {
     fs::path marker = warm_file;
     marker.replace_extension(".done");
@@ -443,7 +448,8 @@ bool DeleteWarmFiles(u64 title_id, std::string* error) {
     bool ok = true;
     for (const auto& path :
          {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp, GraphicsWarmPath(title_id),
-          PairsWarmPath(title_id), WarmMarkerPath(PairsWarmPath(title_id))}) {
+          PairsWarmPath(title_id), WarmMarkerPath(PairsWarmPath(title_id)),
+          WarmCountPath(PairsWarmPath(title_id)), WarmMarkerPath(PairsProgressPath(title_id))}) {
         std::error_code ec;
         fs::remove(path, ec);
         if (ec) {
@@ -688,6 +694,14 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         }
     }
     std::unordered_map<u64, ListShader> list_found;
+    // Every vertex and fragment program of a Switch 2 title (once per code) and the pairs its
+    // BNSH variations make of them.
+    std::vector<ListShader> programs;
+    std::unordered_map<PairHash, u32, PairHasher> program_numbers;
+    std::unordered_map<u64, u32> list_programs; ///< Peanuts key to program
+    std::vector<std::pair<u32, u32>> file_pairs;
+    std::unordered_set<u64> file_pair_set;
+    std::set<std::pair<u64, u64>> covered; ///< Pairs (runtime hashes) of filled list records
 
     std::unordered_set<PairHash, PairHasher> compute_identities;
     std::unordered_set<std::string> compute_keys;
@@ -710,12 +724,12 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         if (r.ok) {
             if (const auto it = plan_code.find(r.hash);
                 it != plan_code.end() && it->second.empty()) {
-                it->second = std::move(r.code);
+                it->second = r.pair_program != 0 ? r.code : std::move(r.code);
             }
         }
         if (r.graphics) {
-            if (r.ok && r.list_key != 0) {
-                ListShader& shader = list_found[r.list_key];
+            if (r.ok && r.pair_program != 0) {
+                ListShader& shader = programs[r.pair_program - 1];
                 shader.hash = r.hash;
                 shader.lowered = {std::move(r.code), r.texture_buffer};
             }
@@ -752,6 +766,10 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         bytes_done += archive_bytes / 2;
         report(StageExtracting, archive_index, archives.size());
         const auto name = archive.path.substr(archive.path.rfind('/') + 1);
+        // The program (ShaderRecord::group) being read and its stages so far.
+        u32 group = 0;
+        u32 group_vertex = 0;
+        u32 group_fragment = 0;
         const auto on_record = [&](const ShaderRecord& record) {
             if (record.maxwell) {
                 // Switch 1 programs are not converted: the pipeline list's get their code as the
@@ -795,9 +813,31 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                                 list_found.try_emplace(*list_key, ListShader{record.stage}).second;
             if (record.stage != ProgramStage::Compute) {
                 ++other_stage_records;
-                if (listed && (record.stage == ProgramStage::Vertex ||
-                               record.stage == ProgramStage::Fragment)) {
-                    job.list_key = *list_key;
+                if (record.stage == ProgramStage::Vertex ||
+                    record.stage == ProgramStage::Fragment) {
+                    const auto [it, added] = program_numbers.try_emplace(
+                        PairHash{Hash128(record.code), {}}, static_cast<u32>(programs.size() + 1));
+                    const u32 number = it->second;
+                    if (listed) {
+                        list_programs.emplace(*list_key, number);
+                    }
+                    if (record.group != 0) {
+                        if (record.group != group) {
+                            group = record.group;
+                            group_vertex = group_fragment = 0;
+                        }
+                        (record.stage == ProgramStage::Vertex ? group_vertex : group_fragment) =
+                            number;
+                        if (group_vertex != 0 && group_fragment != 0 &&
+                            file_pair_set.insert(u64{group_vertex} << 32 | group_fragment).second) {
+                            file_pairs.emplace_back(group_vertex, group_fragment);
+                        }
+                    }
+                    if (!added) {
+                        return;
+                    }
+                    programs.push_back({record.stage});
+                    job.pair_program = number;
                 } else if (plan_code.empty() ||
                            !graphics_identities.insert(PairHash{Hash128(record.code), {}}).second) {
                     // The others are lowered only to find the code of the pipeline list's programs.
@@ -892,6 +932,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                 out.write(reinterpret_cast<const char*>(bytes.data()),
                           static_cast<std::streamsize>(bytes.size()));
                 ++filled;
+                if (record.envs.size() == 2) {
+                    covered.emplace(record.envs[0].hash, record.envs[1].hash);
+                }
             }
         });
         LOG_INFO(Render_Vulkan,
@@ -900,39 +943,68 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                  title_id, plan->size(), filled, plan->size() - filled, missing.size(),
                  maxwell_padded);
     }
-    if (list) {
-        size_t found = 0;
-        for (const u64 key : list->shaders) {
-            found += list_found.contains(key) ? 1 : 0;
-        }
-        size_t pairs_found = 0;
+    for (const auto& [key, number] : list_programs) {
+        list_found[key] = programs[number - 1];
+    }
+    if (list || !file_pairs.empty()) {
+        // Each pair once (by its runtime hashes), without those a filled list record covers:
+        // the game files' own, then the Peanuts list's.
         size_t pairs_written = 0;
-        WriteCacheFile(output_dir / "warm-pairs.bin", [&](std::ofstream& out) {
-            for (const auto& [vertex_key, fragment_key] : list->pairs) {
-                const auto vertex = list_found.find(vertex_key);
-                const auto fragment = list_found.find(fragment_key);
-                if (vertex == list_found.end() || fragment == list_found.end()) {
-                    continue;
+        size_t pairs_covered = 0;
+        size_t list_pairs_found = 0;
+        std::set<std::pair<u64, u64>> written;
+        const fs::path pairs_path = output_dir / "warm-pairs.bin";
+        WriteCacheFile(pairs_path, [&](std::ofstream& out) {
+            const auto write = [&](const ListShader& vertex, const ListShader& fragment) {
+                if (vertex.stage != ProgramStage::Vertex ||
+                    fragment.stage != ProgramStage::Fragment || vertex.lowered.code.empty() ||
+                    fragment.lowered.code.empty()) {
+                    return;
                 }
-                ++pairs_found;
-                if (vertex->second.stage != ProgramStage::Vertex ||
-                    fragment->second.stage != ProgramStage::Fragment ||
-                    vertex->second.lowered.code.empty() || fragment->second.lowered.code.empty()) {
-                    continue;
+                const std::pair<u64, u64> hashes{vertex.hash, fragment.hash};
+                if (covered.contains(hashes)) {
+                    pairs_covered += written.insert(hashes).second ? 1 : 0;
+                    return;
+                }
+                if (!written.insert(hashes).second) {
+                    return;
                 }
                 const std::vector<u8> bytes =
-                    PairEntry(vertex->second.lowered, vertex->second.hash,
-                              fragment->second.lowered, fragment->second.hash);
+                    PairEntry(vertex.lowered, vertex.hash, fragment.lowered, fragment.hash);
                 out.write(reinterpret_cast<const char*>(bytes.data()),
                           static_cast<std::streamsize>(bytes.size()));
                 ++pairs_written;
+            };
+            for (const auto& [vertex, fragment] : file_pairs) {
+                write(programs[vertex - 1], programs[fragment - 1]);
+            }
+            if (list) {
+                for (const auto& [vertex_key, fragment_key] : list->pairs) {
+                    const auto vertex = list_found.find(vertex_key);
+                    const auto fragment = list_found.find(fragment_key);
+                    if (vertex != list_found.end() && fragment != list_found.end()) {
+                        ++list_pairs_found;
+                        write(vertex->second, fragment->second);
+                    }
+                }
             }
         });
+        WriteWarmCount(pairs_path, pairs_written);
         LOG_INFO(Render_Vulkan,
-                 "Peanuts list for {:016x}: {} of {} shaders found in the game files ({} not "
-                 "found), {} of {} pairs with both shaders found, {} pair records written",
-                 title_id, found, list->shaders.size(), list->shaders.size() - found, pairs_found,
-                 list->pairs.size(), pairs_written);
+                 "Shader pairs for {:016x}: {} vertex and fragment programs, {} pairs in the game "
+                 "files' BNSH variations, {} in the pipeline list already, {} pair records written",
+                 title_id, programs.size(), file_pairs.size(), pairs_covered, pairs_written);
+        if (list) {
+            size_t found = 0;
+            for (const u64 key : list->shaders) {
+                found += list_found.contains(key) ? 1 : 0;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Peanuts list for {:016x}: {} of {} shaders found in the game files ({} not "
+                     "found), {} of {} pairs with both shaders found",
+                     title_id, found, list->shaders.size(), list->shaders.size() - found,
+                     list_pairs_found, list->pairs.size());
+        }
     }
     report(StageWriting, 1, 1);
     result.ok = true;

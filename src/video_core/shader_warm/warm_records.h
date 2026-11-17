@@ -26,8 +26,9 @@ constexpr u32 WarmCacheVersion = 35; // Duet Plus: see CACHE_VERSION in vk_pipel
 
 /// What the builder finds in the game files, recorded in the precache's count file. A file built by
 /// an older builder is rebuilt at boot (RefreshWarmFiles). 2: Mario Kart World's .esetb effects.
-/// 3: .ptcl particle effects (Fire Emblem).
-constexpr u32 WarmBuilderVersion = 3;
+/// 3: .ptcl particle effects (Fire Emblem). 4: the vertex + fragment pairs of BNSH variations
+/// (warm-pairs.bin).
+constexpr u32 WarmBuilderVersion = 4;
 
 using ComputeKey = std::array<u8, 24>;
 

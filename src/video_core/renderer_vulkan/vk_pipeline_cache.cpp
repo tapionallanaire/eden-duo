@@ -1312,10 +1312,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // translation fails.
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<FileEnvironment>> compute_envs;
     bool loading_filled_file = false;
-    /// The state of a recorded vertex + fragment pipeline, for the shader list's pairs.
-    std::optional<FixedPipelineState> pair_state;
-    std::atomic<size_t> pairs_built{};
-    size_t pairs_queued = 0;
+    /// The states of the recorded vertex + fragment pipelines and how many use each, for the
+    /// shader pairs (BuildShaderPairs).
+    std::unordered_map<size_t, std::pair<FixedPipelineState, size_t>> pair_states;
 
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
@@ -1435,12 +1434,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 driver_updated = true;
             }
         }
-        if (!pair_state && key.state.xfb_enabled == 0 &&
+        if (key.state.xfb_enabled == 0 &&
             static_cast<size_t>(std::ranges::count(key.unique_hashes, u64{})) ==
                 key.unique_hashes.size() - 2 &&
             key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] != 0 &&
             key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] != 0) {
-            pair_state = key.state;
+            ++pair_states.try_emplace(key.state.Hash(), key.state, size_t{}).first->second.second;
         }
         {
             std::scoped_lock lock{state.mutex};
@@ -1497,61 +1496,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     VideoCommon::LoadPipelines(stop_loading, VideoCommon::ShaderWarm::GraphicsWarmPath(title_id),
                                CACHE_VERSION, load_compute, load_graphics);
     loading_filled_file = false;
-    // The pairs of a Peanuts list (ShaderWarm::PairsWarmPath): programs from the game files with
-    // no recorded reads and no state. They are built with a recorded pipeline's state, as
-    // CompileShaderCombinations does, and with guessed reads, then dropped: a pipeline made of
-    // guesses must never serve a draw, only the driver's cache keeps it (like the compute
-    // precache). Once per driver.
-    // Peanuts' own state (formats, blend, vertex layout) is not translated; it would replace
-    // pair_state here.
-    const auto pairs_file{VideoCommon::ShaderWarm::PairsWarmPath(title_id)};
-    const auto pairs_stamp{VideoCommon::ShaderWarm::CurrentWarmStamp(
-        pairs_file, 0, device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION)};
-    const auto pairs_marker{VideoCommon::ShaderWarm::ReadWarmMarker(pairs_file)};
-    if (pairs_stamp && !(pairs_marker && pairs_marker->Matches(*pairs_stamp))) {
-        if (!pair_state) {
-            LOG_INFO(Render_Vulkan, "Shader list pairs: no recorded pipeline to take a state "
-                                    "from yet, not built");
-        } else {
-            const auto skip_compute{[](std::ifstream& file, FileEnvironment) {
-                ComputePipelineCacheKey key;
-                file.read(reinterpret_cast<char*>(&key), sizeof(key));
-            }};
-            const auto load_pair{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
-                GraphicsPipelineCacheKey key;
-                file.read(reinterpret_cast<char*>(&key), sizeof(key));
-                key.state = *pair_state;
-                workers.QueueWork(
-                    [this, key, envs_ = std::move(envs), &state, &callback, &pairs_built]() mutable {
-                        static const VideoCommon::GuessMissing guess{};
-                        ShaderPools pools;
-                        boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
-                        for (auto& env : envs_) {
-                            env.SetGuessMissing(&guess);
-                            env_ptrs.push_back(&env);
-                        }
-                        try {
-                            const DriverBuildReport::PrecacheScope precache_scope;
-                            if (CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr,
-                                                       false)) {
-                                pairs_built.fetch_add(1, std::memory_order_relaxed);
-                            }
-                        } catch (const std::exception& e) {
-                            LOG_DEBUG(Render_Vulkan, "Shader list pairs: {}", e.what());
-                        }
-                        std::scoped_lock lock{state.mutex};
-                        ++state.built;
-                        if (state.has_loaded) {
-                            callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
-                        }
-                    });
-                ++state.total;
-                ++pairs_queued;
-            }};
-            VideoCommon::LoadPipelines(stop_loading, pairs_file, CACHE_VERSION, skip_compute,
-                                       load_pair);
-        }
-    }
     if (device.IsExtMeshShaderSupported()) {
         loading_mesh_file = true;
         VideoCommon::LoadPipelines(stop_loading, mesh_pipeline_cache_filename, CACHE_VERSION,
@@ -1587,11 +1531,24 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
     workers.WaitForRequests(stop_loading);
     DriverBuildReport::LogSummary("at boot");
-    if (pair_state && pairs_stamp && !stop_loading.stop_requested() &&
-        !(pairs_marker && pairs_marker->Matches(*pairs_stamp))) {
-        LOG_INFO(Render_Vulkan, "Shader list pairs: {} of {} built for the driver's cache",
-                 pairs_built.load(), pairs_queued);
-        VideoCommon::ShaderWarm::WriteWarmMarker(pairs_file, *pairs_stamp);
+    if (!stop_loading.stop_requested()) {
+        // The most used states first. EDEN_NX2_PAIR_STATES=<1..3>: build each pair with that
+        // many of them (default 1: every further state is the whole set of driver builds again).
+        std::vector<std::pair<FixedPipelineState, size_t>> ranked;
+        for (const auto& [hash, entry] : pair_states) {
+            ranked.push_back(entry);
+        }
+        std::ranges::sort(ranked, [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second > b.second : a.first.Hash() < b.first.Hash();
+        });
+        const char* const count_text = std::getenv("EDEN_NX2_PAIR_STATES");
+        const size_t count =
+            static_cast<size_t>(std::clamp(count_text ? std::atoi(count_text) : 1, 1, 3));
+        std::vector<FixedPipelineState> states;
+        for (size_t i = 0; i < ranked.size() && i < count; ++i) {
+            states.push_back(ranked[i].first);
+        }
+        BuildShaderPairs(title_id, stop_loading, callback, std::move(states));
     }
 
     // A cache from an older compatible version: its records were translated again above. Write
@@ -2638,6 +2595,118 @@ void PipelineCache::StartShaderPrecache(u64 title_id) {
             }
         });
     }
+}
+
+void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
+                                     const VideoCore::DiskResourceLoadCallback& callback,
+                                     std::vector<FixedPipelineState> states) {
+    namespace ShaderWarm = VideoCommon::ShaderWarm;
+    const auto file{ShaderWarm::PairsWarmPath(title_id)};
+    const auto stamp{ShaderWarm::CurrentWarmStamp(file, 0, device.GetDriverVersion(),
+                                                  device.GetDeviceID(), CACHE_VERSION)};
+    const auto marker{ShaderWarm::ReadWarmMarker(file)};
+    if (!stamp || (marker && marker->Matches(*stamp))) {
+        return;
+    }
+    const size_t total{static_cast<size_t>(ShaderWarm::ReadWarmCount(file))};
+    if (states.empty()) {
+        // A state made up here would be built blind on every title: wait for a recorded one.
+        LOG_INFO(Render_Vulkan,
+                 "Shader pairs: {} pairs, no recorded pipeline to take a state from yet, not built",
+                 total);
+        return;
+    }
+    const auto progress_file{ShaderWarm::PairsProgressPath(title_id)};
+    size_t resume{};
+    if (const auto progress{ShaderWarm::ReadWarmMarker(progress_file)};
+        progress && progress->Matches(*stamp)) {
+        resume = static_cast<size_t>(progress->entries);
+    }
+    LOG_INFO(Render_Vulkan, "Shader pairs: building {} pairs with {} state(s), {} done before",
+             total, states.size(), resume);
+
+    // Workers may outlive this call when the load is stopped.
+    struct Shared {
+        std::vector<FixedPipelineState> states;
+        std::atomic<size_t> built{};
+    };
+    const auto shared{std::make_shared<Shared>()};
+    shared->states = std::move(states);
+    const auto begin{std::chrono::steady_clock::now()};
+    auto last_save{begin};
+    // The driver's cache first: the progress only counts work that is on disk.
+    const auto save{[&](size_t done) {
+        if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
+            SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                         CACHE_VERSION);
+        }
+        auto progress{*stamp};
+        progress.entries = done;
+        ShaderWarm::WriteWarmMarker(progress_file, progress);
+        last_save = std::chrono::steady_clock::now();
+    }};
+    constexpr size_t Batch{64};
+    constexpr std::chrono::seconds SaveEvery{30};
+    size_t index{};
+    const auto skip_compute{[](std::ifstream& stream, FileEnvironment) {
+        ComputePipelineCacheKey key;
+        stream.read(reinterpret_cast<char*>(&key), sizeof(key));
+    }};
+    const auto load_pair{[&](std::ifstream& stream, std::vector<FileEnvironment> envs) {
+        GraphicsPipelineCacheKey key;
+        stream.read(reinterpret_cast<char*>(&key), sizeof(key));
+        if (index++ < resume) {
+            return;
+        }
+        workers.QueueWork([this, key, shared, envs_ = std::move(envs)]() mutable {
+            static const VideoCommon::GuessMissing guess{};
+            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            for (auto& env : envs_) {
+                env.SetGuessMissing(&guess);
+                env_ptrs.push_back(&env);
+            }
+            for (const FixedPipelineState& pair_state : shared->states) {
+                // A pair that does not translate or build is counted as failed, nothing more.
+                try {
+                    key.state = pair_state;
+                    ShaderPools pools;
+                    const DriverBuildReport::PrecacheScope precache_scope;
+                    if (CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false)) {
+                        shared->built.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } catch (const std::exception& e) {
+                    LOG_DEBUG(Render_Vulkan, "Shader pairs: {}", e.what());
+                }
+            }
+        });
+        if ((index - resume) % Batch == 0) {
+            workers.WaitForRequests(stop_loading);
+            if (stop_loading.stop_requested()) {
+                return;
+            }
+            callback(VideoCore::LoadCallbackStage::Build, index, total);
+            if (std::chrono::steady_clock::now() - last_save >= SaveEvery) {
+                save(index);
+            }
+        }
+    }};
+    callback(VideoCore::LoadCallbackStage::Build, resume, total);
+    VideoCommon::LoadPipelines(stop_loading, file, CACHE_VERSION, skip_compute, load_pair);
+    workers.WaitForRequests(stop_loading);
+    if (stop_loading.stop_requested()) {
+        return;
+    }
+    callback(VideoCore::LoadCallbackStage::Build, index, total);
+    save(index);
+    ShaderWarm::WriteWarmMarker(file, *stamp);
+    const size_t attempted{(index - (std::min)(resume, index)) * shared->states.size()};
+    const size_t built{shared->built.load()};
+    LOG_INFO(Render_Vulkan,
+             "Shader pairs: {} pairs, {} built and {} failed with {} state(s) in {:.1f} s ({} "
+             "pairs done by earlier runs)",
+             index, built, attempted - built, shared->states.size(),
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(),
+             (std::min)(resume, index));
 }
 
 bool PipelineCache::RuntimeBuildsBusy() const {
