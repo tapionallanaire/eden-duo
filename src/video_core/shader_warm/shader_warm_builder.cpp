@@ -177,6 +177,7 @@ struct JobResult {
 struct ListShader {
     ProgramStage stage{};
     LoweredCode lowered; ///< Empty unless a vertex or fragment program that lowered
+    u64 hash{};          ///< The runtime's hash of `lowered`
 };
 
 class Converter {
@@ -483,7 +484,7 @@ std::optional<std::string> WarmFilesStale(const fs::path& warm_file) {
 }
 
 bool RefreshWarmFiles(Core::System& system, u64 title_id, std::stop_token stop) {
-    if (title_id == 0 || !Settings::CurrentProgramIsSwitch2()) {
+    if (title_id == 0) {
         return false;
     }
     const fs::path cache = TitleDir(title_id) / "vulkan.bin";
@@ -499,7 +500,9 @@ bool RefreshWarmFiles(Core::System& system, u64 title_id, std::stop_token stop) 
                         title_id);
         }
     }
-    auto reason = WarmFilesStale(ComputeWarmPath(title_id));
+    // Switch 1 titles have no compute precache: only a pipeline list or shader list scans them.
+    auto reason = Settings::CurrentProgramIsSwitch2() ? WarmFilesStale(ComputeWarmPath(title_id))
+                                                      : std::nullopt;
     std::error_code plan_ec;
     if (!reason && fs::exists(plan, plan_ec) &&
         (verify || !fs::exists(filled, plan_ec) ||
@@ -697,6 +700,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             : std::clamp<size_t>(std::thread::hardware_concurrency() / 4, 2, 6);
     auto converter = std::make_unique<Converter>(threads, stop);
     u64 other_stage_records = 0;
+    u64 maxwell_records = 0;
+    u64 maxwell_open = 0; ///< Switch 1 programs that do not end inside their code area
+    u64 maxwell_padded = 0; ///< List programs given a zero last word (MaxwellProgram::padded)
 
     // Consumes finished conversions in submission order (first program wins on equal keys).
     const auto consume = [&](JobResult&& r) {
@@ -709,7 +715,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         }
         if (r.graphics) {
             if (r.ok && r.list_key != 0) {
-                list_found[r.list_key].lowered = {std::move(r.code), r.texture_buffer};
+                ListShader& shader = list_found[r.list_key];
+                shader.hash = r.hash;
+                shader.lowered = {std::move(r.code), r.texture_buffer};
             }
             return;
         }
@@ -745,6 +753,41 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         report(StageExtracting, archive_index, archives.size());
         const auto name = archive.path.substr(archive.path.rfind('/') + 1);
         const auto on_record = [&](const ShaderRecord& record) {
+            if (record.maxwell) {
+                // Switch 1 programs are not converted: the pipeline list's get their code as the
+                // runtime caches it. Which end the runtime took depends on the guest driver the
+                // game set up (texture_bound), so both are offered.
+                ++maxwell_records;
+                const bool headerless = record.stage == ProgramStage::Compute &&
+                                        (record.code.size() < 4 || record.code[0] != 0x79 ||
+                                         record.code[1] != 0x56 || record.code[2] != 0x34 ||
+                                         record.code[3] != 0x12);
+                const size_t start =
+                    record.stage != ProgramStage::Compute ? 0x30 : headerless ? 0 : 0x100;
+                const auto list_key = list ? PeanutsKey(record.control, record.code) : std::nullopt;
+                ListShader* const listed =
+                    list_key && list->shaders.contains(*list_key) && !list_found.contains(*list_key)
+                        ? &list_found.try_emplace(*list_key, ListShader{record.stage}).first->second
+                        : nullptr;
+                for (const bool proprietary : {true, false}) {
+                    auto program = FindMaxwellProgram(record.code, start, proprietary);
+                    if (!program) {
+                        maxwell_open += proprietary ? 1 : 0;
+                        continue;
+                    }
+                    if (listed != nullptr && proprietary) {
+                        // Guest driver 2 (texture_bound), which Switch 1 titles normally use.
+                        listed->hash = program->hash;
+                        listed->lowered = {program->code, 2};
+                    }
+                    if (const auto it = plan_code.find(program->hash);
+                        it != plan_code.end() && it->second.empty()) {
+                        maxwell_padded += program->padded ? 1 : 0;
+                        it->second = std::move(program->code);
+                    }
+                }
+                return;
+            }
             Job job;
             // The first record with a key the Peanuts list names is that shader.
             const auto list_key = list ? PeanutsKey(record.control, record.code) : std::nullopt;
@@ -853,8 +896,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         });
         LOG_INFO(Render_Vulkan,
                  "Pipeline list for {:016x}: {} records, {} filled, {} missing ({} programs not "
-                 "found in the game files)",
-                 title_id, plan->size(), filled, plan->size() - filled, missing.size());
+                 "found in the game files); {} programs filled with a zero last word",
+                 title_id, plan->size(), filled, plan->size() - filled, missing.size(),
+                 maxwell_padded);
     }
     if (list) {
         size_t found = 0;
@@ -877,7 +921,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                     continue;
                 }
                 const std::vector<u8> bytes =
-                    PairEntry(vertex->second.lowered, fragment->second.lowered);
+                    PairEntry(vertex->second.lowered, vertex->second.hash,
+                              fragment->second.lowered, fragment->second.hash);
                 out.write(reinterpret_cast<const char*>(bytes.data()),
                           static_cast<std::streamsize>(bytes.size()));
                 ++pairs_written;
@@ -891,8 +936,10 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     }
     report(StageWriting, 1, 1);
     result.ok = true;
-    LOG_INFO(Render_Vulkan, "Shader precache build: {} records of other stages (not precached)",
-             other_stage_records);
+    LOG_INFO(Render_Vulkan,
+             "Shader precache build: {} records of other stages (not precached), {} Switch 1 "
+             "programs ({} without an end in their code area)",
+             other_stage_records, maxwell_records, maxwell_open);
     LOG_INFO(Render_Vulkan,
              "Shader precache build for {:016x}: {} compute entries, {} programs skipped, {} "
              "archive and {} member errors, {:.1f} s",

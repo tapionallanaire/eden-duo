@@ -40,7 +40,7 @@ class LaunchGameDialogFragment : DialogFragment() {
                 val context = requireContext()
                 val preferences = PreferenceManager.getDefaultSharedPreferences(context)
                 val declinedKey = "shader_precache_declined_" + (game?.programIdHex ?: "")
-                if (game == null || !ShaderRuns.canPrecache(game) || ShaderRuns.precacheDone(game) ||
+                if (game == null || !ShaderRuns.canPrecache(context, game) || ShaderRuns.precacheDone(game) ||
                     preferences.getBoolean(declinedKey, false)
                 ) {
                     launch()

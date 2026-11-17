@@ -56,8 +56,24 @@ object ShaderRuns {
     @Volatile
     var precacheNext = false
 
-    /** Only Switch 2 titles have a file scanner so far (program IDs 04...). */
-    fun canPrecache(game: Game): Boolean = game.programIdHex.startsWith("04")
+    /**
+     * Switch 2 titles (program IDs 04...) always have programs to compile; a Switch 1 title only
+     * with a pipeline list or a shader list, its own or a shipped one.
+     */
+    fun canPrecache(context: android.content.Context, game: Game): Boolean {
+        if (game.programIdHex.startsWith("04")) return true
+        val dir = WarmUp.shaderDir(game)
+        val id = game.programIdHex.uppercase()
+        return File(dir, "plan.bin").exists() || File(dir, "peanuts.tsv.zst").exists() ||
+            listOf("shader_plans/$id.bin", "shader_lists/peanuts/$id.tsv.zst").any { asset ->
+                try {
+                    context.assets.open(asset).close()
+                    true
+                } catch (_: java.io.IOException) {
+                    false
+                }
+            }
+    }
 
     /** The scan's "done" marker: the boot-time precache already ran for this title on this driver. */
     fun precacheDone(game: Game): Boolean =

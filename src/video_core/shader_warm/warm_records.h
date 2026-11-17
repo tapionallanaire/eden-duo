@@ -51,6 +51,24 @@ std::optional<std::string> LowerProgram(std::span<const u8> program, LoweredCode
 std::optional<std::string> LowerGraphicsProgram(std::span<const u8> program, bool geometry,
                                                 LoweredCode& out);
 
+/// A Switch 1 program as the runtime caches it: the bytes from its start address to its end
+/// (GenericEnvironment::TryFindSize) and the hash Analyze gives them. The cache holds two words
+/// more than the hashed range (the self-branch and the word behind it, never executed).
+struct MaxwellProgram {
+    std::vector<u8> code;
+    u64 hash{};
+    /// The last cached word lies outside the code area, where the guest's memory holds whatever
+    /// the game put next (often the next program's header): it is zero here, so a record with
+    /// this code works the same but is not byte for byte the runtime's.
+    bool padded{};
+};
+
+/// The program that starts `start` bytes into a scanned code area (graphics: 0x30, at the shader
+/// program header). Empty when it does not end inside the area: the runtime then reads on into
+/// whatever follows it in guest memory, which the file does not tell.
+std::optional<MaxwellProgram> FindMaxwellProgram(std::span<const u8> code_area, size_t start,
+                                                 bool is_proprietary_driver);
+
 /// The pipeline cache key hash of laid out code (NativeShaderHash).
 u64 StageHash(std::span<const u8> code);
 
@@ -68,9 +86,11 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control);
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
                              ComputeKey& key);
 
-/// Peanuts Native's key of an NVN2 shader: the first 16 hex digits of SHA-256 over control bytes
-/// 0 to 0x30, four zero bytes, control bytes 0x34 to 0x48 and the whole code area. Empty when the
-/// control section is shorter than that.
+/// Peanuts Native's key of a shader: the first 16 hex digits of SHA-256 over its control bytes
+/// and the whole code area. NVN2: control bytes 0 to 0x30, four zero bytes and bytes 0x34 to
+/// 0x48. Switch 1: the first 0x880 control bytes, or the section's own length (at 0x20) when
+/// that is 0x760 to 0x87f. Empty when the control section is shorter than that. (Peanuts'
+/// per-game shader_key_skip, one title so far, is not applied.)
 std::optional<u64> PeanutsKey(std::span<const u8> control, std::span<const u8> code);
 
 /// A Peanuts Native prewarm list (<title id>.tsv.zst): the shaders a game used (S and C rows) and
@@ -83,10 +103,12 @@ struct PeanutsList {
 /// Empty when `compressed` is not a zstd frame.
 std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed);
 
-/// A pipeline cache record of a vertex and a fragment program (LowerGraphicsProgram) with no
-/// recorded reads and an all-zero pipeline state: the emulator gives it a state and guesses the
-/// reads (see PairsWarmPath).
-std::vector<u8> PairEntry(const LoweredCode& vertex, const LoweredCode& fragment);
+/// A pipeline cache record of a vertex and a fragment program with no recorded reads and an
+/// all-zero pipeline state: the emulator gives it a state and guesses the reads (see
+/// PairsWarmPath). The code is LowerGraphicsProgram's or, with texture buffer 2 (the guest
+/// driver Switch 1 titles use), MaxwellProgram's; the hashes are the runtime's for it.
+std::vector<u8> PairEntry(const LoweredCode& vertex, u64 vertex_hash, const LoweredCode& fragment,
+                          u64 fragment_hash);
 
 /// A pipeline list ("plan"): the records of a pipeline cache with each environment's code replaced
 /// by the hash the runtime gives it (the code size stays in the environment header), so the file

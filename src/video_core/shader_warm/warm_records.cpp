@@ -45,9 +45,10 @@ T Get(std::span<const u8> data, size_t offset) {
     return value;
 }
 
-/// The GenericEnvironment::Serialize header: six u64 counts and seven u32 fields.
+/// The GenericEnvironment::Serialize header: six u64 counts and seven u32 fields. The code is
+/// cached from `read_lowest`.
 void PutEnvHeader(std::vector<u8>& out, u64 code_size, u64 cbuf_count, u32 local_memory,
-                  u32 texture_bound, u32 start_address, u32 stage) {
+                  u32 texture_bound, u32 start_address, u32 stage, u32 read_lowest = 0) {
     Put<u64>(out, code_size);
     Put<u64>(out, 0); // texture types
     Put<u64>(out, 0); // texture pixel formats
@@ -57,8 +58,8 @@ void PutEnvHeader(std::vector<u8>& out, u64 code_size, u64 cbuf_count, u32 local
     Put<u32>(out, local_memory);
     Put<u32>(out, texture_bound);
     Put<u32>(out, start_address);
-    Put<u32>(out, 0);                                  // read lowest
-    Put<u32>(out, static_cast<u32>(code_size - 8));    // read highest
+    Put<u32>(out, read_lowest);
+    Put<u32>(out, read_lowest + static_cast<u32>(code_size - 8)); // read highest
     Put<u32>(out, 1);                                  // viewport transform state
     Put<u32>(out, stage);
 }
@@ -122,6 +123,28 @@ std::optional<std::string> LowerGraphicsProgram(std::span<const u8> program, boo
     return Lower(header, program.subspan(NativeHeaderSize), {.geometry = geometry}, true, out);
 }
 
+std::optional<MaxwellProgram> FindMaxwellProgram(std::span<const u8> code_area, size_t start,
+                                                 bool is_proprietary_driver) {
+    if (start >= code_area.size()) {
+        return std::nullopt;
+    }
+    const auto bytes = code_area.subspan(start);
+    std::vector<u64> words(bytes.size() / sizeof(u64));
+    std::memcpy(words.data(), bytes.data(), words.size() * sizeof(u64));
+    const auto size = FindMaxwellCodeEnd(words, is_proprietary_driver);
+    // The end word must be in the area too (the first EXIT can be its last word).
+    if (!size || *size + sizeof(u64) > words.size() * sizeof(u64)) {
+        return std::nullopt;
+    }
+    MaxwellProgram program;
+    program.hash = Common::CityHash64(reinterpret_cast<const char*>(bytes.data()), *size);
+    const size_t cached = *size + 2 * sizeof(u64);
+    program.padded = cached > bytes.size();
+    program.code.assign(bytes.begin(), bytes.begin() + (std::min)(cached, bytes.size()));
+    program.code.resize(cached);
+    return program;
+}
+
 u64 StageHash(std::span<const u8> code) {
     std::vector<u64> words(code.size() / sizeof(u64));
     std::memcpy(words.data(), code.data(), words.size() * sizeof(u64));
@@ -171,13 +194,25 @@ std::optional<u64> PeanutsKey(std::span<const u8> control, std::span<const u8> c
     if (control.size() < 0x48) {
         return std::nullopt;
     }
+    const bool native = Get<u32>(control, 4) == 0xc9;
+    size_t length = 0x48;
+    if (!native) {
+        const u32 own = Get<u32>(control, 0x20);
+        length = own >= 0x760 && own < 0x880 ? own : 0x880;
+        if (control.size() < length) {
+            return std::nullopt;
+        }
+    }
+    // The native control's own length (at 0x30) differs between containers: hashed as zero.
+    const size_t skip = native ? 0x30 : length;
     constexpr std::array<u8, 4> zero{};
     std::array<u8, EVP_MAX_MD_SIZE> digest{};
     EVP_MD_CTX* const context = EVP_MD_CTX_new();
     const bool ok = context != nullptr && EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
-                    EVP_DigestUpdate(context, control.data(), 0x30) == 1 &&
-                    EVP_DigestUpdate(context, zero.data(), zero.size()) == 1 &&
-                    EVP_DigestUpdate(context, control.data() + 0x34, 0x48 - 0x34) == 1 &&
+                    EVP_DigestUpdate(context, control.data(), skip) == 1 &&
+                    (!native ||
+                     (EVP_DigestUpdate(context, zero.data(), zero.size()) == 1 &&
+                      EVP_DigestUpdate(context, control.data() + 0x34, length - 0x34) == 1)) &&
                     EVP_DigestUpdate(context, code.data(), code.size()) == 1 &&
                     EVP_DigestFinal_ex(context, digest.data(), nullptr) == 1;
     EVP_MD_CTX_free(context);
@@ -242,21 +277,28 @@ std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed) {
     return list;
 }
 
-std::vector<u8> PairEntry(const LoweredCode& vertex, const LoweredCode& fragment) {
+std::vector<u8> PairEntry(const LoweredCode& vertex, u64 vertex_hash, const LoweredCode& fragment,
+                          u64 fragment_hash) {
     using Maxwell = Tegra::Engines::Maxwell3D::Regs;
     std::vector<u8> out;
     Put<u32>(out, 2);
     const auto put_env = [&out](const LoweredCode& lowered, Shader::Stage stage) {
-        // What GraphicsEnvironment holds for a native program: the header in front of the code
-        // gives the local memory, and the program its own texture bank when it names one.
+        // What GraphicsEnvironment holds: the header in front of the code gives the local
+        // memory, and a native program its own texture bank when it names one.
         const std::span<const u8> header{lowered.code.data(), sizeof(Shader::ProgramHeader)};
         Shader::ProgramHeader sph;
         std::memcpy(&sph, header.data(), sizeof(sph));
         const u32 local_memory =
             static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size;
         const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
-        PutEnvHeader(out, lowered.code.size(), 0, local_memory, texture_bound, 0,
-                     static_cast<u32>(stage));
+        // Maxwell code has a scheduling word at every address that is a multiple of 32, and
+        // its header sits 0x30 into the code area: a start address of 0 would shift them.
+        const u32 start = Get<u64>(lowered.code, lowered.code.size() - sizeof(u64)) ==
+                                  Shader::Ampere::NativeAddressMapMagic
+                              ? 0
+                              : 0x30;
+        PutEnvHeader(out, lowered.code.size(), 0, local_memory, texture_bound, start,
+                     static_cast<u32>(stage), start);
         PutBytes(out, lowered.code);
         PutBytes(out, header);
     };
@@ -264,8 +306,8 @@ std::vector<u8> PairEntry(const LoweredCode& vertex, const LoweredCode& fragment
     put_env(fragment, Shader::Stage::Fragment);
     Vulkan::GraphicsPipelineCacheKey key;
     std::memset(&key, 0, sizeof(key));
-    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] = StageHash(vertex.code);
-    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] = StageHash(fragment.code);
+    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] = vertex_hash;
+    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] = fragment_hash;
     PutBytes(out, std::span<const u8>{reinterpret_cast<const u8*>(&key), sizeof(key)});
     return out;
 }

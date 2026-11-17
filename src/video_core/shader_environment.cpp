@@ -416,14 +416,27 @@ void GenericEnvironment::Serialize(std::ofstream& file, bool with_mesh_state) co
     }
 }
 
-std::optional<u64> GenericEnvironment::TryFindSize() {
-    static constexpr size_t BLOCK_SIZE = 0x1000;
-    static constexpr size_t MAXIMUM_SIZE = MAXIMUM_SHADER_SIZE;
-
+std::optional<size_t> FindMaxwellCodeEnd(std::span<const u64> words, bool is_proprietary_driver) {
     static constexpr u64 SELF_BRANCH_A = 0xE2400FFFFF87000FULL;
     static constexpr u64 SELF_BRANCH_B = 0xE2400FFFFF07000FULL;
 
     static constexpr u64 EXIT_VALUE = 0xE30000000007000FULL;
+
+    for (size_t index = 0; index < words.size(); ++index) {
+        const u64 inst = words[index];
+        if (inst == SELF_BRANCH_A || inst == SELF_BRANCH_B) {
+            return index * INST_SIZE;
+        }
+        if (!is_proprietary_driver && inst == EXIT_VALUE) {
+            return (index + 1) * INST_SIZE;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<u64> GenericEnvironment::TryFindSize() {
+    static constexpr size_t BLOCK_SIZE = 0x1000;
+    static constexpr size_t MAXIMUM_SIZE = MAXIMUM_SHADER_SIZE;
 
     code.resize(MAXIMUM_SIZE / INST_SIZE);
 
@@ -433,14 +446,9 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     while (size <= MAXIMUM_SIZE) {
         u64* const data = code.data() + offset / INST_SIZE;
         gpu_memory->ReadBlockUnsafe(guest_addr, data, BLOCK_SIZE);
-        for (size_t index = 0; index < BLOCK_SIZE; index += INST_SIZE) {
-            const u64 inst = data[index / INST_SIZE];
-            if (inst == SELF_BRANCH_A || inst == SELF_BRANCH_B) {
-                return offset + index;
-            }
-            if (!is_proprietary_driver && inst == EXIT_VALUE) {
-                return offset + index + INST_SIZE;
-            }
+        if (const auto end = FindMaxwellCodeEnd({data, BLOCK_SIZE / INST_SIZE},
+                                                is_proprietary_driver)) {
+            return offset + *end;
         }
         guest_addr += BLOCK_SIZE;
         size += BLOCK_SIZE;
