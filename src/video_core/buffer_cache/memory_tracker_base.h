@@ -75,6 +75,26 @@ public:
     [[nodiscard]] u64 CpuEpoch() const noexcept {
         return cpu_epoch;
     }
+    /// Nx2Perf region_epoch: CpuEpoch for one range. Every bump of the global epoch also bumps
+    /// the counters of the 64 KiB regions it can set CPU-modified bits in (BumpRegions), so the
+    /// sum over a range's regions is unchanged exactly while none of them was bumped. Regions
+    /// share counters modulo the table size, which only costs spurious changes. A range over
+    /// more than MEMO_REGIONS regions gets the global epoch.
+    [[nodiscard]] u64 RegionEpoch(VAddr query_cpu_addr, u64 query_size) const noexcept {
+        if (query_size == 0) {
+            return all_regions_epoch;
+        }
+        const u64 first = query_cpu_addr >> REGION_BITS;
+        const u64 last = (query_cpu_addr + query_size - 1) >> REGION_BITS;
+        if (last - first >= MEMO_REGIONS) {
+            return cpu_epoch;
+        }
+        u64 sum = all_regions_epoch;
+        for (u64 region = first; region <= last; ++region) {
+            sum += region_epochs[region % region_epochs.size()];
+        }
+        return sum;
+    }
     [[nodiscard]] u64 GpuEpoch() const noexcept {
         return gpu_epoch;
     }
@@ -85,6 +105,7 @@ public:
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size, bool keep_tracking = false) {
         ++cpu_epoch;
+        BumpRegions(dirty_cpu_addr, query_size);
         IteratePages<true>(dirty_cpu_addr, query_size, [keep_tracking](Manager* manager, u64 offset, size_t size) {
             manager->ChangeRegionState(Type::CPU, true, manager->cpu_addr + offset, size, keep_tracking);
         });
@@ -140,6 +161,11 @@ public:
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
         ++cpu_epoch;
+        // Each manager the range touches flushes all of its cached writes.
+        const VAddr first_manager = query_cpu_addr & ~VAddr{HIGHER_PAGE_MASK};
+        BumpRegions(first_manager, ((query_cpu_addr + query_size + HIGHER_PAGE_MASK) &
+                                    ~VAddr{HIGHER_PAGE_MASK}) -
+                                       first_manager);
         IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
             manager->FlushCachedWrites();
         });
@@ -147,6 +173,7 @@ public:
 
     void FlushCachedWrites() noexcept {
         ++cpu_epoch;
+        ++all_regions_epoch;
         for (auto id : cached_pages) {
             top_tier[id]->FlushCachedWrites();
         }
@@ -292,6 +319,7 @@ private:
 
     void CreateRegion(std::size_t page_index) {
         ++cpu_epoch; // A new manager starts with every page CPU-modified
+        BumpRegions(page_index << HIGHER_PAGE_BITS, HIGHER_PAGE_SIZE);
         const VAddr base_cpu_addr = page_index << HIGHER_PAGE_BITS;
         top_tier[page_index] = GetNewManager(base_cpu_addr);
     }
@@ -316,8 +344,29 @@ private:
     std::deque<Manager*> free_managers;
     ::Common::unordered_set<u32> cached_pages;
     DeviceTracker* device_tracker = nullptr;
+    static constexpr size_t REGION_BITS = 16;
+    static constexpr u64 MEMO_REGIONS = 32;
+
+    /// Counts a possible CPU-modified change in [addr, addr + size) for RegionEpoch.
+    void BumpRegions(VAddr addr, u64 size) noexcept {
+        if (size == 0) {
+            return;
+        }
+        const u64 first = addr >> REGION_BITS;
+        const u64 last = (addr + size - 1) >> REGION_BITS;
+        if (last - first >= region_epochs.size()) {
+            ++all_regions_epoch;
+            return;
+        }
+        for (u64 region = first; region <= last; ++region) {
+            ++region_epochs[region % region_epochs.size()];
+        }
+    }
+
     u64 cpu_epoch{};
     u64 gpu_epoch{};
+    std::array<u32, 1 << 14> region_epochs{};
+    u64 all_regions_epoch{};
 };
 
 } // namespace VideoCommon

@@ -1972,12 +1972,14 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         // The sync would have found nothing to upload and returned true.
         ++channel_state->uniform_cache_hits[0];
     } else {
-        const u64 cpu_epoch = memory_tracker.CpuEpoch();
+        const u64 cpu_epoch = BindMemoEpoch(device_addr, size);
         TouchBuffer(buffer, binding.buffer_id);
         // Classic cached path
-        if (SynchronizeBuffer(buffer, device_addr, size)) {
+        const bool clean = SynchronizeBuffer(buffer, device_addr, size);
+        if (clean) {
             ++channel_state->uniform_cache_hits[0];
         }
+        BindMemoVerifySync(clean, "uniform", device_addr, size);
         if (memo != nullptr) {
             BindMemoNote(*memo, binding.buffer_id, device_addr, size, cpu_epoch);
         }
@@ -2108,13 +2110,16 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
             BindMemoHit(*memo, buffer, binding.buffer_id, binding.device_addr, binding.size,
                         buffer.Offset(binding.device_addr), "storage", stage, index) &&
             memo->usage_marked;
-        const u64 cpu_epoch = memory_tracker.CpuEpoch();
+        const u64 cpu_epoch = BindMemoEpoch(binding.device_addr, binding.size);
         if (!memo_hit) {
             TouchBuffer(buffer, binding.buffer_id);
         }
         const u32 size = binding.size;
         if (!memo_hit) {
-            SynchronizeBuffer(buffer, binding.device_addr, size);
+            const bool clean = SynchronizeBuffer(buffer, binding.device_addr, size);
+            if (memo != nullptr && !is_written) {
+                BindMemoVerifySync(clean, "storage", binding.device_addr, size);
+            }
         }
 
         const u32 offset = buffer.Offset(binding.device_addr);
@@ -3411,15 +3416,22 @@ bool BufferCache<P>::BindMemoEnabled() {
 }
 
 template <class P>
+u64 BufferCache<P>::BindMemoEpoch(DAddr device_addr, u32 size) const {
+    static const bool regional = Nx2Perf::On(Nx2Perf::Opt::RegionEpoch);
+    return regional ? memory_tracker.RegionEpoch(device_addr, size) : memory_tracker.CpuEpoch();
+}
+
+template <class P>
 bool BufferCache<P>::BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId buffer_id,
                                  DAddr device_addr, u32 size, u32 offset, const char* kind,
                                  size_t stage, u32 index) {
     if constexpr (IS_OPENGL) {
         return false;
     } else {
+        bind_memo_would_hit = false;
         if (!memo.valid || memo.channel != channel_state || memo.buffer_id != buffer_id ||
             memo.device_addr != device_addr || memo.size != size ||
-            memo.cpu_epoch != memory_tracker.CpuEpoch() ||
+            memo.cpu_epoch != BindMemoEpoch(device_addr, size) ||
             memo.gpu_epoch != memory_tracker.GpuEpoch() || memo.frame != frame_tick ||
             memo.tick != runtime.CurrentTick()) {
             Nx2Profile::Add(Nx2Profile::Counter::BindMemoMisses, 1);
@@ -3445,6 +3457,7 @@ bool BufferCache<P>::BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId 
         if (memo.usage_marked && size != 0 && !buffer.IsRegionUsed(offset, size)) {
             mismatch("usage not marked");
         }
+        bind_memo_would_hit = true;
         return false;
     }
 }
@@ -3455,7 +3468,7 @@ void BufferCache<P>::BindMemoNote(BindMemo& memo, BufferId buffer_id, DAddr devi
     if constexpr (!IS_OPENGL) {
         // A walk of the range leaves it clean unless something marked it meanwhile; a deduped
         // sync did not walk it, so check.
-        if (memory_tracker.CpuEpoch() != cpu_epoch_before ||
+        if (BindMemoEpoch(device_addr, size) != cpu_epoch_before ||
             (last_sync_deduped && memory_tracker.IsRegionCpuModified(device_addr, size))) {
             memo.valid = false;
             return;
@@ -3472,6 +3485,17 @@ void BufferCache<P>::BindMemoNote(BindMemo& memo, BufferId buffer_id, DAddr devi
             .tick = runtime.CurrentTick(),
             .frame = frame_tick,
         };
+    }
+}
+
+template <class P>
+void BufferCache<P>::BindMemoVerifySync(bool sync_was_clean, const char* kind, DAddr device_addr,
+                                        u32 size) {
+    if (std::exchange(bind_memo_would_hit, false) && !sync_was_clean &&
+        bind_memo_hit_uploads++ < 64) {
+        LOG_ERROR(HW_GPU,
+                  "Nx2Perf bind_memo: {} hit, but its sync uploaded at {:#x}+{:#x} (uploads {})",
+                  kind, device_addr, size, bind_memo_hit_uploads);
     }
 }
 

@@ -12,7 +12,8 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 
-// Switches for the NX2 GPU optimizations, all on by default (names in opt_names).
+// Switches for the NX2 GPU optimizations, on by default except the opt-in ones (OptInMask; names
+// in opt_names).
 // EDEN_NX2_PERF_OPT=0 turns every one off; EDEN_NX2_PERF_SAFE=1 turns off the experimental ones
 // (DefaultOffMask); EDEN_NX2_PERF_ON=<name>,... turns named ones back on and
 // EDEN_NX2_PERF_OFF=<name>,... turns named ones off. EDEN_NX2_PERF_VERIFY=1 computes each
@@ -98,6 +99,10 @@ enum class Opt : unsigned {
     /// Async shaders: keep FileEnvironments of graphics pipelines skipped at boot and replay their
     /// translation and compilation on background workers on first skippable use
     ReplayDiskRecordings,
+    /// Opt-in. bind_memo checks the tracker's CPU epochs of the 64 KiB regions its range covers
+    /// instead of the global one, which the back thread's own constant buffer writes move at
+    /// every draw
+    RegionEpoch,
     Count,
 };
 
@@ -111,7 +116,7 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(Opt::Count)> o
     "submit_while_waited", "pipeline_keep_preloaded", "bank_once_per_frame", "dirty_gather_fast",
     "handle_page_cache", "dma_forward", "draw_begin_coalesce", "pending_wake", "diag_draw_lite",
     "shader_build_budget", "compute_rebuild_async", "compute_preload_variants", "stale_target_skip",
-    "geometry_consistency", "build_order_priority", "replay_disk_recordings",
+    "geometry_consistency", "build_order_priority", "replay_disk_recordings", "region_epoch",
 };
 
 static_assert(static_cast<size_t>(Opt::Count) <= 64, "the off-mask is 64 bits");
@@ -150,9 +155,14 @@ inline constexpr u64 DefaultOffMask() {
     return mask;
 }
 
+/// Off unless EDEN_NX2_PERF_ON names them: switches not yet measured on a device.
+inline constexpr u64 OptInMask() {
+    return Bit(Opt::RegionEpoch);
+}
+
 /// The off-mask from EDEN_NX2_PERF_SAFE (safe), EDEN_NX2_PERF_ON (on) and EDEN_NX2_PERF_OFF (off).
 inline u64 ParseOffMask(bool safe, std::string_view on, std::string_view off) {
-    u64 mask = safe ? DefaultOffMask() : u64{0};
+    u64 mask = (safe ? DefaultOffMask() : u64{0}) | OptInMask();
     while (!on.empty()) {
         const size_t comma = on.find(',');
         const std::string_view name = on.substr(0, comma);
