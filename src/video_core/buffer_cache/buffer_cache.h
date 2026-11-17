@@ -4113,7 +4113,18 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         // Only DLSS passes size from the mapping: doing it for every native dispatch binds up to
         // 8 MiB per buffer and slows Hyrule Warriors' fights to a few fps, then hangs them.
         if (native_pointer) {
-            return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
+            // EDEN_NX2_WRITTEN_SSBO_KB=<n> (experiment): written bare-pointer bindings reach n KiB
+            // instead of 8 MiB. Their whole range is marked GPU-written, and the guest's CPU
+            // writes next to them then fault one by one under NCE (Donkey Kong Bananza: ~2 M
+            // writes per 5 s, bindings of ~4 MiB on average). A shader writing past the cap loses
+            // the tracking of those bytes.
+            static const u32 written_cap = [] {
+                const char* value = std::getenv("EDEN_NX2_WRITTEN_SSBO_KB");
+                return value == nullptr ? 0u
+                                        : static_cast<u32>(std::strtoul(value, nullptr, 10)) * 1024u;
+            }();
+            const u32 cap = is_written && written_cap != 0 ? written_cap : static_cast<u32>(8_MiB);
+            return (std::min)(memory_layout_size, cap);
         }
         const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
         const u32 packed_size = static_cast<u32>(next_qword);
