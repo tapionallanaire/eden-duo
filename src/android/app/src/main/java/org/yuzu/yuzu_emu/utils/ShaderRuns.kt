@@ -105,6 +105,35 @@ object ShaderRuns {
             false
         }
 
+    /**
+     * Asks once per title whether to compile its shaders before it starts, then calls [launch].
+     * Every way of starting a game goes through here, so the question does not depend on which
+     * button was used.
+     */
+    fun askThenLaunch(context: android.content.Context, game: Game?, launch: () -> Unit) {
+        val preferences = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val declinedKey = "shader_precache_declined_" + (game?.programIdHex ?: "")
+        if (game == null || !canPrecache(context, game) || precacheDone(game) ||
+            preferences.getBoolean(declinedKey, false)
+        ) {
+            launch()
+            return
+        }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(context)
+            .setTitle(org.yuzu.yuzu_emu.R.string.shader_precache_title)
+            .setMessage(org.yuzu.yuzu_emu.R.string.shader_precache_message)
+            .setPositiveButton(org.yuzu.yuzu_emu.R.string.shader_precache_yes) { _, _ ->
+                installShippedPlan(context, game)
+                precacheNext = true
+                launch()
+            }
+            .setNegativeButton(org.yuzu.yuzu_emu.R.string.shader_precache_no) { _, _ ->
+                preferences.edit().putBoolean(declinedKey, true).apply()
+                launch()
+            }
+            .show()
+    }
+
     fun recordingLog(game: Game): File =
         File(cacheDir(game), "recording.log")
 
