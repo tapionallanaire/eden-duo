@@ -396,8 +396,14 @@ inline std::unordered_set<u64>& DmaReadPages() {
 
 inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
-        t_data.counters[static_cast<size_t>(counter)] += amount;
-        t_totals.counters[static_cast<size_t>(counter)] += amount;
+        const size_t index = static_cast<size_t>(counter);
+        t_data.counters[index] += amount;
+        // The totals keep the first counters only. Writing the others there ran past the
+        // array into the thread's next thread_local objects (the device memory translation
+        // cache among them: its host pointers grew with every count).
+        if (index < t_totals.counters.size()) {
+            t_totals.counters[index] += amount;
+        }
     }
 }
 
