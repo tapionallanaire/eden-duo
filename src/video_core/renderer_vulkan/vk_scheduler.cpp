@@ -481,10 +481,20 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 
     // EDEN_NX2_WORKER_SPIN_US=<n>: with nothing queued the worker polls for n microseconds before
     // it sleeps, so the recording thread does not pay a wake-up (a futex call) for every chunk
-    // (5 % of Donkey Kong Bananza's GPU back thread). 0 (default) sleeps at once.
+    // (5 % of Donkey Kong Bananza's GPU back thread). 0 sleeps at once, the default but for
+    // Donkey Kong Bananza on Android: 200 there (AYN Odin 2, a dug-out part of the mining tunnel:
+    // 44.7 -> 42.0 ms a frame, the back thread's CPU 31.9 -> 30.1 ms).
     static const s64 spin_us = [] {
         const char* value = std::getenv("EDEN_NX2_WORKER_SPIN_US");
-        return value == nullptr ? s64{0} : static_cast<s64>(std::atoll(value));
+        if (value != nullptr) {
+            return static_cast<s64>(std::atoll(value));
+        }
+#ifdef __ANDROID__
+        if (Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL) {
+            return s64{200};
+        }
+#endif
+        return s64{0};
     }();
     while (!stop_token.stop_requested()) {
         std::unique_ptr<CommandChunk> work;
