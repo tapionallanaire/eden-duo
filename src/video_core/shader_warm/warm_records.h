@@ -27,8 +27,8 @@ constexpr u32 WarmCacheVersion = 35; // Duet Plus: see CACHE_VERSION in vk_pipel
 /// What the builder finds in the game files, recorded in the precache's count file. A file built by
 /// an older builder is rebuilt at boot (RefreshWarmFiles). 2: Mario Kart World's .esetb effects.
 /// 3: .ptcl particle effects (Fire Emblem). 4: the vertex + fragment pairs of BNSH variations
-/// (warm-pairs.bin).
-constexpr u32 WarmBuilderVersion = 4;
+/// (warm-pairs.bin). 5: warm-pairs.bin holds each program once.
+constexpr u32 WarmBuilderVersion = 5;
 
 using ComputeKey = std::array<u8, 24>;
 
@@ -104,12 +104,17 @@ struct PeanutsList {
 /// Empty when `compressed` is not a zstd frame.
 std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed);
 
-/// A pipeline cache record of a vertex and a fragment program with no recorded reads and an
-/// all-zero pipeline state: the emulator gives it a state and guesses the reads (see
-/// PairsWarmPath). The code is LowerGraphicsProgram's or, with texture buffer 2 (the guest
-/// driver Switch 1 titles use), MaxwellProgram's; the hashes are the runtime's for it.
-std::vector<u8> PairEntry(const LoweredCode& vertex, u64 vertex_hash, const LoweredCode& fragment,
-                          u64 fragment_hash);
+/// A pairs file (PairsWarmPath): the vertex and fragment programs of a title, each once, and the
+/// pairs its files make of them. After the pipeline cache header:
+///   u32 PairsTag, u32 programs, each: u64 runtime hash, u8 fragment, the shader program header
+///     (0x50 bytes), u32 size + StageEntry compressed with zstd
+///   u32 pairs, each: u32 vertex program, u32 fragment program (indices)
+constexpr u32 PairsTag = 0x52494150; // "PAIR"
+
+/// A vertex or fragment program as GenericEnvironment::Serialize writes one, with no recorded
+/// reads: the emulator guesses them. The code is LowerGraphicsProgram's or, with texture buffer
+/// 2 (the guest driver Switch 1 titles use), MaxwellProgram's.
+std::vector<u8> StageEntry(const LoweredCode& lowered, bool fragment);
 
 /// A pipeline list ("plan"): the records of a pipeline cache with each environment's code replaced
 /// by the hash the runtime gives it (the code size stays in the environment header), so the file

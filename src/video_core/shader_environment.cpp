@@ -1085,7 +1085,7 @@ u32 ComputeEnvironment::ReadViewportTransformState() {
     return viewport_transform_state;
 }
 
-void FileEnvironment::Deserialize(std::ifstream& file, bool with_mesh_state) {
+void FileEnvironment::Deserialize(std::istream& file, bool with_mesh_state) {
     u64 code_size{};
     u64 num_texture_types{};
     u64 num_texture_pixel_formats{};

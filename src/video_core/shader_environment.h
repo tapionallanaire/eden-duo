@@ -325,7 +325,7 @@ public:
     FileEnvironment& operator=(const FileEnvironment&) = delete;
     FileEnvironment(const FileEnvironment&) = delete;
 
-    void Deserialize(std::ifstream& file, bool with_mesh_state = false);
+    void Deserialize(std::istream& file, bool with_mesh_state = false);
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

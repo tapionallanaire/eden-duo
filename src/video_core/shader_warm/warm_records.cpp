@@ -277,38 +277,27 @@ std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed) {
     return list;
 }
 
-std::vector<u8> PairEntry(const LoweredCode& vertex, u64 vertex_hash, const LoweredCode& fragment,
-                          u64 fragment_hash) {
-    using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+std::vector<u8> StageEntry(const LoweredCode& lowered, bool fragment) {
     std::vector<u8> out;
-    Put<u32>(out, 2);
-    const auto put_env = [&out](const LoweredCode& lowered, Shader::Stage stage) {
-        // What GraphicsEnvironment holds: the header in front of the code gives the local
-        // memory, and a native program its own texture bank when it names one.
-        const std::span<const u8> header{lowered.code.data(), sizeof(Shader::ProgramHeader)};
-        Shader::ProgramHeader sph;
-        std::memcpy(&sph, header.data(), sizeof(sph));
-        const u32 local_memory =
-            static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size;
-        const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
-        // Maxwell code has a scheduling word at every address that is a multiple of 32, and
-        // its header sits 0x30 into the code area: a start address of 0 would shift them.
-        const u32 start = Get<u64>(lowered.code, lowered.code.size() - sizeof(u64)) ==
-                                  Shader::Ampere::NativeAddressMapMagic
-                              ? 0
-                              : 0x30;
-        PutEnvHeader(out, lowered.code.size(), 0, local_memory, texture_bound, start,
-                     static_cast<u32>(stage), start);
-        PutBytes(out, lowered.code);
-        PutBytes(out, header);
-    };
-    put_env(vertex, Shader::Stage::VertexB);
-    put_env(fragment, Shader::Stage::Fragment);
-    Vulkan::GraphicsPipelineCacheKey key;
-    std::memset(&key, 0, sizeof(key));
-    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] = vertex_hash;
-    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] = fragment_hash;
-    PutBytes(out, std::span<const u8>{reinterpret_cast<const u8*>(&key), sizeof(key)});
+    // What GraphicsEnvironment holds: the header in front of the code gives the local memory,
+    // and a native program its own texture bank when it names one.
+    const std::span<const u8> header{lowered.code.data(), sizeof(Shader::ProgramHeader)};
+    Shader::ProgramHeader sph;
+    std::memcpy(&sph, header.data(), sizeof(sph));
+    const u32 local_memory =
+        static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size;
+    const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
+    // Maxwell code has a scheduling word at every address that is a multiple of 32, and its
+    // header sits 0x30 into the code area: a start address of 0 would shift them.
+    const u32 start = Get<u64>(lowered.code, lowered.code.size() - sizeof(u64)) ==
+                              Shader::Ampere::NativeAddressMapMagic
+                          ? 0
+                          : 0x30;
+    PutEnvHeader(out, lowered.code.size(), 0, local_memory, texture_bound, start,
+                 static_cast<u32>(fragment ? Shader::Stage::Fragment : Shader::Stage::VertexB),
+                 start);
+    PutBytes(out, lowered.code);
+    PutBytes(out, header);
     return out;
 }
 
