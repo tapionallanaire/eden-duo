@@ -577,7 +577,13 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         const VkResult submit_result = master_semaphore->SubmitQueue(
             cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value);
         if (VideoCommon::Nx2Timeline::Enabled()) {
-            static u64 count, lag_ns, lag_max_ns, call_ns;
+            static u64 count, lag_ns, lag_max_ns, call_ns, in_flight, in_flight_max;
+            // Submissions the GPU has not finished when this one goes in.
+            master_semaphore->Refresh();
+            const u64 known = master_semaphore->KnownGpuTick();
+            const u64 pending = signal_value > known ? signal_value - known - 1 : 0;
+            in_flight += pending;
+            in_flight_max = (std::max)(in_flight_max, pending);
             static auto reported = submit_start;
             const auto done = std::chrono::steady_clock::now();
             const u64 lag = static_cast<u64>((submit_start - requested).count());
@@ -587,9 +593,11 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             call_ns += static_cast<u64>((done - submit_start).count());
             if (done - reported >= std::chrono::seconds{5}) {
                 LOG_INFO(Render_Vulkan,
-                         "Submits (last 5 s): {}, worker lag avg {} us max {} us, driver call avg {} us",
-                         count, lag_ns / count / 1000, lag_max_ns / 1000, call_ns / count / 1000);
-                count = lag_ns = lag_max_ns = call_ns = 0;
+                         "Submits (last 5 s): {}, worker lag avg {} us max {} us, driver call avg {} us, "
+                         "unfinished before each avg {} max {}",
+                         count, lag_ns / count / 1000, lag_max_ns / 1000, call_ns / count / 1000,
+                         in_flight / count, in_flight_max);
+                count = lag_ns = lag_max_ns = call_ns = in_flight = in_flight_max = 0;
                 reported = done;
             }
         }
