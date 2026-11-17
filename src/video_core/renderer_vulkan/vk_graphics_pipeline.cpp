@@ -2115,8 +2115,22 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     }, *pipeline_cache);
-    DriverBuildReport::Record(DriverBuildReport::Kind::Graphics,
-                              std::chrono::steady_clock::now() - build_begin);
+    const auto build_time = std::chrono::steady_clock::now() - build_begin;
+    DriverBuildReport::Record(DriverBuildReport::Kind::Graphics, build_time);
+    // A slow build in play: which of its stages the boot-time pair build had compiled ("pair")
+    // and which the game files' pairs did not hold ("new").
+    if (build_time > std::chrono::milliseconds{10} && !DriverBuildReport::OnPrecacheThread() &&
+        DriverBuildReport::PairStageCount() != 0) {
+        std::string stages;
+        for (const u64 hash : key.unique_hashes) {
+            if (hash != 0) {
+                stages += std::format(" {:016x}:{}", hash,
+                                      DriverBuildReport::IsPairStage(hash) ? "pair" : "new");
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Slow driver build in play, {} ms:{}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(build_time).count(), stages);
+    }
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {

@@ -2655,6 +2655,11 @@ void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
     const auto load_pair{[&](std::ifstream& stream, std::vector<FileEnvironment> envs) {
         GraphicsPipelineCacheKey key;
         stream.read(reinterpret_cast<char*>(&key), sizeof(key));
+        for (const u64 hash : key.unique_hashes) {
+            if (hash != 0) {
+                DriverBuildReport::NotePairStage(hash);
+            }
+        }
         if (VideoCore::ShaderPrecacheSkipped()) {
             return;
         }

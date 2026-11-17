@@ -25,6 +25,16 @@ public:
     PrecacheScope& operator=(const PrecacheScope&) = delete;
 };
 
+/// True on a thread inside a PrecacheScope.
+[[nodiscard]] bool OnPrecacheThread();
+
+/// A shader stage (its runtime hash) the boot-time pair build compiled this session, and whether
+/// a hash is one: a slow build in play names its stages with that, to tell a shader the game
+/// files' pairs do not hold from one whose build differed from the pair's.
+void NotePairStage(unsigned long long hash);
+[[nodiscard]] bool IsPairStage(unsigned long long hash);
+[[nodiscard]] unsigned long long PairStageCount();
+
 /// Logs the builds since the last summary (the pipelines built at boot) and starts over.
 void LogSummary(const char* when);
 
