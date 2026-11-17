@@ -1039,11 +1039,27 @@ struct Memory::Impl {
         // Scarlet and FINAL FANTASY RESONANCE. Never asks for NCEAccessFaultAction::Instruction.
         auto& gpu = system.GPU();
         if (exact_only) {
+            // A page refused once (GPU data on it) is refused again nearly always: Donkey Kong
+            // Bananza refuses 99.96 % of ~290,000 asks a second, each taking both cache locks
+            // (~1.3 s of every 5 s waiting for them on an Odin 2). Its next faults go straight to
+            // the interpreter, which is always correct; the page is asked about again after
+            // EDEN_NX2_NCE_RECHECK faults (default 64, 0: every fault).
+            static const u32 recheck = [] {
+                const char* value = std::getenv("EDEN_NX2_NCE_RECHECK");
+                return value == nullptr ? 64u : static_cast<u32>(std::strtoul(value, nullptr, 10));
+            }();
+            const uintptr_t page = reinterpret_cast<uintptr_t>(p) >> YUZU_PAGEBITS;
+            RefusedPage& refused = refused_pages[core][page % refused_pages[core].size()];
+            if (recheck != 0 && refused.page == page && refused.skips != 0) {
+                --refused.skips;
+                return false;
+            }
             bool any = false, handed = true;
             gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
                 any = true;
                 handed = handed && gpu.InvalidateRegionWithoutSync(address, size);
             });
+            refused = any && handed ? RefusedPage{} : RefusedPage{page, recheck - 1};
             return any && handed;
         }
         gpu_device_memory->ApplyOpOnPointer(
@@ -1063,6 +1079,11 @@ struct Memory::Impl {
     std::mutex read_trap_mutex;
     std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
+    struct RefusedPage {
+        uintptr_t page;
+        u32 skips;
+    };
+    std::array<std::array<RefusedPage, 16>, Core::Hardware::NUM_CPU_CORES> refused_pages{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
     std::mutex sys_core_guard;
 #ifdef __ANDROID__
