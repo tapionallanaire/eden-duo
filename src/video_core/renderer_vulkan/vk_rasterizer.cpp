@@ -617,8 +617,23 @@ void RasterizerVulkan::Nx2ProveNonWriterDraw(const GraphicsPipeline& pipeline) {
     Tegra::Nx2DrawPrograms programs;
     if (!Tegra::Engines::Maxwell3D::Nx2DrawProgramsOf(
             maxwell3d->regs, maxwell3d->GetNativeMacroEngine().native_turing, gpu_memory->GetID(),
-            map, programs) ||
-        Tegra::Nx2IsNonWriterDraw(programs, epoch)) {
+            map, programs)) {
+        return;
+    }
+    // Draws already seen proven in this epoch skip the shared set's lock and lookup: ~6,000 draws
+    // a frame in Donkey Kong Bananza, 4 % of the GPU back thread on an AYN Thor. A stale miss
+    // only repeats the proof below.
+    struct Proven {
+        Tegra::Nx2DrawPrograms programs;
+        u64 epoch{};
+    };
+    static thread_local std::array<Proven, 256> proven_cache{};
+    Proven& proven = proven_cache[Tegra::Nx2NonWriterSet::Hash{}(programs) % proven_cache.size()];
+    if (proven.epoch == epoch && proven.programs == programs) {
+        return;
+    }
+    if (Tegra::Nx2IsNonWriterDraw(programs, epoch)) {
+        proven = Proven{programs, epoch};
         return;
     }
     // The indirect reset program is drawn by writing guest memory on the host.
