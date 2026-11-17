@@ -159,6 +159,7 @@ struct Job {
     ComputeControl control{};
     bool graphics{}; ///< A graphics program, lowered for the pipeline list only
     bool geometry{};
+    u64 list_key{}; ///< Its Peanuts key when the Peanuts list names it
 };
 
 struct JobResult {
@@ -168,6 +169,14 @@ struct JobResult {
     ComputeKey compute_key{};
     u64 hash{};           ///< StageHash of `code`
     std::vector<u8> code; ///< The lowered code
+    u32 texture_buffer{~0U};
+    u64 list_key{};
+};
+
+/// A shader of the Peanuts list found in the game files.
+struct ListShader {
+    ProgramStage stage{};
+    LoweredCode lowered; ///< Empty unless a vertex or fragment program that lowered
 };
 
 class Converter {
@@ -257,6 +266,7 @@ private:
     static JobResult Convert(const Job& job) {
         JobResult result;
         result.graphics = job.graphics;
+        result.list_key = job.list_key;
         try {
             LoweredCode lowered;
             if (const auto error =
@@ -269,6 +279,7 @@ private:
                 result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
             }
             result.hash = StageHash(lowered.code);
+            result.texture_buffer = lowered.texture_buffer;
             result.code = std::move(lowered.code);
             result.ok = true;
         } catch (const std::exception& e) {
@@ -315,6 +326,25 @@ std::vector<u8> ReadFile(const fs::path& path) {
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
+/// Writes a pipeline cache file through a temporary one; `fill` writes its records.
+void WriteCacheFile(const fs::path& path, const std::function<void(std::ofstream&)>& fill) {
+    fs::path tmp = path;
+    tmp += ".tmp";
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    WriteHeader(out);
+    fill(out);
+    out.close();
+    std::error_code ec;
+    if (out) {
+        fs::rename(tmp, path, ec);
+    }
+    if (!out || ec) {
+        fs::remove(tmp, ec);
+        LOG_WARNING(Render_Vulkan, "Shader precache: cannot write {}",
+                    Common::FS::PathToUTF8String(path));
+    }
+}
+
 bool EnvOn(const char* name) {
     const char* value = std::getenv(name);
     return value != nullptr && value[0] == '1';
@@ -332,6 +362,14 @@ fs::path PlanPath(u64 title_id) {
 
 fs::path GraphicsWarmPath(u64 title_id) {
     return TitleDir(title_id) / "warm-graphics.bin";
+}
+
+fs::path PeanutsListPath(u64 title_id) {
+    return TitleDir(title_id) / "peanuts.tsv.zst";
+}
+
+fs::path PairsWarmPath(u64 title_id) {
+    return TitleDir(title_id) / "warm-pairs.bin";
 }
 
 fs::path WarmMarkerPath(const fs::path& warm_file) {
@@ -403,7 +441,8 @@ bool DeleteWarmFiles(u64 title_id, std::string* error) {
     tmp += ".tmp";
     bool ok = true;
     for (const auto& path :
-         {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp, GraphicsWarmPath(title_id)}) {
+         {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp, GraphicsWarmPath(title_id),
+          PairsWarmPath(title_id), WarmMarkerPath(PairsWarmPath(title_id))}) {
         std::error_code ec;
         fs::remove(path, ec);
         if (ec) {
@@ -468,6 +507,10 @@ bool RefreshWarmFiles(Core::System& system, u64 title_id, std::stop_token stop) 
         // ponytail: an unusable list (other version) is scanned for at every boot; check its
         // header here if lists outlive cache versions in the field.
         reason = "its pipeline list is new";
+    }
+    if (!reason && !fs::exists(plan, plan_ec) && fs::exists(PeanutsListPath(title_id), plan_ec) &&
+        !fs::exists(PairsWarmPath(title_id), plan_ec)) {
+        reason = "its shader list is new";
     }
     if (!reason) {
         return false;
@@ -634,6 +677,14 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                                    "version, ignored");
     }
     std::unordered_set<PairHash, PairHasher> graphics_identities;
+    // Without a pipeline list, Peanuts Native's list of the title's shaders.
+    std::optional<PeanutsList> list;
+    if (plan_bytes.empty()) {
+        if (const auto bytes = ReadFile(output_dir / "peanuts.tsv.zst"); !bytes.empty()) {
+            list = ReadPeanutsList(bytes);
+        }
+    }
+    std::unordered_map<u64, ListShader> list_found;
 
     std::unordered_set<PairHash, PairHasher> compute_identities;
     std::unordered_set<std::string> compute_keys;
@@ -657,6 +708,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             }
         }
         if (r.graphics) {
+            if (r.ok && r.list_key != 0) {
+                list_found[r.list_key].lowered = {std::move(r.code), r.texture_buffer};
+            }
             return;
         }
         if (!r.ok) {
@@ -692,11 +746,18 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         const auto name = archive.path.substr(archive.path.rfind('/') + 1);
         const auto on_record = [&](const ShaderRecord& record) {
             Job job;
+            // The first record with a key the Peanuts list names is that shader.
+            const auto list_key = list ? PeanutsKey(record.control, record.code) : std::nullopt;
+            const bool listed = list_key && list->shaders.contains(*list_key) &&
+                                list_found.try_emplace(*list_key, ListShader{record.stage}).second;
             if (record.stage != ProgramStage::Compute) {
                 ++other_stage_records;
-                // Lowered only to find the code of the pipeline list's programs.
-                if (plan_code.empty() ||
-                    !graphics_identities.insert(PairHash{Hash128(record.code), {}}).second) {
+                if (listed && (record.stage == ProgramStage::Vertex ||
+                               record.stage == ProgramStage::Fragment)) {
+                    job.list_key = *list_key;
+                } else if (plan_code.empty() ||
+                           !graphics_identities.insert(PairHash{Hash128(record.code), {}}).second) {
+                    // The others are lowered only to find the code of the pipeline list's programs.
                     return;
                 }
                 job.graphics = true;
@@ -769,43 +830,64 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     WriteWarmCount(compute_path, result.compute_programs);
     if (plan) {
         // Every list record whose programs were all found, as a pipeline cache record.
-        const fs::path graphics_path = output_dir / "warm-graphics.bin";
-        fs::path graphics_tmp = graphics_path;
-        graphics_tmp += ".tmp";
-        std::ofstream graphics_out(graphics_tmp, std::ios::binary | std::ios::trunc);
-        WriteHeader(graphics_out);
         size_t filled = 0;
         std::unordered_set<u64> missing;
-        for (const PlanRecord& record : *plan) {
-            bool found = true;
-            for (const PlanEnv& env : record.envs) {
-                const auto& code = plan_code.at(env.hash);
-                if (code.empty() || code.size() != env.CodeSize()) {
-                    missing.insert(env.hash);
-                    found = false;
+        WriteCacheFile(output_dir / "warm-graphics.bin", [&](std::ofstream& out) {
+            for (const PlanRecord& record : *plan) {
+                bool found = true;
+                for (const PlanEnv& env : record.envs) {
+                    const auto& code = plan_code.at(env.hash);
+                    if (code.empty() || code.size() != env.CodeSize()) {
+                        missing.insert(env.hash);
+                        found = false;
+                    }
                 }
+                if (!found) {
+                    continue;
+                }
+                const std::vector<u8> bytes = FilledRecord(record, plan_code);
+                out.write(reinterpret_cast<const char*>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size()));
+                ++filled;
             }
-            if (!found) {
-                continue;
-            }
-            const std::vector<u8> bytes = FilledRecord(record, plan_code);
-            graphics_out.write(reinterpret_cast<const char*>(bytes.data()),
-                               static_cast<std::streamsize>(bytes.size()));
-            ++filled;
-        }
-        graphics_out.close();
-        if (graphics_out) {
-            fs::rename(graphics_tmp, graphics_path, ec);
-        }
-        if (!graphics_out || ec) {
-            fs::remove(graphics_tmp, ignored);
-            LOG_WARNING(Render_Vulkan, "Shader precache: cannot write {}",
-                        Common::FS::PathToUTF8String(graphics_path));
-        }
+        });
         LOG_INFO(Render_Vulkan,
                  "Pipeline list for {:016x}: {} records, {} filled, {} missing ({} programs not "
                  "found in the game files)",
                  title_id, plan->size(), filled, plan->size() - filled, missing.size());
+    }
+    if (list) {
+        size_t found = 0;
+        for (const u64 key : list->shaders) {
+            found += list_found.contains(key) ? 1 : 0;
+        }
+        size_t pairs_found = 0;
+        size_t pairs_written = 0;
+        WriteCacheFile(output_dir / "warm-pairs.bin", [&](std::ofstream& out) {
+            for (const auto& [vertex_key, fragment_key] : list->pairs) {
+                const auto vertex = list_found.find(vertex_key);
+                const auto fragment = list_found.find(fragment_key);
+                if (vertex == list_found.end() || fragment == list_found.end()) {
+                    continue;
+                }
+                ++pairs_found;
+                if (vertex->second.stage != ProgramStage::Vertex ||
+                    fragment->second.stage != ProgramStage::Fragment ||
+                    vertex->second.lowered.code.empty() || fragment->second.lowered.code.empty()) {
+                    continue;
+                }
+                const std::vector<u8> bytes =
+                    PairEntry(vertex->second.lowered, fragment->second.lowered);
+                out.write(reinterpret_cast<const char*>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size()));
+                ++pairs_written;
+            }
+        });
+        LOG_INFO(Render_Vulkan,
+                 "Peanuts list for {:016x}: {} of {} shaders found in the game files ({} not "
+                 "found), {} of {} pairs with both shaders found, {} pair records written",
+                 title_id, found, list->shaders.size(), list->shaders.size() - found, pairs_found,
+                 list->pairs.size(), pairs_written);
     }
     report(StageWriting, 1, 1);
     result.ok = true;

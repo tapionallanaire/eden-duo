@@ -32,6 +32,15 @@ std::filesystem::path PlanPath(u64 title_id);
 /// (<shader dir>/<title id>/warm-graphics.bin). The disk cache load reads it after vulkan.bin.
 std::filesystem::path GraphicsWarmPath(u64 title_id);
 
+/// Peanuts Native's list of the title's shaders (<shader dir>/<title id>/peanuts.tsv.zst, see
+/// PeanutsList), used when the title has no pipeline list.
+std::filesystem::path PeanutsListPath(u64 title_id);
+
+/// The Peanuts list's vertex and fragment pairs found in the game files
+/// (<shader dir>/<title id>/warm-pairs.bin, see PairEntry). The disk cache load builds them once
+/// per driver, only for the driver's cache.
+std::filesystem::path PairsWarmPath(u64 title_id);
+
 /// "Already precached" marker of a precache file (same folder, extension .done), written by the
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.
 std::filesystem::path WarmMarkerPath(const std::filesystem::path& warm_file);
@@ -104,7 +113,7 @@ std::optional<std::string> WarmFilesStale(const std::filesystem::path& warm_file
 
 /// At boot, before the disk cache loads: builds the precache file of the running Switch 2
 /// program from its game file when WarmFilesStale, or when the title has a pipeline list newer
-/// than its warm-graphics.bin. Returns true when it built one. EDEN_NX2_PLAN_VERIFY=1 exports
+/// than its warm-graphics.bin, or a Peanuts list and no warm-pairs.bin. Returns true when it built one. EDEN_NX2_PLAN_VERIFY=1 exports
 /// the list, builds and then logs how many vulkan.bin records came back byte for byte.
 bool RefreshWarmFiles(Core::System& system, u64 title_id, std::stop_token stop);
 

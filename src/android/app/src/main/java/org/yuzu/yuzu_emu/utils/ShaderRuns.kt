@@ -65,20 +65,29 @@ object ShaderRuns {
 
     /**
      * Copies the pipeline list shipped for this title (no game code in it) next to its shader
-     * cache, where the boot fills it from the game's own files. Nothing to do without one.
+     * cache, where the boot fills it from the game's own files. Without one, the title's shader
+     * list from Peanuts Native (shader keys only), when there is one.
      */
     fun installShippedPlan(context: android.content.Context, game: Game) {
-        val target = File(WarmUp.shaderDir(game), "plan.bin")
-        if (target.exists()) return
+        val dir = WarmUp.shaderDir(game)
+        val id = game.programIdHex.uppercase()
+        if (File(dir, "plan.bin").exists()) return
+        if (copyAsset(context, "shader_plans/$id.bin", File(dir, "plan.bin"))) return
+        val list = File(dir, "peanuts.tsv.zst")
+        if (!list.exists()) copyAsset(context, "shader_lists/peanuts/$id.tsv.zst", list)
+    }
+
+    /** False when the app ships no such asset. */
+    private fun copyAsset(context: android.content.Context, asset: String, target: File): Boolean =
         try {
-            context.assets.open("shader_plans/" + game.programIdHex.uppercase() + ".bin").use { input ->
+            context.assets.open(asset).use { input ->
                 target.parentFile?.mkdirs()
                 target.outputStream().use { input.copyTo(it) }
             }
+            true
         } catch (_: java.io.IOException) {
-            // No list shipped for this title.
+            false
         }
-    }
 
     fun recordingLog(game: Game): File =
         File(cacheDir(game), "recording.log")

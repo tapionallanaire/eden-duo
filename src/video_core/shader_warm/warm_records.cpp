@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <map>
 
+#include <openssl/evp.h>
+
 #include "common/cityhash.h"
+#include "common/zstd_compression.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
@@ -160,6 +164,109 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
     }
     std::memcpy(key.data(), key_bytes.data(), key.size());
     PutBytes(out, key_bytes);
+    return out;
+}
+
+std::optional<u64> PeanutsKey(std::span<const u8> control, std::span<const u8> code) {
+    if (control.size() < 0x48) {
+        return std::nullopt;
+    }
+    constexpr std::array<u8, 4> zero{};
+    std::array<u8, EVP_MAX_MD_SIZE> digest{};
+    EVP_MD_CTX* const context = EVP_MD_CTX_new();
+    const bool ok = context != nullptr && EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
+                    EVP_DigestUpdate(context, control.data(), 0x30) == 1 &&
+                    EVP_DigestUpdate(context, zero.data(), zero.size()) == 1 &&
+                    EVP_DigestUpdate(context, control.data() + 0x34, 0x48 - 0x34) == 1 &&
+                    EVP_DigestUpdate(context, code.data(), code.size()) == 1 &&
+                    EVP_DigestFinal_ex(context, digest.data(), nullptr) == 1;
+    EVP_MD_CTX_free(context);
+    if (!ok) {
+        return std::nullopt;
+    }
+    u64 key = 0;
+    for (size_t i = 0; i < sizeof(u64); ++i) {
+        key = key << 8 | digest[i];
+    }
+    return key;
+}
+
+std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed) {
+    const std::vector<u8> bytes = Common::Compression::DecompressDataZSTD(compressed);
+    if (bytes.empty()) {
+        return std::nullopt;
+    }
+    const auto parse_key = [](std::string_view text) -> std::optional<u64> {
+        u64 key{};
+        if (text.size() < 16 ||
+            std::from_chars(text.data(), text.data() + 16, key, 16).ptr != text.data() + 16) {
+            return std::nullopt;
+        }
+        return key;
+    };
+    // A shader key inside an R row: 16 ASCII hex digits, themselves written as hex.
+    const auto row_key = [&](std::string_view row) -> std::optional<u64> {
+        std::array<char, 16> text{};
+        for (size_t i = 0; i < text.size() && row.size() >= 32; ++i) {
+            u8 character{};
+            std::from_chars(row.data() + i * 2, row.data() + i * 2 + 2, character, 16);
+            text[i] = static_cast<char>(character);
+        }
+        return parse_key(std::string_view{text.data(), text.size()});
+    };
+    PeanutsList list;
+    std::unordered_set<u64> seen_pairs;
+    const std::string_view text{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    for (size_t at = 0; at < text.size();) {
+        const size_t end = (std::min)(text.find('\n', at), text.size());
+        const std::string_view line = text.substr(at, end - at);
+        at = end + 1;
+        if (line.size() < 2 || line[1] != '\t') {
+            continue;
+        }
+        const std::string_view row = line.substr(2);
+        if (line[0] == 'S' || line[0] == 'C') {
+            if (const auto key = parse_key(row)) {
+                list.shaders.insert(*key);
+            }
+        } else if (line[0] == 'R' && row.size() >= 96) {
+            // pso_skey starts with char vs[24], fs[24]. Peanuts' own state (formats, blend,
+            // vertex layout) follows; translating it to a pipeline state would start here.
+            const auto vertex = row_key(row);
+            const auto fragment = row_key(row.substr(48));
+            if (vertex && fragment && seen_pairs.insert(*vertex * 31 + *fragment).second) {
+                list.pairs.emplace_back(*vertex, *fragment);
+            }
+        }
+    }
+    return list;
+}
+
+std::vector<u8> PairEntry(const LoweredCode& vertex, const LoweredCode& fragment) {
+    using Maxwell = Tegra::Engines::Maxwell3D::Regs;
+    std::vector<u8> out;
+    Put<u32>(out, 2);
+    const auto put_env = [&out](const LoweredCode& lowered, Shader::Stage stage) {
+        // What GraphicsEnvironment holds for a native program: the header in front of the code
+        // gives the local memory, and the program its own texture bank when it names one.
+        const std::span<const u8> header{lowered.code.data(), sizeof(Shader::ProgramHeader)};
+        Shader::ProgramHeader sph;
+        std::memcpy(&sph, header.data(), sizeof(sph));
+        const u32 local_memory =
+            static_cast<u32>(sph.LocalMemorySize()) + sph.common3.shader_local_memory_crs_size;
+        const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
+        PutEnvHeader(out, lowered.code.size(), 0, local_memory, texture_bound, 0,
+                     static_cast<u32>(stage));
+        PutBytes(out, lowered.code);
+        PutBytes(out, header);
+    };
+    put_env(vertex, Shader::Stage::VertexB);
+    put_env(fragment, Shader::Stage::Fragment);
+    Vulkan::GraphicsPipelineCacheKey key;
+    std::memset(&key, 0, sizeof(key));
+    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] = StageHash(vertex.code);
+    key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] = StageHash(fragment.code);
+    PutBytes(out, std::span<const u8>{reinterpret_cast<const u8*>(&key), sizeof(key)});
     return out;
 }
 

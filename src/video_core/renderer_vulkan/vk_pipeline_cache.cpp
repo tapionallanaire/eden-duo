@@ -1312,6 +1312,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // translation fails.
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<FileEnvironment>> compute_envs;
     bool loading_filled_file = false;
+    /// The state of a recorded vertex + fragment pipeline, for the shader list's pairs.
+    std::optional<FixedPipelineState> pair_state;
+    std::atomic<size_t> pairs_built{};
+    size_t pairs_queued = 0;
 
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
@@ -1431,6 +1435,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 driver_updated = true;
             }
         }
+        if (!pair_state && key.state.xfb_enabled == 0 &&
+            static_cast<size_t>(std::ranges::count(key.unique_hashes, u64{})) ==
+                key.unique_hashes.size() - 2 &&
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] != 0 &&
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] != 0) {
+            pair_state = key.state;
+        }
         {
             std::scoped_lock lock{state.mutex};
             if (!disk_pipelines.insert(hash).second && loading_filled_file) {
@@ -1486,6 +1497,61 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     VideoCommon::LoadPipelines(stop_loading, VideoCommon::ShaderWarm::GraphicsWarmPath(title_id),
                                CACHE_VERSION, load_compute, load_graphics);
     loading_filled_file = false;
+    // The pairs of a Peanuts list (ShaderWarm::PairsWarmPath): programs from the game files with
+    // no recorded reads and no state. They are built with a recorded pipeline's state, as
+    // CompileShaderCombinations does, and with guessed reads, then dropped: a pipeline made of
+    // guesses must never serve a draw, only the driver's cache keeps it (like the compute
+    // precache). Once per driver.
+    // Peanuts' own state (formats, blend, vertex layout) is not translated; it would replace
+    // pair_state here.
+    const auto pairs_file{VideoCommon::ShaderWarm::PairsWarmPath(title_id)};
+    const auto pairs_stamp{VideoCommon::ShaderWarm::CurrentWarmStamp(
+        pairs_file, 0, device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION)};
+    const auto pairs_marker{VideoCommon::ShaderWarm::ReadWarmMarker(pairs_file)};
+    if (pairs_stamp && !(pairs_marker && pairs_marker->Matches(*pairs_stamp))) {
+        if (!pair_state) {
+            LOG_INFO(Render_Vulkan, "Shader list pairs: no recorded pipeline to take a state "
+                                    "from yet, not built");
+        } else {
+            const auto skip_compute{[](std::ifstream& file, FileEnvironment) {
+                ComputePipelineCacheKey key;
+                file.read(reinterpret_cast<char*>(&key), sizeof(key));
+            }};
+            const auto load_pair{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
+                GraphicsPipelineCacheKey key;
+                file.read(reinterpret_cast<char*>(&key), sizeof(key));
+                key.state = *pair_state;
+                workers.QueueWork(
+                    [this, key, envs_ = std::move(envs), &state, &callback, &pairs_built]() mutable {
+                        static const VideoCommon::GuessMissing guess{};
+                        ShaderPools pools;
+                        boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+                        for (auto& env : envs_) {
+                            env.SetGuessMissing(&guess);
+                            env_ptrs.push_back(&env);
+                        }
+                        try {
+                            const DriverBuildReport::PrecacheScope precache_scope;
+                            if (CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr,
+                                                       false)) {
+                                pairs_built.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        } catch (const std::exception& e) {
+                            LOG_DEBUG(Render_Vulkan, "Shader list pairs: {}", e.what());
+                        }
+                        std::scoped_lock lock{state.mutex};
+                        ++state.built;
+                        if (state.has_loaded) {
+                            callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+                        }
+                    });
+                ++state.total;
+                ++pairs_queued;
+            }};
+            VideoCommon::LoadPipelines(stop_loading, pairs_file, CACHE_VERSION, skip_compute,
+                                       load_pair);
+        }
+    }
     if (device.IsExtMeshShaderSupported()) {
         loading_mesh_file = true;
         VideoCommon::LoadPipelines(stop_loading, mesh_pipeline_cache_filename, CACHE_VERSION,
@@ -1521,6 +1587,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
     workers.WaitForRequests(stop_loading);
     DriverBuildReport::LogSummary("at boot");
+    if (pair_state && pairs_stamp && !stop_loading.stop_requested() &&
+        !(pairs_marker && pairs_marker->Matches(*pairs_stamp))) {
+        LOG_INFO(Render_Vulkan, "Shader list pairs: {} of {} built for the driver's cache",
+                 pairs_built.load(), pairs_queued);
+        VideoCommon::ShaderWarm::WriteWarmMarker(pairs_file, *pairs_stamp);
+    }
 
     // A cache from an older compatible version: its records were translated again above. Write
     // it back under the current version without the ones that failed (deferred ones are kept).

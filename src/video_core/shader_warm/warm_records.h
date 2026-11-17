@@ -9,6 +9,8 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
@@ -65,6 +67,26 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control);
 /// One compute entry (env count, env, code, compute trailer, key); `key` gets the 24-byte key.
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
                              ComputeKey& key);
+
+/// Peanuts Native's key of an NVN2 shader: the first 16 hex digits of SHA-256 over control bytes
+/// 0 to 0x30, four zero bytes, control bytes 0x34 to 0x48 and the whole code area. Empty when the
+/// control section is shorter than that.
+std::optional<u64> PeanutsKey(std::span<const u8> control, std::span<const u8> code);
+
+/// A Peanuts Native prewarm list (<title id>.tsv.zst): the shaders a game used (S and C rows) and
+/// its render pipelines' vertex and fragment shaders (R rows; their state is not read).
+struct PeanutsList {
+    std::unordered_set<u64> shaders;
+    std::vector<std::pair<u64, u64>> pairs; ///< Vertex and fragment key, each pair once
+};
+
+/// Empty when `compressed` is not a zstd frame.
+std::optional<PeanutsList> ReadPeanutsList(std::span<const u8> compressed);
+
+/// A pipeline cache record of a vertex and a fragment program (LowerGraphicsProgram) with no
+/// recorded reads and an all-zero pipeline state: the emulator gives it a state and guesses the
+/// reads (see PairsWarmPath).
+std::vector<u8> PairEntry(const LoweredCode& vertex, const LoweredCode& fragment);
 
 /// A pipeline list ("plan"): the records of a pipeline cache with each environment's code replaced
 /// by the hash the runtime gives it (the code size stays in the environment header), so the file

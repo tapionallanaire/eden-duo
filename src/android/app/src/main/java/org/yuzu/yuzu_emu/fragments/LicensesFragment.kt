@@ -99,6 +99,13 @@ class LicensesFragment : Fragment() {
                 R.string.license_adreno_tools_link,
                 R.string.license_adreno_tools_copyright,
                 R.string.license_adreno_tools_text
+            ),
+            License(
+                R.string.license_peanuts,
+                R.string.license_peanuts_description,
+                R.string.license_peanuts_link,
+                R.string.license_peanuts_copyright,
+                R.string.license_peanuts_text
             )
         )
 
