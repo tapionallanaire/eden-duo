@@ -149,6 +149,10 @@ struct ImageBase {
     boost::container::small_vector<SubresourceBase, 16> slice_subresources;
 
     std::vector<AliasedImage> aliased_images;
+    /// An aliased image may have become newer than this one since SynchronizeAliases last looked.
+    bool alias_dirty = true;
+    /// Every aliased image has alias_dirty set since this image last changed.
+    bool aliases_notified = false;
     std::vector<ImageId> overlapping_images;
     ImageMapId map_view_id{};
 };

@@ -479,9 +479,31 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
         return true;
     }};
 
+    // EDEN_NX2_WORKER_SPIN_US=<n>: with nothing queued the worker polls for n microseconds before
+    // it sleeps, so the recording thread does not pay a wake-up (a futex call) for every chunk
+    // (5 % of Donkey Kong Bananza's GPU back thread). 0 (default) sleeps at once.
+    static const s64 spin_us = [] {
+        const char* value = std::getenv("EDEN_NX2_WORKER_SPIN_US");
+        return value == nullptr ? s64{0} : static_cast<s64>(std::atoll(value));
+    }();
     while (!stop_token.stop_requested()) {
         std::unique_ptr<CommandChunk> work;
 
+        if (spin_us > 0) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds{spin_us};
+            for (u32 i = 0;; ++i) {
+                {
+                    std::scoped_lock lk{queue_mutex};
+                    if (!work_queue.empty()) {
+                        break;
+                    }
+                }
+                if ((i & 15) == 15 && std::chrono::steady_clock::now() >= until) {
+                    break;
+                }
+                std::this_thread::yield();
+            }
+        }
         {
             std::unique_lock lk{queue_mutex};
 
