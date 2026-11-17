@@ -46,6 +46,12 @@ object DiskShaderCacheProgress {
                 }
 
                 LoadCallbackStage.Complete -> {
+                    // Eden Duo: a "compile shaders first" boot kept the loading card up until now.
+                    if (org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot) {
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot = false
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone?.invoke()
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone = null
+                    }
                     // Eden Duo: a compile run is over once the plan (and, with Compile max, the
                     // shader combinations) is compiled and the driver cache is written; stop the
                     // game, which has only shown its loading frames, through the normal stop path.

@@ -57,6 +57,18 @@ object ShaderRuns {
     var precacheNext = false
 
     /**
+     * True from the start of a "compile shaders first" boot until the shader load reports it is
+     * complete. The game counts as started before its shaders load, which would hide the loading
+     * card and leave a black screen for the minutes the compile takes.
+     */
+    @Volatile
+    var precacheBoot = false
+
+    /** Hides the loading card once such a boot has finished compiling (set by EmulationFragment). */
+    @Volatile
+    var onPrecacheBootDone: (() -> Unit)? = null
+
+    /**
      * Switch 2 titles (program IDs 04...) always have programs to compile; a Switch 1 title only
      * with a pipeline list or a shader list, its own or a shipped one.
      */

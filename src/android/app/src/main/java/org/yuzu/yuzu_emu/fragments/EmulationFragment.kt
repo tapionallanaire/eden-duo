@@ -469,6 +469,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             {
                 NativeLibrary.setShaderRunMode(recordShaders, compileShaders, compileMax)
                 NativeLibrary.setShaderPrecache(org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext)
+                org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot =
+                    org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext
                 org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext = false
             }
         )
@@ -1095,7 +1097,15 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             if (it) {
                 binding.drawerLayout.setDrawerLockMode(IntSetting.LOCK_DRAWER.getInt())
                 ViewUtils.showView(binding.surfaceInputOverlay)
-                ViewUtils.hideView(binding.loadingIndicator)
+                // Eden Duo: a "compile shaders first" boot keeps the card and its progress bar
+                // until the compile is done.
+                if (org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot) {
+                    org.yuzu.yuzu_emu.utils.ShaderRuns.onPrecacheBootDone = {
+                        _binding?.let { ViewUtils.hideView(it.loadingIndicator) }
+                    }
+                } else {
+                    ViewUtils.hideView(binding.loadingIndicator)
+                }
 
                 emulationState.updateSurface()
                 dualScreen.onEmulationStarted()
