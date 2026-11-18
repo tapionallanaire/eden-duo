@@ -25,3 +25,12 @@ include(":app")
 
 include("Eden")
 project(":Eden").projectDir = file("../..")
+
+providers.gradleProperty("duetPeanutsSourceDir").orNull?.let { source ->
+    val app = file(source).resolve("android/app")
+    require(app.resolve("src/embedded/AndroidManifest.xml").isFile) {
+        "duetPeanutsSourceDir must point to the Peanuts source with the embedded host."
+    }
+    include(":peanutsHost")
+    project(":peanutsHost").projectDir = app
+}

@@ -2020,4 +2020,9 @@ SOFTWARE.
     <string name="shader_compile_max_description">Also builds every vertex and fragment shader combination the title knows, not only the pairs it has drawn. Takes longer and uses more disk, but should compile less while you play.</string>
     <string name="shader_compile_done">Compiled %1$d of %2$d pipelines</string>
     <string name="shader_compile_max_done">Compiled %1$d of %2$d pipelines, plus shader combinations</string>
+    <string name="native_test_launch_title">Choose how to play</string>
+    <string name="native_test_launch_message">Native test play uses a separate test save.</string>
+    <string name="native_test_launch_unavailable">Native test play is unavailable for this game file.</string>
+    <string name="native_test_play">Play natively</string>
+    <string name="native_launch_emulate">Emulate</string>
 </resources>

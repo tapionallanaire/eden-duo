@@ -60,6 +60,9 @@ class YuzuApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         application = this
+        if (android.os.Build.VERSION.SDK_INT >= 33 && Application.getProcessName() == "$packageName:peanuts_game") {
+            return
+        }
         documentsTree = DocumentsTree()
 
         // Eden Duo: a device with one screen gets no Duo anything (see DuoCapability). Decided

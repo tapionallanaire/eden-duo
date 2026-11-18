@@ -25,3 +25,7 @@
 -dontwarn java.beans.Introspector
 -dontwarn java.beans.VetoableChangeListener
 -dontwarn java.beans.VetoableChangeSupport
+
+-keep class dev.nxnative.android.EmbeddedGame {
+    public static android.content.Intent prepare(android.content.Context, java.lang.String, java.lang.String, long);
+}

@@ -35,8 +35,10 @@ import org.yuzu.yuzu_emu.viewholder.AbstractViewHolder
 import androidx.core.net.toUri
 import androidx.core.content.edit
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.yuzu.yuzu_emu.BuildConfig
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.databinding.CardGameGridCompactBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.PreparedNativeGame
 import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
 import org.yuzu.yuzu_emu.features.settings.model.Settings
 
@@ -289,22 +291,53 @@ class GameAdapter(private val activity: AppCompatActivity) :
                     }
             }
 
-            if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle(R.string.loader_requires_firmware)
-                    .setMessage(
-                        Html.fromHtml(
-                            activity.getString(R.string.loader_requires_firmware_description),
-                            Html.FROM_HTML_MODE_LEGACY
+            val emulate = {
+                if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {
+                    MaterialAlertDialogBuilder(activity)
+                        .setTitle(R.string.loader_requires_firmware)
+                        .setMessage(
+                            Html.fromHtml(
+                                activity.getString(R.string.loader_requires_firmware_description),
+                                Html.FROM_HTML_MODE_LEGACY
+                            )
                         )
-                    )
-                    .setPositiveButton(android.R.string.ok) { _: DialogInterface?, _: Int ->
-                        launch()
+                        .setPositiveButton(android.R.string.ok) { _: DialogInterface?, _: Int ->
+                            launch()
+                        }
+                        .setNegativeButton(android.R.string.cancel) { _, _ -> }
+                        .show()
+                } else {
+                    launch()
+                }
+            }
+
+            if (!BuildConfig.DEBUG || game.programIdHex != "0100F7E00C70E000") {
+                emulate()
+                return
+            }
+            activity.lifecycleScope.launch {
+                val prepared = withContext(Dispatchers.IO) {
+                    try {
+                        PreparedNativeGame.prepare(activity, game.path, 0)
+                    } catch (e: java.io.IOException) {
+                        org.yuzu.yuzu_emu.utils.Log.warning("Native pack validation: " + e.message)
+                        null
                     }
-                    .setNegativeButton(android.R.string.cancel) { _, _ -> }
-                    .show()
-            } else {
-                launch()
+                }
+                val choice = MaterialAlertDialogBuilder(activity)
+                    .setTitle(R.string.native_test_launch_title)
+                    .setMessage(
+                        if (prepared == null) R.string.native_test_launch_unavailable
+                        else R.string.native_test_launch_message
+                    )
+                    .setNegativeButton(R.string.native_launch_emulate) { _, _ -> emulate() }
+                    .setNeutralButton(android.R.string.cancel, null)
+                if (prepared != null) {
+                    choice.setPositiveButton(R.string.native_test_play) { _, _ ->
+                        activity.startActivity(prepared)
+                    }
+                }
+                choice.show()
             }
         }
 

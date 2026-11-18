@@ -155,6 +155,7 @@ android {
         // builds a release build that doesn't need signing
         // Attaches 'debug' suffix to version and package name, allowing installation alongside the release build.
         register("relWithDebInfo") {
+            matchingFallbacks += "debug"
             manifestPlaceholders += mapOf("appNameSuffix" to " Debug Release")
             isDefault = true
             signingConfig = signingConfigs.getByName("default")
@@ -331,6 +332,7 @@ play {
 }
 
 dependencies {
+    findProject(":peanutsHost")?.let { implementation(it) }
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
