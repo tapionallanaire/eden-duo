@@ -13,6 +13,7 @@
 #include <mutex>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -93,6 +94,13 @@ inline std::atomic<u64> g_window_ns{10'000'000'000ULL};
 inline bool Enabled() {
     return g_enabled.load(std::memory_order_relaxed);
 }
+
+/// EDEN_NX2_GPU_PROFILE=waits: counters and waits by site only, no zone timing. The zones time
+/// millions of scopes a second, which by itself took Donkey Kong Bananza from 30 to 20 fps.
+inline const bool g_waits_only = [] {
+    const char* value = std::getenv("EDEN_NX2_GPU_PROFILE");
+    return value != nullptr && std::string_view{value} == "waits";
+}();
 
 /// Bumped on every toggle: threads drop totals from before it (thread_local, so they reset
 /// themselves at their next Report).
@@ -239,7 +247,7 @@ inline void Publish(const char* thread_name, u64 now) {
 
 class Scope {
 public:
-    explicit Scope(Zone zone_) : zone{zone_}, enabled{Enabled()} {
+    explicit Scope(Zone zone_) : zone{zone_}, enabled{Enabled() && !g_waits_only} {
         if (!enabled) {
             return;
         }
@@ -326,6 +334,46 @@ enum class Counter : u32 {
     PendingWakePush,
     PendingWakeLatch,
     PendingWakeTimeout,
+    /// DrawIndexedIndirect calls the host GPU drew from their GPU-written records
+    /// (Maxwell3D::FrontTakeIndirectRecord)
+    IndirectRecords,
+    /// Of those, drawn after storage writes no barrier ordered yet (RasterizerVulkan::DrawIndirect)
+    IndirectRecordsUnordered,
+    /// GPU-written command list pages whose lists the front read from guest memory: GPU work
+    /// wrote the page, but not the list's bytes (Nx2ListPage::GpuWrote)
+    ListGuestReads,
+    /// EDEN_NX2_LIST_SPECULATE: command lists the front parsed without waiting for the compute
+    /// and copy work before them, and of those, lists whose pages that work turned out to write
+    /// (counted by the back when it reaches the list)
+    ListsSpeculated,
+    ListSpeculationHazards,
+    /// Lists that still waited for their writers with speculation on, by why: more than 16
+    /// pages, an unmapped page, a page a speculated read of differed on
+    ListSpeculationLong,
+    ListSpeculationUnmapped,
+    ListSpeculationHazardPage,
+    /// Acquires suspended without a drain whose polls drained again after 32 ms
+    AcquireDrainFallbacks,
+    /// Acquire trigger drains by reason (puller.cpp AcquireDrainReason, same order): count, time
+    /// in ns, and how many the drain met
+    AcquireDrainNotGequal,
+    AcquireDrainSetup,
+    AcquireDrainGpuWritten,
+    AcquireDrainQueuedUnknown,
+    AcquireDrainQueuedLower,
+    AcquireDrainNotMet,
+    AcquireDrainNotGequalNs,
+    AcquireDrainSetupNs,
+    AcquireDrainGpuWrittenNs,
+    AcquireDrainQueuedUnknownNs,
+    AcquireDrainQueuedLowerNs,
+    AcquireDrainNotMetNs,
+    AcquireDrainNotGequalMet,
+    AcquireDrainSetupMet,
+    AcquireDrainGpuWrittenMet,
+    AcquireDrainQueuedUnknownMet,
+    AcquireDrainQueuedLowerMet,
+    AcquireDrainNotMetMet,
     Count,
 };
 
@@ -508,6 +556,56 @@ inline void Report(const char* thread_name = "GPU thread") {
         line += std::format(" | front 3D writes: direct {:.0f}, from macros {:.0f}",
                             static_cast<double>(data.counters[static_cast<size_t>(Counter::DirectWrites)]) * 1e9 / window,
                             static_cast<double>(data.counters[static_cast<size_t>(Counter::MacroWrites)]) * 1e9 / window);
+    }
+    {
+        static constexpr std::array reasons{"not >=",  "setup",       "GPU-written word",
+                                            "queued ?", "queued lower", "not met"};
+        std::string drains;
+        for (size_t i = 0; i < reasons.size(); ++i) {
+            const size_t count = static_cast<size_t>(Counter::AcquireDrainNotGequal) + i;
+            if (data.counters[count] == 0) {
+                continue;
+            }
+            const double ms = static_cast<double>(data.counters[count + reasons.size()]) * 1e3 /
+                              static_cast<double>(window);
+            drains += std::format("{} {} {:.0f}/s {:.1f} ms ({:.0f} met)", drains.empty() ? "" : ",",
+                                  reasons[i], static_cast<double>(data.counters[count]) * 1e9 / window,
+                                  ms,
+                                  static_cast<double>(data.counters[count + 2 * reasons.size()]) *
+                                      1e9 / window);
+        }
+        if (!drains.empty()) {
+            line += std::format(" | acquire trigger drains by reason:{}", drains);
+        }
+    }
+    if (data.counters[static_cast<size_t>(Counter::ListsSpeculated)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::ListSpeculationHazards)] != 0) {
+        line += std::format(" | lists parsed without waiting for writers {:.0f} ({:.0f} hazards)",
+                            per_second(Counter::ListsSpeculated),
+                            per_second(Counter::ListSpeculationHazards));
+    }
+    if (data.counters[static_cast<size_t>(Counter::ListSpeculationLong)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::ListSpeculationUnmapped)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::ListSpeculationHazardPage)] != 0) {
+        line += std::format(" | lists that still waited: long {:.0f}, unmapped {:.0f}, hazard "
+                            "page {:.0f}",
+                            per_second(Counter::ListSpeculationLong),
+                            per_second(Counter::ListSpeculationUnmapped),
+                            per_second(Counter::ListSpeculationHazardPage));
+    }
+    if (data.counters[static_cast<size_t>(Counter::AcquireDrainFallbacks)] != 0) {
+        line += std::format(" | acquire drain fallbacks {:.0f}",
+                            per_second(Counter::AcquireDrainFallbacks));
+    }
+    if (data.counters[static_cast<size_t>(Counter::ListGuestReads)] != 0) {
+        line += std::format(" | lists read from guest memory past GPU writes {:.0f}",
+                            per_second(Counter::ListGuestReads));
+    }
+    if (data.counters[static_cast<size_t>(Counter::IndirectRecords)] != 0 ||
+        data.counters[static_cast<size_t>(Counter::IndirectRecordsUnordered)] != 0) {
+        line += std::format(" | indirect records {:.0f} ({:.0f} after unordered stores)",
+                            per_second(Counter::IndirectRecords),
+                            per_second(Counter::IndirectRecordsUnordered));
     }
     if (data.counters[static_cast<size_t>(Counter::DrawBeginCoalesced)] != 0) {
         line += std::format(" | draw.begin coalesced {:.0f}",

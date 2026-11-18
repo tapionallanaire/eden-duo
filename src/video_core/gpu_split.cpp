@@ -147,10 +147,19 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
     eager_publish = Nx2Perf::On(Nx2Perf::Opt::EagerPublish);
-#ifdef ARCHITECTURE_x86_64
-    // Front macros run compiled (macro_turing_jit.h) only.
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
+    // Front macros run compiled only.
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
+#ifdef ARCHITECTURE_arm64
+    // A64: Donkey Kong Bananza by default (EDEN_NX2_MME_JIT=1 for others). With the macros on
+    // the back, each macro reading GPU-written arguments downloads them and waits for the GPU
+    // (~35 a frame there, ~17 % of the back thread on an Odin 2).
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    const bool jit_default = Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId;
+    front_macros = mode == '2' && (jit == nullptr ? jit_default : jit[0] != '0');
+#else
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
+#endif
 #endif
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
@@ -172,8 +181,11 @@ void GpuSplit::Stop() {
     ring.reset();
     write_position = 0;
     last_writer_position = 0;
+    last_writer_by_kind = {};
     last_sync_position = 0;
     last_function_position = 0;
+    semaphore_writes.clear();
+    semaphore_writes_limit = 1024;
     writes.Reset();
     async_writes.clear();
     cb_words.clear();
@@ -277,6 +289,33 @@ void GpuSplit::Drain(DrainSite site) {
 
 bool GpuSplit::WaitForWriters() {
     return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+}
+
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
+    if (semaphore_writes.size() >= semaphore_writes_limit) {
+        // The words of releases the back ran hold their values in memory.
+        const u64 done = consumed.load(std::memory_order_acquire);
+        std::erase_if(semaphore_writes,
+                      [done](const auto& entry) { return entry.second.position <= done; });
+        semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
+    }
+    semaphore_writes.insert_or_assign(device_address & ~u64{3},
+                                      SemaphoreWrite{write_position, payload, known});
+}
+
+std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
+    u64 device_address) const {
+    const auto it = semaphore_writes.find(device_address & ~u64{3});
+    if (it == semaphore_writes.end() ||
+        it->second.position <= consumed.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    return QueuedSemaphoreWrite{it->second.payload, it->second.known};
+}
+
+bool GpuSplit::WaitForSyncedWriters() {
+    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
+                   DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitForSync() {
@@ -648,9 +687,12 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     // cores 3-6 next to the guest threads while the prime core stays nearly idle.
     // Fire Emblem: Fortune's Weave's battle map: ~32 ms of back CPU a frame on cores 3-6, 27 ms on
     // the critical cores (20 -> 22 fps, Odin 2); the prime core alone is slower (the front shares it).
+    // Donkey Kong Bananza's mining tunnel, Odin 2: back CPU 55 -> 48 ms a frame, 104.6 -> 100.5 ms.
     constexpr u64 FortunesWeaveProgramId = 0x04007EF01F8AE000ULL;
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
     const char* core = std::getenv("EDEN_NX2_BACK_CORE");
-    if (core == nullptr && Settings::GetCurrentProgramID() == FortunesWeaveProgramId) {
+    if (core == nullptr && (Settings::GetCurrentProgramID() == FortunesWeaveProgramId ||
+                            Settings::GetCurrentProgramID() == DonkeyKongBananzaProgramId)) {
         core = "critical";
     }
     if (core && std::strcmp(core, "prime") == 0) {

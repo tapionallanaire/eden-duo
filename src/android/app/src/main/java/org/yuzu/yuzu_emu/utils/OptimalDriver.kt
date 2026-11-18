@@ -11,10 +11,12 @@ import java.io.File
  */
 object OptimalDriver {
     private const val TURNIP_V27_R1 = "Turnip_v27.0.0-R1.zip" // StevenMXZ/Adreno-Tools-Drivers v27.0.0-R1
+    private const val TURNIP_V27_R2 = "Turnip_v27.0.0-R2.zip" // StevenMXZ/Adreno-Tools-Drivers v27.0.0-R2
 
     private val byTitle = mapOf(
         "0100E95004038000" to TURNIP_V27_R1, // Xenoblade Chronicles 2
         "010074F013262000" to TURNIP_V27_R1, // Xenoblade Chronicles 3
+        "040074A01BF12000" to TURNIP_V27_R2, // Donkey Kong Bananza (Odin 2 runs it on R2)
     )
 
     fun forTitle(programIdHex: String): String? = byTitle[programIdHex.uppercase()]

@@ -45,6 +45,12 @@ struct ShaderRecord {
     ProgramStage stage{};
     std::span<const u8> code;
     std::span<const u8> control;
+    /// A Switch 1 (NVN) program: `code` is its code area, a 0x30 header (none in some compute
+    /// programs), then for graphics the shader program header and the Maxwell instructions.
+    bool maxwell{};
+    /// Records of one program (a BNSH variation: its vertex, fragment... stages) share a number
+    /// that no other program of the walked archive has; 0 when the container does not tell.
+    u32 group{};
 };
 
 /// The game's Zstandard dictionaries (Pack/ZsDic.pack.zs), by dictionary ID.

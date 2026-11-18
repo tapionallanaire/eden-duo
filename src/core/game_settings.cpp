@@ -299,6 +299,26 @@ bool TitleSettings(std::uint64_t program_id, bool force) {
             DefaultForTitle(Settings::values.vsync_mode, Settings::VSyncMode::FifoRelaxed);
             LOG_INFO(Core, "Title defaults: handheld, no async shaders, reactive flushing, FifoRelaxed");
             return true;
+        case TitleID::DonkeyKongBananzaNx2:
+            // Eglantine's measured desktop preset (common/game_presets.h): its dynamic resolution
+            // follows the GPU time it measures, which reads about 4x short with the GPU clock at
+            // Boost (it kept its largest internal size with the host GPU at 99 %); Normal lets it
+            // step down as the console does. Sync memory operations made the GPU thread wait for
+            // a fence 7-8 times a frame. High GPU accuracy delays fences. PC (5900X + 4070 Ti,
+            // mining tunnel, wait for each frame): accuracy High + Boost 104 ms a frame, this set
+            // 83.5 ms on the same build.
+            DefaultForTitle(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            DefaultForTitle(Settings::values.gpu_clock, Settings::GpuClock::Normal);
+            DefaultForTitle(Settings::values.sync_memory_operations, false);
+            DefaultForTitle(Settings::values.use_reactive_flushing, true);
+#ifndef __ANDROID__
+            // Measured on the desktop only; Ocarina of Time and Fortune's Weave crashed with it
+            // on Turnip (draws skipped while pipelines build).
+            DefaultForTitle(Settings::values.use_asynchronous_shaders, true);
+#endif
+            LOG_INFO(Core, "Title defaults: GPU accuracy Low, GPU clock Normal, no memory "
+                           "operation sync, reactive flushing");
+            return true;
         case TitleID::FireEmblemFortunesWeaveNx2:
             // As Ocarina of Time: handheld keeps its render targets small on a phone, and draws
             // skipped while pipelines build can leave a channel waiting on its own semaphores
@@ -383,6 +403,7 @@ bool HasOptimalSettings(std::uint64_t program_id) {
         case TitleID::XenobladeChronicles3:
         case TitleID::HogwartsLegacy:
         case TitleID::FireEmblemFortunesWeaveNx2:
+        case TitleID::DonkeyKongBananzaNx2:
             return true;
 #ifdef __ANDROID__
         case TitleID::FireEmblemThreeHouses:

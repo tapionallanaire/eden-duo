@@ -104,6 +104,11 @@ public:
 
     [[nodiscard]] VkImage AcquireMsaaScratchImage(const VkImageCreateInfo& image_ci);
 
+    /// A draw that samples a colour target it also renders to reads this instead: a view of a
+    /// copy of the target's level 0 taken before the draw. VK_NULL_HANDLE when the target is not
+    /// a plain single-level, single-layer, single-sample 2D image sampled in its own format.
+    [[nodiscard]] VkImageView CopyForSelfSample(Image& image, const ImageView& view);
+
     void ReleaseMsaaScratchImage(VkImage image);
 
     void BlitImage(Framebuffer* dst_framebuffer, ImageView& dst, ImageView& src,
@@ -334,6 +339,17 @@ public:
     };
 
     std::vector<MsaaScratchImage> msaa_scratch_images;
+    struct SelfSampleCopy {
+        VkFormat format;
+        VkFormat view_format;
+        u32 width;
+        u32 height;
+        VkComponentMapping swizzle;
+        vk::Image image;
+        vk::ImageView view;
+        u64 tick;
+    };
+    std::vector<SelfSampleCopy> self_sample_copies;
     ::Common::unordered_map<VkImage, ResolveShadow> resolve_shadows;
     struct TirColorScratch {
         vk::Image image;
@@ -733,6 +749,10 @@ public:
 
     [[nodiscard]] VkImageView Handle(Shader::TextureType texture_type) const noexcept {
         return *image_views[static_cast<size_t>(texture_type)];
+    }
+
+    [[nodiscard]] const VkComponentMapping& SwizzleMapping() const noexcept {
+        return swizzle_mapping;
     }
 
     [[nodiscard]] VkImage ImageHandle() const noexcept {

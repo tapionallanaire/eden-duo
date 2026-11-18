@@ -262,6 +262,10 @@ public:
         return slot_images[id];
     }
 
+    [[nodiscard]] Runtime& GetRuntime() noexcept {
+        return runtime;
+    }
+
     /// Eden Duo (runtime 24): visit every live image as (id, image), to find the one a module
     /// texture readback names. Call with `mutex` held.
     template <typename Func>
@@ -596,6 +600,9 @@ private:
 
     /// Mark an image as modified from the GPU
     void MarkModification(ImageBase& image) noexcept;
+
+    /// The image's contents or tick changed: its aliases must look at it again.
+    void NotifyAliases(ImageBase& image) noexcept;
 
     /// Synchronize image aliases, copying data if needed
     void SynchronizeAliases(ImageId image_id);

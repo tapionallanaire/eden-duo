@@ -22,6 +22,14 @@ inline std::atomic<bool> g_shader_compile{false};
 /// ask for later already exist in the driver's cache.
 inline std::atomic<bool> g_shader_max_compile{false};
 
+/// Set from the "Preparing shaders" screen's skip button: the pair build stops queueing work,
+/// saves how far it got and lets the game start. The next compile continues from there.
+inline std::atomic<bool> g_shader_precache_skip{false};
+
+inline bool ShaderPrecacheSkipped() {
+    return g_shader_precache_skip.load(std::memory_order_relaxed);
+}
+
 inline bool ShaderRecording() {
     return g_shader_record.load(std::memory_order_relaxed);
 }

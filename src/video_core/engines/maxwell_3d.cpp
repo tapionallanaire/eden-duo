@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <chrono>
+#include <cstdlib>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -32,6 +34,8 @@
 #include "video_core/macro_dma_forward.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 
 namespace Tegra::Engines {
@@ -931,6 +935,38 @@ void Maxwell3D::ProcessQueryCondition() {
         return;
     }
     const GPUVAddr condition_address{regs.render_enable.Address()};
+    // EDEN_NX2_RENDER_CONDITION (without host conditional rendering, e.g. Turnip): n counts the
+    // condition reads (log every 5 s), a renders regardless, s reads the condition without
+    // waiting for the GPU work that writes it (its last value). Each normal read downloads the
+    // query results the GPU wrote, waiting for that GPU work.
+    static const char condition_mode = [] {
+        const char* value = std::getenv("EDEN_NX2_RENDER_CONDITION");
+        return value == nullptr ? ' ' : value[0];
+    }();
+    const auto read_condition = [&](Regs::ReportSemaphore::Compare& cmp) {
+        if (condition_mode != ' ') {
+            static u64 reads{};
+            static auto next_log = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            ++reads;
+            if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
+                next_log = now + std::chrono::seconds{5};
+                LOG_INFO(HW_GPU, "Render condition reads (last 5 s): {} (mode {})", reads,
+                         condition_mode);
+                reads = 0;
+            }
+        }
+        if (condition_mode == 's') {
+            memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        } else {
+            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+        }
+    };
+    if (condition_mode == 'a' &&
+        regs.render_enable_override == Regs::RenderEnable::Override::UseRenderEnable &&
+        regs.render_enable.mode != Regs::RenderEnable::Mode::False) {
+        execute_on = true;
+        return;
+    }
     switch (regs.render_enable_override) {
     case Regs::RenderEnable::Override::AlwaysRender:
         execute_on = true;
@@ -950,20 +986,20 @@ void Maxwell3D::ProcessQueryCondition() {
         }
         case Regs::RenderEnable::Mode::Conditional: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence != 0U && cmp.initial_mode != 0U;
             break;
         }
         case Regs::RenderEnable::Mode::IfEqual: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence == cmp.current_sequence &&
                          cmp.initial_mode == cmp.current_mode;
             break;
         }
         case Regs::RenderEnable::Mode::IfNotEqual: {
             Regs::ReportSemaphore::Compare cmp;
-            memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
+            read_condition(cmp);
             execute_on = cmp.initial_sequence != cmp.current_sequence ||
                          cmp.initial_mode != cmp.current_mode;
             break;
@@ -1147,6 +1183,11 @@ struct Maxwell3D::FrontState {
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
+    /// The pending DrawIndexedIndirect call's record, drawn by the host GPU (FrontTakeIndirectRecord).
+    GPUVAddr indirect_record{};
+    /// Per macro: 0 unknown, 1 DrawIndexedIndirect, 2 something else (for indirect_generation).
+    std::vector<u8> indirect_macros;
+    u64 indirect_generation{~u64{0}};
     /// The back's draw manager is in an instance loop (DrawMode::Instance): draw.end does nothing.
     bool instance_loop{};
     bool same_first{};  ///< Nx2Perf FrontSameFirst, read once
@@ -1702,6 +1743,29 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else if (method == MAXWELL3D_REG_INDEX(report_semaphore.query)) {
         split.NoteWrite(memory_manager, ReportAddress(fs.regs), ReportBytes);
         NoteLateReport(split, memory_manager, fs.regs);
+        FrontNoteReport(split, fs);
+    }
+}
+
+void Maxwell3D::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& fs) {
+    // What ProcessQueryGet will write on the back: a payload report writes the payload, a counter
+    // what the GPU counted.
+    Regs::ReportSemaphore report;
+    std::memcpy(&report, &fs.regs[MAXWELL3D_REG_INDEX(report_semaphore)], sizeof(report));
+    const auto operation = report.query.operation.Value();
+    if (operation != Regs::ReportSemaphore::Operation::Release &&
+        operation != Regs::ReportSemaphore::Operation::ReportOnly) {
+        return;
+    }
+    const auto device = memory_manager.GpuToCpuAddress(report.Address());
+    if (!device) {
+        return;
+    }
+    const bool payload = report.query.report == Regs::ReportSemaphore::Report::Payload;
+    split.NoteSemaphoreWrite(*device, report.payload, payload);
+    if (report.query.short_query == 0) {
+        // 64 bits (a timestamp follows).
+        split.NoteSemaphoreWrite(*device + 4, 0, payload);
     }
 }
 
@@ -1873,15 +1937,21 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
     } else if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && amount != 0) {
         split.NoteWrite(memory_manager, ReportAddress(fs.regs), ReportBytes);
         NoteLateReport(split, memory_manager, fs.regs);
+        FrontNoteReport(split, fs);
     }
 }
 
 void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                               FrontState& fs, std::span<const u32> borrowed) {
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
     namespace Profile = VideoCommon::Nx2Profile;
     const u32 method = fs.executing_macro;
     fs.executing_macro = 0;
+    if (const GPUVAddr record = std::exchange(fs.indirect_record, GPUVAddr{});
+        record != 0 && borrowed.empty() && fs.parameters.size() == 6) {
+        FrontRunIndirectRecord(system, split, fs, record);
+        return;
+    }
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
@@ -2570,6 +2640,188 @@ void Maxwell3D::FrontVerify(VideoCommon::GpuSplit& split, FrontState& fs) {
     }
     if ((checks & 63) == 1) {
         LOG_INFO(HW_GPU, "Split front register checks: {} done, {} differences", checks, differences);
+    }
+}
+
+void Maxwell3D::FrontRunIndirectRecord(Core::System& system, VideoCommon::GpuSplit& split,
+                                       FrontState& fs, GPUVAddr record) {
+    // DrawIndexedIndirect with a record GPU work may still write: the back draws it indirectly,
+    // then the macro's own clean-up writes follow (zero bases, the driver constants at 0x640
+    // cleared). The record's words in fs.parameters are not used.
+    VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::IndirectRecords, 1);
+    const u32 topology = fs.parameters[0];
+    fs.parameters.clear();
+    if (fs.draw_pending) {
+        const auto finish_effect = FrontDrawEffect(split, fs);
+        fs.draw_pending = false;
+        fs.draw_window_writer = false;
+        fs.draw_window_epoch = 0;
+        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); },
+                    finish_effect);
+    }
+    split.Defer([this, system_ptr = &system, topology,
+                 record] { BackDrawIndexedIndirect(*system_ptr, topology, record); },
+                FrontDrawEffect(split, fs));
+    if (FrontIsWriterDraw(fs.regs)) {
+        split.NoteWriter();
+    }
+    constexpr std::array<std::pair<u32, u32>, 7> cleanup{{
+        {0x5f7, 0}, {0x446, 0}, {0x50d, 0}, {0x50e, 0}, {0x8e3, 0x640}, {0x8e4, 0}, {0x8e5, 0},
+    }};
+    for (const auto& [address, value] : cleanup) {
+        FrontWrite(split, fs, address, value, true, true);
+    }
+}
+
+bool Maxwell3D::IsIndirectDrawMacro(FrontState& fs, u32 method) {
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
+    auto& engine = GetNativeMacroEngine();
+    const auto positions = GetNativeMacroPositions();
+    if (positions.empty()) {
+        return false;
+    }
+    const size_t index = ((method - MacroRegistersStart) >> 1) % positions.size();
+    if (fs.indirect_generation != engine.native_code_generation ||
+        fs.indirect_macros.size() != positions.size()) {
+        fs.indirect_generation = engine.native_code_generation;
+        fs.indirect_macros.assign(positions.size(), 0);
+    }
+    if (fs.indirect_macros[index] != 0) {
+        return fs.indirect_macros[index] == 1;
+    }
+    // Dry run with recognizable parameters against a copy of the data RAM: NVN's
+    // DrawIndexedIndirect writes the record's fields to these registers and the base vertex and
+    // instance to the driver constants at 0x640 (as HLE_DrawIndexedIndirect's extended form),
+    // draws once, and clears the bases again.
+    constexpr u32 topology = 4, count = 0x111, instances = 1, first = 0x222, base_vertex = 0x333,
+                  base_instance = 0x444;
+    std::vector<u32> parameters{topology, count, instances, first, base_vertex, base_instance};
+    constexpr std::array<std::pair<u32, u32>, 16> expected{{
+        {0x5f7, first}, {0x446, base_vertex}, {0x50d, base_vertex}, {0x50e, base_instance},
+        {0x8e3, 0x640}, {0x8e4, base_vertex}, {0x8e5, base_instance}, {0x586, topology},
+        {0x5f8, count}, {0x585, 0}, {0x446, 0}, {0x50d, 0}, {0x50e, 0}, {0x8e3, 0x640},
+        {0x8e4, 0}, {0x8e5, 0},
+    }};
+    std::vector<u32> scratch_ram(native_data_ram.begin(), native_data_ram.end());
+    std::vector<std::pair<u32, u32>> writes;
+    if (!engine.native_jit) {
+        engine.native_jit = std::make_shared<TuringMacroJit>();
+    }
+    engine.native_jit->Prepare(engine.native_code, engine.native_code_generation);
+    const auto result = engine.native_jit->Execute(
+        positions[index], parameters, std::span<u32>{scratch_ram},
+        [&fs](u32 address) { return address < Regs::NUM_REGS ? fs.regs[address] : 0U; },
+        [&writes](u32 address, u32 value) {
+            writes.emplace_back(address, value);
+            return address < MacroRegistersStart && writes.size() < 64;
+        });
+    const bool match = result.success && writes.size() == expected.size() &&
+                       std::equal(writes.begin(), writes.end(), expected.begin());
+    fs.indirect_macros[index] = match ? 1 : 2;
+    if (match) {
+        LOG_INFO(HW_GPU, "Native macro {:#x} is DrawIndexedIndirect: GPU-written records are drawn "
+                         "indirectly by the host GPU",
+                 method);
+    }
+    return match;
+#else
+    (void)fs;
+    (void)method;
+    return false;
+#endif
+}
+
+bool Maxwell3D::FrontTakeIndirectRecord(u32 parameter_method, GPUVAddr record) {
+    // EDEN_NX2_INDIRECT_RECORDS=0: read the records on the CPU as before.
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_INDIRECT_RECORDS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || !front_macros || front == nullptr) {
+        return false;
+    }
+    FrontState& fs = *front;
+    if (fs.executing_macro == 0 || parameter_method != fs.executing_macro + 1 ||
+        fs.parameters.size() != 1) {
+        return false;
+    }
+    // Topologies the host draws indirectly as they are (no quad or polygon conversion).
+    const u32 topology = fs.parameters[0];
+    if (!(topology <= 6 || (topology >= 0xA && topology <= 0xD))) {
+        return false;
+    }
+    if (!IsIndirectDrawMacro(fs, fs.executing_macro)) {
+        return false;
+    }
+    fs.indirect_record = record;
+    return true;
+}
+
+void Maxwell3D::BackDrawIndexedIndirect(Core::System& system, u32 topology, GPUVAddr record) {
+    // State writes the front sent before this call wait in the method sink until an executable
+    // method arrives (the macro's draw methods did that): apply them first, or the draw uses the
+    // previous draw's index buffer, vertex buffers and shaders.
+    ConsumeSink(system);
+    const u32 estimate = static_cast<u32>(EstimateIndexBufferSize());
+    regs.vertex_id_base = 0;
+    regs.global_base_vertex_index = 0;
+    regs.global_base_instance_index = 0;
+    dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+    // The macro copies the record's base vertex and instance to the driver constants at 0x640 of
+    // the selected constant buffer, which this draw skips: shaders read them from the draw
+    // instead (the host GPU takes them from the record). NVN's draw macros keep them in c[0] in
+    // Mario Kart World (2ad0830d2f); the bank is looked up rather than assumed.
+    // EDEN_NX2_INDIRECT_REPLACE=0: leave the constants at zero.
+    static const bool replace_enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_INDIRECT_REPLACE");
+        return value == nullptr || value[0] != '0';
+    }();
+    std::optional<u32> driver_bank;
+    if (replace_enabled) {
+        const GPUVAddr driver_cb = regs.const_buffer.Address();
+        const auto& vertex_buffers = state.shader_stages[0].const_buffers;
+        for (u32 bank = 0; bank < vertex_buffers.size(); ++bank) {
+            if (vertex_buffers[bank].enabled && vertex_buffers[bank].address == driver_cb) {
+                driver_bank = bank;
+                break;
+            }
+        }
+        static std::atomic<u32> logged_banks{};
+        const u32 bit = driver_bank ? 1U << *driver_bank : 1U << 31;
+        if ((logged_banks.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            if (driver_bank) {
+                LOG_INFO(HW_GPU, "Indirect records: driver constants at {:#x} are vertex c[{}]",
+                         driver_cb, *driver_bank);
+            } else {
+                LOG_WARNING(HW_GPU, "Indirect records: no vertex constant buffer binds the driver "
+                                    "constants at {:#x}: base vertex and instance read zero",
+                            driver_cb);
+            }
+        }
+    }
+    const bool replace = driver_bank.has_value();
+    if (replace) {
+        engine_state = EngineHint::OnHLEMacro;
+        SetHLEReplacementAttributeType(*driver_bank, 0x640, HLEReplacementAttributeType::BaseVertex);
+        SetHLEReplacementAttributeType(*driver_bank, 0x644,
+                                       HLEReplacementAttributeType::BaseInstance);
+    }
+    auto& params = draw_manager.indirect_state;
+    params.is_byte_count = false;
+    params.is_indexed = true;
+    params.include_count = false;
+    params.count_start_address = 0;
+    params.indirect_start_address = record;
+    params.buffer_size = 5 * sizeof(u32);
+    params.max_draw_counts = 1;
+    params.stride = 0;
+    params.from_record = true;
+    draw_manager.DrawIndexedIndirect(*this, static_cast<Regs::PrimitiveTopology>(topology), 0,
+                                     estimate);
+    params.from_record = false;
+    if (replace) {
+        engine_state = EngineHint::None;
+        replace_table.clear();
     }
 }
 

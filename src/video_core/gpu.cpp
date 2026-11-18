@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -198,9 +199,22 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
-        return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
-                                Settings::values.gpu_clock.GetValue(),
-                                present_ns.load(std::memory_order_relaxed));
+        const bool ampere = g_nx2_ampere.load(std::memory_order_relaxed);
+        const u64 present = present_ns.load(std::memory_order_relaxed);
+        const u64 ticks = ReadGpuTimestamp(system.CoreTiming(), ampere,
+                                           Settings::values.gpu_clock.GetValue(), present);
+        // EDEN_NX2_GPU_TS_FLOOR_MS=<n> (Switch 2 titles, off by default): a report timestamp
+        // reads at least n ms after the last present. A game that picks its frame rate from the
+        // GPU's end-of-frame time (Donkey Kong Bananza: 60 fps under 20 ms, 30 under 36.7) then
+        // never measures a frame short enough for the faster step it cannot hold.
+        static const u64 floor_ns = [] {
+            const char* value = std::getenv("EDEN_NX2_GPU_TS_FLOOR_MS");
+            return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1'000'000ULL;
+        }();
+        if (floor_ns != 0 && ampere && present != 0) {
+            return (std::max)(ticks, present + floor_ns);
+        }
+        return ticks;
     }
 
     void RendererFrameEndNotify() {

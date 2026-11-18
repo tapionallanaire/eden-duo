@@ -91,6 +91,16 @@ public:
         };
     }
 
+    /// Points this draw's image descriptors that name `from` at `to` instead.
+    void ReplaceImageView(VkImageView from, VkImageView to) noexcept {
+        for (DescriptorUpdateEntry* entry = const_cast<DescriptorUpdateEntry*>(upload_start);
+             entry < payload_cursor; ++entry) {
+            if (entry->image.imageView == from) {
+                entry->image.imageView = to;
+            }
+        }
+    }
+
     /// Where the next entry goes; with AddEntries, lets a caller keep and replay a run of entries
     [[nodiscard]] const DescriptorUpdateEntry* Cursor() const noexcept {
         return payload_cursor;

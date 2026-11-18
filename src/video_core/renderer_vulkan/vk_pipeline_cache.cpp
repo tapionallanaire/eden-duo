@@ -14,6 +14,8 @@
 #include <format>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -62,6 +64,7 @@
 #include "video_core/shader_modes.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
+#include "common/zstd_compression.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
 #include "video_core/shader_warm/warm_records.h"
 #include "video_core/surface.h"
@@ -721,8 +724,17 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_user_clip_distances = device.GetMaxUserClipDistances()};
-    profile.support_cooperative_hmma =
-        device.IsCooperativeHmmaSupported() && TestCooperativeHmma(device);
+    // EDEN_NX2_NO_COOP_HMMA=1: the software HMMA (what Adreno runs) on a device that has
+    // cooperative matrices, to check it against them.
+    profile.max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize();
+    if (const char* value = std::getenv("EDEN_NX2_SHUFFLE_LDS"); value != nullptr) {
+        profile.shuffle_through_workgroup_memory = value[0] != '0';
+    } else {
+        profile.shuffle_through_workgroup_memory = driver_id == VK_DRIVER_ID_MESA_TURNIP;
+    }
+    profile.support_cooperative_hmma = std::getenv("EDEN_NX2_NO_COOP_HMMA") == nullptr &&
+                                       device.IsCooperativeHmmaSupported() &&
+                                       TestCooperativeHmma(device);
 
     host_info = Shader::HostTranslateInfo{
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
@@ -1302,6 +1314,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // loading only ever adds entries (see OrderComputeTranslations), and take the next when a
     // translation fails.
     ::Common::unordered_map<ComputePipelineCacheKey, std::vector<FileEnvironment>> compute_envs;
+    bool loading_filled_file = false;
+    RecordedPairs recorded_pairs;
 
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
@@ -1309,6 +1323,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     const auto load_compute{[&](std::ifstream& file, FileEnvironment env) {
         ComputePipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
+        if (loading_filled_file && compute_envs.contains(key)) {
+            return;
+        }
         compute_envs[key].push_back(std::move(env));
     }};
     const bool preload_variants =
@@ -1418,9 +1435,25 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                 driver_updated = true;
             }
         }
+        if (key.state.xfb_enabled == 0 &&
+            static_cast<size_t>(std::ranges::count(key.unique_hashes, u64{})) ==
+                key.unique_hashes.size() - 2 &&
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] != 0 &&
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] != 0) {
+            const u64 vertex{key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)]};
+            const u64 fragment{key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)]};
+            const size_t state_hash{key.state.Hash()};
+            recorded_pairs.states.try_emplace(state_hash, key.state);
+            for (const u64 shader : {u64{}, vertex, fragment}) {
+                ++recorded_pairs.state_uses[shader][state_hash];
+            }
+            recorded_pairs.fragment_vertices[fragment].insert(vertex);
+        }
         {
             std::scoped_lock lock{state.mutex};
-            disk_pipelines.insert(hash);
+            if (!disk_pipelines.insert(hash).second && loading_filled_file) {
+                return;
+            }
         }
         if (!PreloadAllPipelines() &&
             (used_pipelines.empty() ? queued_graphics >= MaxPipelinesWithoutUsedList
@@ -1465,6 +1498,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics, false, MIN_COMPATIBLE_CACHE_VERSION, &main_upgrade);
+    // The title's pipeline list, filled with the code of its game files: the pipelines the cache
+    // doesn't hold yet.
+    loading_filled_file = true;
+    VideoCommon::LoadPipelines(stop_loading, VideoCommon::ShaderWarm::GraphicsWarmPath(title_id),
+                               CACHE_VERSION, load_compute, load_graphics);
+    loading_filled_file = false;
     if (device.IsExtMeshShaderSupported()) {
         loading_mesh_file = true;
         VideoCommon::LoadPipelines(stop_loading, mesh_pipeline_cache_filename, CACHE_VERSION,
@@ -1500,6 +1539,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
     workers.WaitForRequests(stop_loading);
     DriverBuildReport::LogSummary("at boot");
+    if (!stop_loading.stop_requested()) {
+        BuildShaderPairs(title_id, stop_loading, callback, recorded_pairs);
+    }
 
     // A cache from an older compatible version: its records were translated again above. Write
     // it back under the current version without the ones that failed (deferred ones are kept).
@@ -2545,6 +2587,324 @@ void PipelineCache::StartShaderPrecache(u64 title_id) {
             }
         });
     }
+}
+
+void PipelineCache::BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
+                                     const VideoCore::DiskResourceLoadCallback& callback,
+                                     const RecordedPairs& recorded) {
+    namespace ShaderWarm = VideoCommon::ShaderWarm;
+#ifndef __ANDROID__
+    // The desktop has no "compile first?" prompt, and this is minutes of builds at a title's
+    // first boot (Donkey Kong Bananza: 49,009 pairs, 155 s): only with EDEN_NX2_SHADER_PAIRS=1.
+    static const bool pairs_on = [] {
+        const char* value = std::getenv("EDEN_NX2_SHADER_PAIRS");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (!pairs_on) {
+        return;
+    }
+#endif
+    const auto file{ShaderWarm::PairsWarmPath(title_id)};
+    const auto stamp{ShaderWarm::CurrentWarmStamp(file, 0, device.GetDriverVersion(),
+                                                  device.GetDeviceID(), CACHE_VERSION)};
+    if (!stamp) {
+        return;
+    }
+    // The file's programs (their code stays on disk) and pairs.
+    struct Program {
+        u64 hash;
+        bool fragment;
+        Shader::ProgramHeader sph;
+        u64 offset; ///< Of the compressed environment
+        u32 size;
+    };
+    std::vector<Program> programs;
+    std::vector<std::pair<u32, u32>> pairs;
+    try {
+        std::ifstream stream(file, std::ios::binary);
+        stream.exceptions(std::ios::failbit | std::ios::badbit | std::ios::eofbit);
+        const auto read{[&stream]<typename T>(T& value) {
+            stream.read(reinterpret_cast<char*>(&value), sizeof(T));
+        }};
+        std::array<char, 8> magic;
+        u32 version{};
+        u32 tag{};
+        u32 count{};
+        read(magic);
+        read(version);
+        read(tag);
+        if (version != CACHE_VERSION || tag != ShaderWarm::PairsTag) {
+            // An older builder's file: the next scan writes it again.
+            return;
+        }
+        read(count);
+        programs.resize(count);
+        for (Program& program : programs) {
+            u8 fragment{};
+            read(program.hash);
+            read(fragment);
+            read(program.sph);
+            read(program.size);
+            program.fragment = fragment != 0;
+            program.offset = static_cast<u64>(stream.tellg());
+            stream.seekg(program.size, std::ios::cur);
+        }
+        read(count);
+        pairs.resize(count);
+        stream.read(reinterpret_cast<char*>(pairs.data()),
+                    static_cast<std::streamsize>(pairs.size() * sizeof(pairs[0])));
+        for (const auto& [vertex, fragment] : pairs) {
+            if (vertex >= programs.size() || fragment >= programs.size()) {
+                throw std::runtime_error("pair outside the program table");
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_WARNING(Render_Vulkan, "Shader pairs: reading {} failed: {}",
+                    Common::FS::PathToUTF8String(file), e.what());
+        return;
+    }
+    // The slow-build log tells these programs from ones no pair build has seen.
+    for (const Program& program : programs) {
+        DriverBuildReport::NotePairStage(program.hash);
+    }
+    if (const auto marker{ShaderWarm::ReadWarmMarker(file)}; marker && marker->Matches(*stamp)) {
+        return;
+    }
+    if (recorded.states.empty()) {
+        // A state made up here would be built blind on every title: wait for a recorded one.
+        LOG_INFO(Render_Vulkan,
+                 "Shader pairs: {} pairs, no recorded pipeline to take a state from yet, not built",
+                 pairs.size());
+        return;
+    }
+
+    // Fragment shaders recorded with at least this many vertex shaders are taken for shared
+    // between objects: paired with every vertex program that writes what they read.
+    // EDEN_NX2_PAIR_SHARED_MIN changes the count (0: none).
+    const char* const shared_text{std::getenv("EDEN_NX2_PAIR_SHARED_MIN")};
+    const size_t shared_min{shared_text ? static_cast<size_t>(std::atoi(shared_text)) : 8};
+    const auto feeds{[](const Program& vertex, const Program& fragment) {
+        for (size_t index = 0; index < 32; ++index) {
+            if (fragment.sph.ps.IsGenericVectorActive(index) &&
+                std::ranges::none_of(vertex.sph.vtg.OutputGeneric(index), std::identity{})) {
+                return false;
+            }
+        }
+        return true;
+    }};
+    const size_t file_pairs{pairs.size()};
+    std::unordered_set<u64> pair_set;
+    size_t unfed_file_pairs{};
+    for (const auto& [vertex, fragment] : pairs) {
+        pair_set.insert(u64{vertex} << 32 | fragment);
+        unfed_file_pairs += feeds(programs[vertex], programs[fragment]) ? 0 : 1;
+    }
+    size_t shared_fragments{};
+    if (shared_min != 0) {
+        // The most shared first: a compile that is skipped part way has built those.
+        std::vector<std::pair<size_t, u32>> ranked;
+        std::unordered_set<u64> seen_fragments;
+        for (u32 fragment = 0; fragment < programs.size(); ++fragment) {
+            const auto vertices{recorded.fragment_vertices.find(programs[fragment].hash)};
+            if (programs[fragment].fragment && vertices != recorded.fragment_vertices.end() &&
+                vertices->second.size() >= shared_min &&
+                seen_fragments.insert(programs[fragment].hash).second) {
+                ranked.emplace_back(vertices->second.size(), fragment);
+            }
+        }
+        std::ranges::sort(ranked, [](const auto& a, const auto& b) {
+            return a.first != b.first ? a.first > b.first : a.second < b.second;
+        });
+        shared_fragments = ranked.size();
+        for (const auto& [uses, fragment] : ranked) {
+            std::unordered_set<u64> seen_vertices;
+            for (u32 vertex = 0; vertex < programs.size(); ++vertex) {
+                if (!programs[vertex].fragment && seen_vertices.insert(programs[vertex].hash).second &&
+                    feeds(programs[vertex], programs[fragment]) &&
+                    pair_set.insert(u64{vertex} << 32 | fragment).second) {
+                    pairs.emplace_back(vertex, fragment);
+                }
+            }
+        }
+    }
+
+    // The state of each pair, and the pairs left to build: not those the records hold (built
+    // for real at boot) nor those an unfinished run built.
+    const auto best_state{[&](u64 shader) -> const FixedPipelineState* {
+        const auto uses{recorded.state_uses.find(shader)};
+        if (uses == recorded.state_uses.end()) {
+            return nullptr;
+        }
+        const auto best{std::ranges::max_element(uses->second, [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second < b.second : a.first > b.first;
+        })};
+        return &recorded.states.at(best->first);
+    }};
+    const auto pair_id{[&](const std::pair<u32, u32>& pair) {
+        return programs[pair.first].hash * 0x9E3779B97F4A7C15ULL ^ programs[pair.second].hash;
+    }};
+    const auto progress_file{ShaderWarm::PairsProgressPath(title_id)};
+    std::unordered_set<u64> done_before;
+    {
+        std::ifstream stream(progress_file, std::ios::binary);
+        ShaderWarm::WarmStamp saved;
+        if (stream.read(reinterpret_cast<char*>(&saved), sizeof(saved)) && saved.Matches(*stamp)) {
+            u64 id{};
+            while (stream.read(reinterpret_cast<char*>(&id), sizeof(id))) {
+                done_before.insert(id);
+            }
+        }
+    }
+    if (done_before.empty()) {
+        std::ofstream stream(progress_file, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char*>(&*stamp), sizeof(*stamp));
+    }
+    struct Todo {
+        u32 vertex;
+        u32 fragment;
+        const FixedPipelineState* state;
+    };
+    std::vector<Todo> todo;
+    std::array<size_t, 3> state_source{}; // the fragment shader's, the vertex shader's, all
+    size_t in_records{};
+    size_t resumed{};
+    for (const auto& pair : pairs) {
+        const Program& vertex{programs[pair.first]};
+        const Program& fragment{programs[pair.second]};
+        if (const auto drawn{recorded.fragment_vertices.find(fragment.hash)};
+            drawn != recorded.fragment_vertices.end() && drawn->second.contains(vertex.hash)) {
+            ++in_records;
+            continue;
+        }
+        if (done_before.contains(pair_id(pair))) {
+            ++resumed;
+            continue;
+        }
+        const FixedPipelineState* state{best_state(fragment.hash)};
+        size_t source{0};
+        if (state == nullptr) {
+            state = best_state(vertex.hash);
+            source = 1;
+        }
+        if (state == nullptr) {
+            state = best_state(0);
+            source = 2;
+        }
+        ++state_source[source];
+        todo.push_back({pair.first, pair.second, state});
+    }
+    const size_t total{resumed + todo.size()};
+    LOG_INFO(Render_Vulkan,
+             "Shader pairs: {} of the game files and {} more for {} shared fragment shaders "
+             "(drawn with {} or more vertex shaders; {} file pairs fail the input check); {} in "
+             "the records already, {} built by an earlier run, {} to build: state from the "
+             "fragment shader's records for {}, the vertex shader's for {}, all records' for {}",
+             file_pairs, pairs.size() - file_pairs, shared_fragments, shared_min,
+             unfed_file_pairs, in_records, resumed, todo.size(), state_source[0], state_source[1],
+             state_source[2]);
+
+    // Workers may outlive this call when the load is stopped.
+    struct Shared {
+        std::filesystem::path file;
+        std::atomic<size_t> built{};
+    };
+    const auto shared{std::make_shared<Shared>()};
+    shared->file = file;
+    const auto begin{std::chrono::steady_clock::now()};
+    auto last_save{begin};
+    size_t saved{};
+    // The driver's cache first: the progress only counts work that is on disk.
+    const auto save{[&](size_t done) {
+        if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
+            SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                         CACHE_VERSION);
+        }
+        std::ofstream stream(progress_file, std::ios::binary | std::ios::app);
+        for (; saved < done; ++saved) {
+            const u64 id{pair_id({todo[saved].vertex, todo[saved].fragment})};
+            stream.write(reinterpret_cast<const char*>(&id), sizeof(id));
+        }
+        last_save = std::chrono::steady_clock::now();
+    }};
+    constexpr size_t Batch{64};
+    constexpr std::chrono::seconds SaveEvery{30};
+    callback(VideoCore::LoadCallbackStage::Build, resumed, total);
+    size_t index{};
+    while (index < todo.size() && !stop_loading.stop_requested() &&
+           !VideoCore::ShaderPrecacheSkipped()) {
+        for (const size_t end{(std::min)(index + Batch, todo.size())}; index < end; ++index) {
+            const Todo& pair{todo[index]};
+            GraphicsPipelineCacheKey key;
+            std::memset(&key, 0, sizeof(key));
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::VertexB)] =
+                programs[pair.vertex].hash;
+            key.unique_hashes[static_cast<size_t>(Maxwell::ShaderType::Pixel)] =
+                programs[pair.fragment].hash;
+            key.state = *pair.state;
+            workers.QueueWork([this, key, shared, vertex = programs[pair.vertex],
+                               fragment = programs[pair.fragment]] {
+                // A pair that does not read, translate or build is counted as failed, nothing
+                // more.
+                try {
+                    static const VideoCommon::GuessMissing guess{};
+                    std::ifstream stream(shared->file, std::ios::binary);
+                    std::array<FileEnvironment, 2> envs;
+                    boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+                    for (size_t stage = 0; stage < 2; ++stage) {
+                        const Program& program{stage == 0 ? vertex : fragment};
+                        std::vector<u8> packed(program.size);
+                        stream.seekg(static_cast<std::streamoff>(program.offset));
+                        stream.read(reinterpret_cast<char*>(packed.data()),
+                                    static_cast<std::streamsize>(packed.size()));
+                        const std::vector<u8> bytes{Common::Compression::DecompressDataZSTD(packed)};
+                        std::istringstream entry{
+                            std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()},
+                            std::ios::binary};
+                        entry.exceptions(std::ios::failbit | std::ios::badbit | std::ios::eofbit);
+                        envs[stage].Deserialize(entry);
+                        envs[stage].SetGuessMissing(&guess);
+                        env_ptrs.push_back(&envs[stage]);
+                    }
+                    ShaderPools pools;
+                    const DriverBuildReport::PrecacheScope precache_scope;
+                    if (CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), nullptr, false)) {
+                        shared->built.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } catch (const std::exception& e) {
+                    LOG_DEBUG(Render_Vulkan, "Shader pairs: {}", e.what());
+                }
+            });
+        }
+        workers.WaitForRequests(stop_loading);
+        if (stop_loading.stop_requested()) {
+            return;
+        }
+        callback(VideoCore::LoadCallbackStage::Build, resumed + index, total);
+        if (std::chrono::steady_clock::now() - last_save >= SaveEvery) {
+            save(index);
+        }
+    }
+    if (stop_loading.stop_requested()) {
+        return;
+    }
+    save(index);
+    const size_t built{shared->built.load()};
+    const double seconds{
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()};
+    if (index < todo.size()) {
+        LOG_INFO(Render_Vulkan,
+                 "Shader pairs: skipped at {} of {} ({} built, {} failed, {:.1f} s), the next "
+                 "compile continues there",
+                 resumed + index, total, built, index - built, seconds);
+        return;
+    }
+    ShaderWarm::WriteWarmMarker(file, *stamp);
+    std::error_code ec;
+    std::filesystem::remove(progress_file, ec);
+    LOG_INFO(Render_Vulkan,
+             "Shader pairs: {} pairs, {} built and {} failed in {:.1f} s ({} built by an earlier "
+             "run)",
+             total, built, index - built, seconds, resumed);
 }
 
 bool PipelineCache::RuntimeBuildsBusy() const {

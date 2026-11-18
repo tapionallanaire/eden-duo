@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <format>
+#include <string>
 #include <vector>
 
 #include "common/alignment.h"
@@ -576,7 +580,27 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
     MemoryOperation(gpu_src_addr, size, true, mapped_big, set_to_zero, read_short_pages);
 }
 
-void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
+void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size,
+                              VideoCommon::CacheType which, std::source_location caller) const {
+    // EDEN_NX2_READ_FLUSH_STATS=1 (diagnostic): flushing reads of GPU-written memory (each a
+    // download, and a wait for the GPU work that wrote it) by caller, every 5 s.
+    static const bool stats = std::getenv("EDEN_NX2_READ_FLUSH_STATS") != nullptr;
+    if (stats && IsMemoryDirty(gpu_src_addr, size, which)) [[unlikely]] {
+        static std::mutex mutex;
+        static std::map<std::pair<std::string_view, u32>, u64> sites;
+        static auto next_log = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        std::scoped_lock lock{mutex};
+        ++sites[{caller.file_name(), caller.line()}];
+        if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
+            next_log = now + std::chrono::seconds{5};
+            std::string text;
+            for (const auto& [site, count] : sites) {
+                text += std::format(" {}:{} x{};", site.first, site.second, count);
+            }
+            LOG_INFO(HW_GPU, "Flushing reads of GPU-written memory (last 5 s):{}", text);
+            sites.clear();
+        }
+    }
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
 }
 

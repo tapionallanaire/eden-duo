@@ -257,6 +257,8 @@ bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_i
     }
     lhs.aliased_images.push_back(std::move(lhs_alias));
     rhs.aliased_images.push_back(std::move(rhs_alias));
+    lhs.alias_dirty = rhs.alias_dirty = true;
+    lhs.aliases_notified = rhs.aliases_notified = false;
     lhs.flags |= ImageFlagBits::Alias;
     rhs.flags |= ImageFlagBits::Alias;
     lhs.flags &= ~ImageFlagBits::IsRescalable;

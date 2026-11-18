@@ -175,13 +175,12 @@ public:
 
     void DispatchCalls();
 
-    /// Switch 2: true while the channel is suspended on a semaphore acquire.
+    /// Switch 2: true while the channel is suspended, on a semaphore acquire or on the GPU's copy
+    /// of a command list it reads next.
     [[nodiscard]] bool HasPendingAcquire() const {
-        return puller.HasPendingAcquire();
+        return puller.HasPendingAcquire() || pending_list_tick.has_value();
     }
-    [[nodiscard]] bool CanResumeAcquire() {
-        return puller.CanResumeAcquire(*this);
-    }
+    [[nodiscard]] bool CanResumeAcquire();
 
     void BindSubchannel(Engines::EngineInterface* engine, u32 subchannel_id, Engines::EngineTypes engine_type) {
         subchannels[subchannel_id] = engine;
@@ -211,6 +210,9 @@ private:
     [[nodiscard]] bool WantsSegment() const;
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
+    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
+    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
+    void NoteDmaSemaphore(u32 method, u32 argument);
 
 public:
     /// Logs the GPFIFO entry being processed (and the one before it), read through the GPU MMU
@@ -219,6 +221,12 @@ public:
     void CheckSubmitHash(const CommandListHeader& header, u64 submit_hash);
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
+    /// EDEN_NX2_LIST_SPECULATE: parse the list without waiting for its possible writers; the
+    /// back reports a hazard if they wrote its pages. Whether it did.
+    bool SpeculateList(GPUVAddr address, size_t size);
+    /// EDEN_NX2_LIST_SPECULATE: a GPU-written list read from guest memory without waiting for
+    /// its writers; the back checks it against the page's copy. Whether it did.
+    bool ReadSpeculatedGpuWrittenCommands(GPUVAddr address, u32 count);
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
     /// Copies the list's words from memory again, as of suspension count `now`.
     void RefreshSnapshot(CommandList& list, u64 now);
@@ -237,7 +245,9 @@ public:
     /// buffer cache made after the work that wrote them or from guest memory for pages flushed
     /// since. False when not all are current (or the list isn't GPU-written): the caller drains,
     /// flushes and reads guest memory.
-    bool ReadGpuWrittenCommands(GPUVAddr address, u32 count);
+    /// With `pending`, a copy the GPU has not finished sets `*pending` and pending_list_tick
+    /// instead of waiting (the result is false then).
+    bool ReadGpuWrittenCommands(GPUVAddr address, u32 count, bool* pending = nullptr);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     void FlushGpuWrittenCommands(GPUVAddr address, size_t size);
 
@@ -300,12 +310,18 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
+    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
+    std::array<u32, 3> dma_semaphore{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;
     std::condition_variable sync_cv;
 
     VideoCore::RasterizerInterface* rasterizer = nullptr;
+    /// Host GPU tick of the command list copy this channel waits for (ReadGpuWrittenCommands).
+    std::optional<u64> pending_list_tick;
+    /// The entry parsed next was suspended on pending_list_tick, which is done now.
+    bool resumed_list_read{};
 
     const bool ib_enable : 1 = true; ///< IB mode enabled
     bool dma_increment_once : 1 = false;

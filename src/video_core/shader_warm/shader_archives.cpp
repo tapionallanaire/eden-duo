@@ -87,7 +87,14 @@ struct Record {
     ProgramStage stage;
     Bytes code;
     Bytes control;
+    bool maxwell{};
+    u32 group{}; ///< The variation inside its file, from 1; 0 when the format has none
 };
+
+/// What Switch 1 control sections and graphics and compute code areas start with.
+constexpr std::string_view MaxwellControlMagic{"\x34\x12\x76\x98"};
+constexpr std::string_view MaxwellGraphicsMagic{"\x78\x56\x34\x12"};
+constexpr std::string_view MaxwellComputeMagic{"\x79\x56\x34\x12"};
 
 // ---------------------------------------------------------------------------------------------
 // Decompressors
@@ -429,14 +436,11 @@ std::vector<Record> ParseBnsh(Bytes data) {
     if (Le<u32>(data, 0x1c) != data.size()) {
         throw ArchiveError("invalid BNSH file size");
     }
+    // Checked for native (NVN2) programs only; Switch 1 files come in many versions.
     const std::array<u8, 4> version{data[8], data[9], data[10], data[11]};
     constexpr std::array<u8, 4> v0420{0, 4, 2, 0}, v1320{1, 3, 2, 0}, v1420{1, 4, 2, 0};
-    if (version != v0420 && version != v1320 && version != v1420) {
-        throw ArchiveError("unsupported BNSH version");
-    }
-    if (Le<u16>(data, 0x70) != 4 || Le<u16>(data, 0x72) != 200) {
-        throw ArchiveError("unsupported BNSH API");
-    }
+    const bool native_version = version == v0420 || version == v1320 || version == v1420;
+    const bool native_api = Le<u16>(data, 0x70) == 4 && Le<u16>(data, 0x72) == 200;
     const u32 count = Le<u32>(data, 0x7c);
     const u64 variations = Le<u64>(data, 0x80);
     if (count != 0 && variations == 0) {
@@ -475,6 +479,22 @@ std::vector<Record> ParseBnsh(Bytes data) {
             }
             const auto code = Extent(data, code_offset, code_size);
             const auto control = Extent(data, control_offset, control_size);
+            if (Is(control, 0, MaxwellControlMagic) && !IsControlMagic(control)) {
+                // A Switch 1 program: its control names the code area's length.
+                if (control.size() < 0x708 || Le<u32>(control, 0x704) != code.size() ||
+                    (stage != ProgramStage::Compute &&
+                     (!Is(code, 0, MaxwellGraphicsMagic) || code.size() <= 0x80))) {
+                    throw ArchiveError("invalid BNSH Maxwell stage data");
+                }
+                result.push_back({stage, code, control, true, variation + 1});
+                continue;
+            }
+            if (!native_version) {
+                throw ArchiveError("unsupported BNSH version");
+            }
+            if (!native_api) {
+                throw ArchiveError("unsupported BNSH API");
+            }
             if (stage != ProgramStage::Compute) {
                 if (code.size() <= 128 || (code.size() - 128) % 16) {
                     throw ArchiveError("invalid native graphics code size");
@@ -493,7 +513,7 @@ std::vector<Record> ParseBnsh(Bytes data) {
                     throw ArchiveError("BNSH graphics stage disagrees with native header");
                 }
             }
-            result.push_back({stage, code, control});
+            result.push_back({stage, code, control, false, variation + 1});
         }
     }
     return result;
@@ -653,12 +673,77 @@ std::vector<Record> ParseShn(Bytes data, std::vector<u8>& metadata, std::vector<
     return result;
 }
 
-/// NVN2 AGL BAHS v11 with its separate metadata and code pools.
+/// The programs of a Switch 1 AGL BAHS file, found as Peanuts Native's bahs_shaders finds them:
+/// the area in front of the code region is searched for 16-byte entries {code offset, 0, control
+/// length, control's distance from the entry} whose control and code check out.
+std::vector<Record> ParseBahsMaxwell(Bytes data) {
+    const u64 region_size = Le<u32>(data, 0x18);
+    const u64 region = Le<u32>(data, 0x1c);
+    if (region > data.size() || region_size > data.size() - region) {
+        throw ArchiveError("invalid BAHS code region");
+    }
+    struct Entry {
+        u64 at;
+        u64 control;
+        Record record;
+    };
+    std::vector<Entry> found;
+    for (u64 at = 0; at + 16 < region; at += 4) {
+        const u64 offset = Le<u32>(data, at);
+        const u64 control_size = Le<u32>(data, at + 8);
+        const s64 control = static_cast<s64>(at) + Le<s32>(data, at + 12);
+        if (Le<u32>(data, at + 4) != 0 || offset % 0x100 != 0 || control_size < 0x760 ||
+            (control_size > 0x880 && control_size != 0x88c) || control < 0 ||
+            static_cast<u64>(control) + control_size > region ||
+            !Is(data, static_cast<u64>(control), MaxwellControlMagic)) {
+            continue;
+        }
+        const u64 code_size = Le<u32>(data, static_cast<u64>(control) + 0x704);
+        if (offset + code_size > region_size || code_size <= 0x80) {
+            continue;
+        }
+        const auto code = data.subspan(static_cast<size_t>(region + offset),
+                                       static_cast<size_t>(code_size));
+        ProgramStage stage = ProgramStage::Compute;
+        if (Is(code, 0, MaxwellGraphicsMagic)) {
+            const u32 header_stage = (Le<u32>(code, 0x30) >> 10) & 15;
+            if (header_stage < 1 || header_stage > 5) {
+                continue;
+            }
+            stage = GraphicsStages[header_stage - 1];
+        } else if (!Is(code, 0, MaxwellComputeMagic)) {
+            continue;
+        }
+        found.push_back({at, static_cast<u64>(control),
+                         {stage, code,
+                          data.subspan(static_cast<size_t>(control),
+                                       static_cast<size_t>(control_size)),
+                          true}});
+    }
+    // An entry never lies inside a control section (its words can read as one).
+    std::vector<Record> records;
+    for (const Entry& entry : found) {
+        const bool inside = std::ranges::any_of(found, [&](const Entry& other) {
+            const u64 own = Le<u32>(data, other.control + 0x20);
+            const u64 length = own >= 0x760 && own < 0x880 ? own : 0x880;
+            return entry.at >= other.control && entry.at < other.control + length;
+        });
+        if (!inside) {
+            records.push_back(entry.record);
+        }
+    }
+    return records;
+}
+
+/// AGL BAHS: NVN2's v11 with its separate metadata and code pools, or a Switch 1 file.
 std::vector<Record> ParseBahs(Bytes data) {
     Extent(data, 0, 32);
     const u32 version = Le<u32>(data, 4);
     const u32 size = Le<u32>(data, 8);
     const u32 platform = Le<u32>(data, 12);
+    if (Is(data, 0, "BAHS") && (version != 11 || platform != 5)) {
+        return ParseBahsMaxwell(data);
+    }
     const u32 flags = Le<u32>(data, 16);
     const u64 metadata_base = Le<u32>(data, 20);
     const u64 pool_size = Le<u32>(data, 24);
@@ -774,12 +859,18 @@ struct Walker {
     const std::function<void(const ShaderRecord&)>& on_record;
     const std::function<void(const std::string&)>& on_member_error;
     std::stop_token stop;
+    mutable u32 groups{}; ///< Program numbers given out so far
 
-    /// Passes every record to the caller's record callback.
+    /// Passes every record to the caller's record callback, with its file's program numbers
+    /// made unique in the walk.
     void Emit(const std::vector<Record>& records) const {
+        u32 highest = 0;
         for (const auto& record : records) {
-            on_record(ShaderRecord{record.stage, record.code, record.control});
+            highest = (std::max)(highest, record.group);
+            on_record(ShaderRecord{record.stage, record.code, record.control, record.maxwell,
+                                   record.group != 0 ? groups + record.group : 0});
         }
+        groups += highest;
     }
 
     /// Walks one archive member, reporting its error to the caller instead of stopping the walk.

@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
 #include <cinttypes>
 #include <chrono>
 #include <atomic>
@@ -193,35 +197,81 @@ bool ArmNce::HandleGuestAccessFault(GuestContext* guest_ctx, void* raw_info, voi
     const Common::ProcessAddress addr =
         (reinterpret_cast<u64>(info->si_addr) & ~Memory::YUZU_PAGEMASK);
     auto& memory = guest_ctx->parent->m_running_thread->GetOwnerProcess()->GetMemory();
-    const auto fault_start = std::chrono::steady_clock::now();
+    // The timers below run on one fault in 64 (and count for 64): reading the clock on every one
+    // was a third of the two busiest guest threads' time in Donkey Kong Bananza (AYN Thor).
+    static thread_local u32 fault_count = 0;
+    const bool timed = (++fault_count & 63) == 0;
+    const auto fault_start =
+        timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     static std::atomic<u64> handed{}, handler_ns{}, handed_ns{};
+    const auto elapsed = [&] {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - fault_start)
+                                    .count()) * 64;
+    };
     const auto spent = [&] {
-        handler_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::steady_clock::now() - fault_start)
-                                           .count());
+        if (timed) {
+            handler_ns += elapsed();
+        }
     };
     const auto result = memory.InvalidateNCE(addr, Memory::YUZU_PAGESIZE);
     if (result == Memory::NCEAccessFaultAction::Retry) {
         ++handed;
-        handed_ns += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          std::chrono::steady_clock::now() - fault_start)
-                                          .count());
+        if (timed) {
+            handed_ns += elapsed();
+        }
         return true;
     }
     if (result == Memory::NCEAccessFaultAction::Instruction) {
         auto& instruction_ctx = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
         // How many instructions run this way, every 5 s (each costs a signal and a decode).
-        static std::atomic<u64> emulated{}, refused{};
+        static std::atomic<u64> emulated{}, refused{}, fills{}, fill_bytes{};
         static std::atomic<s64> reported{};
-        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
-                            .count();
-        if (s64 last = reported.load(); now - last >= 5 && reported.compare_exchange_strong(last, now)) {
+        const s64 now = timed ? std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count()
+                              : 0;
+        if (s64 last = reported.load();
+            timed && now - last >= 5 && reported.compare_exchange_strong(last, now)) {
             LOG_INFO(Core_ARM, "NCE: {} writes to GPU-tracked pages emulated in the last 5 s, {} "
                                "left to the page-wide path, {} pages handed over whole; {} ms "
-                               "emulating, {} ms handing pages over",
+                               "emulating, {} ms handing pages over; {} fills of {} KiB at once",
                      emulated.exchange(0), refused.exchange(0), handed.exchange(0),
-                     handler_ns.exchange(0) / 1000000, handed_ns.exchange(0) / 1000000);
+                     handler_ns.exchange(0) / 1000000, handed_ns.exchange(0) / 1000000,
+                     fills.exchange(0), fill_bytes.exchange(0) / 1024);
+        }
+        // The SDK memset's bulk loop writes 16 bytes an instruction, each one a signal here:
+        //   stp x9, x9, [x8]; sub x10, x10, #0x20; stp x9, x9, [x8, #0x10]; add x8, x8, #0x20;
+        //   cmp x10, #0x1f; b.hi <loop>
+        // Donkey Kong Bananza clears ~0.5 MiB a frame on such pages (~30,000 signals, most of
+        // its guest threads' time on Android). Run the loop's iterations up to the end of the
+        // page in one write. EDEN_NX2_NCE_FILL=0 turns it off.
+        static constexpr std::array<u32, 6> FillLoop{0xa9002509, 0xd100814a, 0xa9012509, 0x91008108, 0xf1007d5f, 0x54ffff68};
+        static const bool fill_on = [] {
+            const char* value = std::getenv("EDEN_NX2_NCE_FILL");
+            return value == nullptr || value[0] != '0';
+        }();
+        if (fill_on && std::memcmp(reinterpret_cast<const void*>(instruction_ctx.pc), FillLoop.data(),
+                                   sizeof(FillLoop)) == 0) {
+            auto& dst = instruction_ctx.regs[8];
+            auto& left = instruction_ctx.regs[10];
+            const u64 room = Memory::YUZU_PAGESIZE - (dst & Memory::YUZU_PAGEMASK);
+            const u64 bytes = (std::min<u64>)(room, left) & ~u64{31};
+            if (bytes != 0) {
+                std::array<u64, Memory::YUZU_PAGESIZE / sizeof(u64)> pattern;
+                pattern.fill(instruction_ctx.regs[9]);
+                memory.WriteBlock(dst, pattern.data(), bytes);
+                dst += bytes;
+                left -= bytes;
+                // Done: the loop's own compare sets the flags and falls through.
+                if (left <= 0x1f) {
+                    instruction_ctx.pc += 0x10;
+                }
+                ++fills;
+                fill_bytes += bytes;
+                spent();
+                return true;
+            }
         }
         if (const auto next_pc = MatchAndExecuteOneInstruction(
                 memory, &instruction_ctx, GetFloatingPointState(instruction_ctx))) {

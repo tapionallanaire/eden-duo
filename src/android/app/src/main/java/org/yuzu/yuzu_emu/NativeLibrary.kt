@@ -178,6 +178,12 @@ object NativeLibrary {
      */
     external fun setShaderRunMode(record: Boolean, compile: Boolean, compileMax: Boolean)
 
+    /** Eden Duo: this boot scans the game's files for shaders and builds them on the loading screen. */
+    external fun setShaderPrecache(enabled: Boolean)
+
+    /** Eden Duo: the "Preparing shaders" screen's skip button; the compile stops and the game starts. */
+    external fun skipShaderPrecache()
+
     // Surface Handling
     external fun surfaceChanged(surf: Surface?)
 

@@ -96,6 +96,26 @@ bool UseShuffleFallback(EmitContext& ctx) {
 }
 
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
+    if (ctx.shuffle_scratch.value != 0) {
+        // DefineShuffleScratch: store, meet, read the source lane's word, meet again before a later
+        // shuffle can overwrite it.
+        const auto barrier = [&] {
+            ctx.OpControlBarrier(ctx.Const(static_cast<u32>(spv::Scope::Subgroup)),
+                                 ctx.Const(static_cast<u32>(spv::Scope::Workgroup)),
+                                 ctx.Const(static_cast<u32>(
+                                     spv::MemorySemanticsMask::AcquireRelease |
+                                     spv::MemorySemanticsMask::WorkgroupMemory)));
+        };
+        const Id index{ctx.OpLoad(ctx.U32[1], ctx.shuffle_local_invocation_index)};
+        const Id base{ctx.OpISub(ctx.U32[1], index, GetThreadId(ctx))};
+        ctx.OpStore(ctx.OpAccessChain(ctx.shuffle_scratch_pointer, ctx.shuffle_scratch, index), value);
+        barrier();
+        const Id source{ctx.OpAccessChain(ctx.shuffle_scratch_pointer, ctx.shuffle_scratch,
+                                          ctx.OpIAdd(ctx.U32[1], base, src_thread_id))};
+        const Id result{ctx.OpLoad(ctx.U32[1], source)};
+        barrier();
+        return result;
+    }
     if (!UseShuffleFallback(ctx)) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }

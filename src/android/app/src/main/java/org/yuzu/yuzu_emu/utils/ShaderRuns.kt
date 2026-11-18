@@ -49,6 +49,111 @@ object ShaderRuns {
     @Volatile
     var lastTotal = 0
 
+    /**
+     * Set by the launch dialog when the player answers yes to "compile shaders first": this boot
+     * finds the game's shaders in its files and builds them on the loading screen.
+     */
+    @Volatile
+    var precacheNext = false
+
+    /**
+     * True from the start of a "compile shaders first" boot until the shader load reports it is
+     * complete. The game counts as started before its shaders load, which would hide the loading
+     * card and leave a black screen for the minutes the compile takes.
+     */
+    @Volatile
+    var precacheBoot = false
+
+    /** Removes the "Preparing shaders" screen once such a boot has finished (set by EmulationFragment). */
+    @Volatile
+    var onPrecacheBootDone: (() -> Unit)? = null
+
+    /** Built / total of such a boot, for the "Preparing shaders" screen (set by EmulationFragment). */
+    @Volatile
+    var onPrecacheProgress: ((Int, Int) -> Unit)? = null
+
+    /**
+     * Switch 2 titles (program IDs 04...) always have programs to compile; a Switch 1 title only
+     * with a pipeline list or a shader list, its own or a shipped one.
+     */
+    fun canPrecache(context: android.content.Context, game: Game): Boolean {
+        if (game.programIdHex.startsWith("04")) return true
+        val dir = WarmUp.shaderDir(game)
+        val id = game.programIdHex.uppercase()
+        return File(dir, "plan.bin").exists() || File(dir, "peanuts.tsv.zst").exists() ||
+            listOf("shader_plans/$id.bin", "shader_lists/peanuts/$id.tsv.zst").any { asset ->
+                try {
+                    context.assets.open(asset).close()
+                    true
+                } catch (_: java.io.IOException) {
+                    false
+                }
+            }
+    }
+
+    /** The scan's "done" marker: the boot-time precache already ran for this title on this driver. */
+    fun precacheDone(game: Game): Boolean {
+        val dir = WarmUp.shaderDir(game)
+        // A skipped compile leaves its pair file without the marker: ask again next time.
+        return File(dir, "warm-compute.done").exists() &&
+            (!File(dir, "warm-pairs.bin").exists() || File(dir, "warm-pairs.done").exists())
+    }
+
+    /**
+     * Copies the pipeline list shipped for this title (no game code in it) next to its shader
+     * cache, where the boot fills it from the game's own files. Without one, the title's shader
+     * list from Peanuts Native (shader keys only), when there is one.
+     */
+    fun installShippedPlan(context: android.content.Context, game: Game) {
+        val dir = WarmUp.shaderDir(game)
+        val id = game.programIdHex.uppercase()
+        if (File(dir, "plan.bin").exists()) return
+        if (copyAsset(context, "shader_plans/$id.bin", File(dir, "plan.bin"))) return
+        val list = File(dir, "peanuts.tsv.zst")
+        if (!list.exists()) copyAsset(context, "shader_lists/peanuts/$id.tsv.zst", list)
+    }
+
+    /** False when the app ships no such asset. */
+    private fun copyAsset(context: android.content.Context, asset: String, target: File): Boolean =
+        try {
+            context.assets.open(asset).use { input ->
+                target.parentFile?.mkdirs()
+                target.outputStream().use { input.copyTo(it) }
+            }
+            true
+        } catch (_: java.io.IOException) {
+            false
+        }
+
+    /**
+     * Asks once per title whether to compile its shaders before it starts, then calls [launch].
+     * Every way of starting a game goes through here, so the question does not depend on which
+     * button was used.
+     */
+    fun askThenLaunch(context: android.content.Context, game: Game?, launch: () -> Unit) {
+        val preferences = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val declinedKey = "shader_precache_declined_" + (game?.programIdHex ?: "")
+        if (game == null || !canPrecache(context, game) || precacheDone(game) ||
+            preferences.getBoolean(declinedKey, false)
+        ) {
+            launch()
+            return
+        }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(context)
+            .setTitle(org.yuzu.yuzu_emu.R.string.shader_precache_title)
+            .setMessage(org.yuzu.yuzu_emu.R.string.shader_precache_message)
+            .setPositiveButton(org.yuzu.yuzu_emu.R.string.shader_precache_yes) { _, _ ->
+                installShippedPlan(context, game)
+                precacheNext = true
+                launch()
+            }
+            .setNegativeButton(org.yuzu.yuzu_emu.R.string.shader_precache_no) { _, _ ->
+                preferences.edit().putBoolean(declinedKey, true).apply()
+                launch()
+            }
+            .show()
+    }
+
     fun recordingLog(game: Game): File =
         File(cacheDir(game), "recording.log")
 

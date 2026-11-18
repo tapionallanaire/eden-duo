@@ -39,6 +39,11 @@ namespace VideoCommon {
 /// The shader hash of lowered native code (frame dump "shaders", pipeline cache keys).
 u64 NativeShaderHash(std::span<const u64> code);
 
+/// Where a Maxwell program ends within `words` (read from its start address), in bytes: at its
+/// self-branch, or behind its first EXIT when the guest driver is not the proprietary one. Empty
+/// when it ends in neither.
+std::optional<size_t> FindMaxwellCodeEnd(std::span<const u64> words, bool is_proprietary_driver);
+
 /// The code an environment holds for a lowered native program: `header` (the shader header,
 /// zero for compute), the instructions with a Maxwell scheduling word before every fourth word,
 /// a zero word and the native address map. Applies the per-program workarounds to `lowered`
@@ -320,7 +325,7 @@ public:
     FileEnvironment& operator=(const FileEnvironment&) = delete;
     FileEnvironment(const FileEnvironment&) = delete;
 
-    void Deserialize(std::ifstream& file, bool with_mesh_state = false);
+    void Deserialize(std::istream& file, bool with_mesh_state = false);
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 

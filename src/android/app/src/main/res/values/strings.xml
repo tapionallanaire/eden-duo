@@ -1903,6 +1903,36 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     </string>
 
+    <string name="license_peanuts" translatable="false">Peanuts Native shader lists</string>
+    <string name="license_peanuts_description" translatable="false">The per-game shader lists under shader_lists/peanuts come from Peanuts Native / Banana Native</string>
+    <string name="license_peanuts_link" translatable="false">https://github.com/igawa6/peanuts-native</string>
+    <string name="license_peanuts_copyright" translatable="false">Copyright © 2026 seedds</string>
+    <string name="license_peanuts_text" translatable="false">
+MIT License\n\n
+
+Copyright (c) 2026 seedds\n
+Copyright (c) 2026 Swap2-Native contributors\n
+Copyright (c) 2026 EddizEge (file-backed memory pools, from Anka Native)\n\n
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the \"Software\"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:\n\n
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.\n\n
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+    </string>
+
     <string name="external_content">External Content</string>
     <string name="add_folders">Add Folder</string>
     <string name="percent">%1$d%%</string>
@@ -1959,6 +1989,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     <string name="memory_already_clean">Nothing to reclaim right now (%1$s)</string>
     <string name="menu_recover_memory">Recover memory</string>
     <!-- Eden Duo: shader warm-up -->
+    <string name="shader_prepare_heading">Preparing shaders</string>
+    <string name="shader_prepare_scanning">Reading the game\'s files…</string>
+    <string name="shader_prepare_progress">%1$d of %2$d built (%3$d%%)</string>
+    <string name="shader_prepare_hint">Done once per game. The game starts by itself when this finishes; the next start takes seconds.</string>
+    <string name="shader_prepare_skip">Skip for now</string>
+    <string name="shader_prepare_skipping">Stopping. The rest is built the next time you choose Compile.</string>
+    <string name="shader_precache_title">Compile shaders first?</string>
+    <string name="shader_precache_message">Duet Plus can find this game\'s shaders in its files and build them on the loading screen, so play stutters less. The first start takes longer. You are asked once per game.</string>
+    <string name="shader_precache_yes">Compile</string>
+    <string name="shader_precache_no">Not now</string>
     <string name="warm_up_shaders">Warm up shaders</string>
     <string name="warm_up_shaders_description">Run this game for a set time to build its shader cache, then put your saves back. Reaches the title screen and the first scenes only.</string>
     <string name="warm_up_shader_count">%1$d shaders cached</string>

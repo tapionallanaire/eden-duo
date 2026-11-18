@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <optional>
 #include <vector>
+
+#include "common/alignment.h"
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
@@ -14,6 +17,95 @@ namespace Shader::Backend::SPIRV {
 namespace {
 
 constexpr u32 GUEST_WARP_LANES = 32;
+
+// Words a lane hands to its warp for one HMMA: A's four and B's two fragment registers.
+constexpr u32 HMMA_LANE_WORDS = 6;
+
+// Workgroup memory a compute shader's software HMMA gathers its fragments through, in place of
+// subgroup shuffles with a per-lane index: Turnip (ir3) has no such shuffle and turns each into a
+// loop of rotates, one pass per distinct lane distance (BananaNative, docs/reference/shaders.md,
+// "Ampere HMMA and warp shuffles of agl's upscaler on Adreno"). Donkey Kong Bananza's upscaler
+// network took 194 ms of a 224 ms GPU frame on the Odin 2 (Turnip trace, 27x12 groups of 128).
+// Words are stored [word][LocalInvocationIndex]; a subgroup's lane L is at its first invocation's
+// index + L (LocalInvocationIndex - SubgroupLocalInvocationId), so the lanes are addressed as the
+// shuffles addressed them. SubgroupId * SubgroupSize + lane broke the picture on Turnip.
+// EDEN_NX2_HMMA_LDS=0 keeps the shuffles.
+struct HmmaScratch {
+    Id variable;
+    Id word_pointer;
+    bool block;
+    u32 slots;
+    Id local_invocation_index;
+    /// uvec4 elements, four neighbouring lanes' word read in one load (EDEN_NX2_HMMA_VEC4=0: words)
+    bool vec4;
+    Id vec_pointer;
+};
+
+bool EnvOff(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] == '0';
+}
+
+u32 HmmaScratchSlots(const IR::Program& program) {
+    const auto& size = program.workgroup_size;
+    return size[0] * size[1] * size[2];
+}
+
+// Only where the guest's shared memory and the scratch fit the device together (Adreno: 32 KiB);
+// past the limit the driver may not refuse the pipeline but run it wrong.
+bool UsesHmmaScratch(const EmitContext& ctx, const IR::Program& program) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_HMMA_LDS");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || program.stage != Stage::Compute) {
+        return false;
+    }
+    const u32 limit = ctx.profile.max_compute_shared_memory_size;
+    const u32 needed = Common::AlignUp(program.shared_memory_size, 16U) +
+                       HmmaScratchSlots(program) * HMMA_LANE_WORDS * 4;
+    return limit == 0 || needed <= limit;
+}
+
+HmmaScratch DefineHmmaScratch(EmitContext& ctx, const IR::Program& program) {
+    const u32 slots = HmmaScratchSlots(program);
+    // Odin 2 (Turnip), Bananza's upscaler network: 46 -> 25 ms a frame with QUANT below.
+    static const bool vec4_enabled = !EnvOff("EDEN_NX2_HMMA_VEC4");
+    HmmaScratch scratch{};
+    scratch.vec4 = vec4_enabled && slots % 4 == 0;
+    const u32 lanes_per_element = scratch.vec4 ? 4 : 1;
+    const Id array_type = ctx.TypeArray(scratch.vec4 ? ctx.U32[4] : ctx.U32[1],
+                                        ctx.Const(slots * HMMA_LANE_WORDS / lanes_per_element));
+    scratch.slots = slots;
+    scratch.word_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[1]);
+    scratch.vec_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[4]);
+    // With SPV_KHR_workgroup_memory_explicit_layout every Block variable aliases the others from
+    // offset 0: put this one after the guest's shared memory.
+    scratch.block = ctx.uses_explicit_workgroup_layout && program.shared_memory_size != 0;
+    if (scratch.block) {
+        ctx.Decorate(array_type, spv::Decoration::ArrayStride, 4U * lanes_per_element);
+        const Id struct_type = ctx.TypeStruct(array_type);
+        ctx.MemberDecorate(struct_type, 0U, spv::Decoration::Offset,
+                           Common::AlignUp(program.shared_memory_size, 16U));
+        ctx.Decorate(struct_type, spv::Decoration::Block);
+        scratch.variable = ctx.AddGlobalVariable(
+            ctx.TypePointer(spv::StorageClass::Workgroup, struct_type), spv::StorageClass::Workgroup);
+        ctx.Decorate(scratch.variable, spv::Decoration::Aliased);
+    } else {
+        scratch.variable = ctx.AddGlobalVariable(
+            ctx.TypePointer(spv::StorageClass::Workgroup, array_type), spv::StorageClass::Workgroup);
+    }
+    ctx.interfaces.push_back(scratch.variable);
+    const auto builtin = [&](spv::BuiltIn kind) {
+        const Id variable = ctx.AddGlobalVariable(
+            ctx.TypePointer(spv::StorageClass::Input, ctx.U32[1]), spv::StorageClass::Input);
+        ctx.Decorate(variable, spv::Decoration::BuiltIn, kind);
+        ctx.interfaces.push_back(variable);
+        return variable;
+    };
+    scratch.local_invocation_index = builtin(spv::BuiltIn::LocalInvocationIndex);
+    return scratch;
+}
 
 // A cooperative matrix needs its whole subgroup: every row of the workgroup fills whole warps and
 // the pipeline is created with full subgroups. Cooperative matrices also need the Vulkan memory
@@ -115,8 +207,12 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
             needed[depth == 16] = true;
         }
     }
+    std::optional<HmmaScratch> scratch;
     for (u32 variant = 0; variant < 2; ++variant) {
         if (!needed[variant]) continue;
+        if (!scratch && UsesHmmaScratch(ctx, program)) {
+            scratch = DefineHmmaScratch(ctx, program);
+        }
         ctx.AddCapability(spv::Capability::GroupNonUniform);
         ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
         if (!ctx.SupportsSubgroups() ||
@@ -127,7 +223,14 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         const auto add = [&](Id a, Id b) { return ctx.OpIAdd(u32ty, a, b); };
         const auto and_ = [&](Id a, u32 b) { return ctx.OpBitwiseAnd(u32ty, a, imm(b)); };
         const auto unpack = [&](Id v) { return ctx.OpUnpackHalf2x16(ctx.F32[2], v); };
+        static const bool quantize = !EnvOff("EDEN_NX2_HMMA_QUANT");
         const auto round_half = [&](Id value) {
+            if (quantize) {
+                // The GPU's own f32 -> f16 -> f32 rounding (f16 subnormals become 0) in place of
+                // the ~15 integer operations below (EDEN_NX2_HMMA_QUANT=0 keeps them). Odin 2:
+                // 64.9k -> 53.6k instructions in Bananza's network, picture unchanged.
+                return ctx.OpQuantizeToF16(f32ty, value);
+            }
             // Do not express the intermediate rounding as unpack(pack(value)): drivers may
             // eliminate that round trip. Round normal significands explicitly, ties to even;
             // half subnormals lie on the exactly representable 2^-24 grid.
@@ -178,19 +281,78 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         const Id col_base = ctx.OpShiftLeftLogical(u32ty, and_(lane, 3), imm(3));
         const Id a_base = add(warp_base, row_base);
         const Id b_base = add(warp_base, col_base);
+        // Fragment word `word` of subgroup lane `source`: through the scratch when there is one,
+        // else a subgroup shuffle of `value`.
+        Id subgroup_base{};
+        const auto scratch_pointer = [&](Id word, Id slot) {
+            const Id index = add(ctx.OpIMul(u32ty, word, imm(scratch->slots)), slot);
+            if (scratch->vec4) {
+                const Id element = ctx.OpShiftRightLogical(u32ty, index, imm(2));
+                const Id component = and_(index, 3);
+                return scratch->block ? ctx.OpAccessChain(scratch->word_pointer, scratch->variable,
+                                                          imm(0), element, component)
+                                      : ctx.OpAccessChain(scratch->word_pointer, scratch->variable,
+                                                          element, component);
+            }
+            return scratch->block
+                       ? ctx.OpAccessChain(scratch->word_pointer, scratch->variable, imm(0), index)
+                       : ctx.OpAccessChain(scratch->word_pointer, scratch->variable, index);
+        };
+        // Words `word` of four lanes from `first` (a multiple of 4), one uvec4 load.
+        const auto load4 = [&](Id word, Id first) {
+            const Id index = add(ctx.OpIMul(u32ty, word, imm(scratch->slots)), add(subgroup_base, first));
+            const Id element = ctx.OpShiftRightLogical(u32ty, index, imm(2));
+            return ctx.OpLoad(ctx.U32[4],
+                              scratch->block ? ctx.OpAccessChain(scratch->vec_pointer,
+                                                                 scratch->variable, imm(0), element)
+                                             : ctx.OpAccessChain(scratch->vec_pointer,
+                                                                 scratch->variable, element));
+        };
+        const auto subgroup_barrier = [&] {
+            ctx.OpControlBarrier(imm(static_cast<u32>(spv::Scope::Subgroup)),
+                                 imm(static_cast<u32>(spv::Scope::Workgroup)),
+                                 imm(static_cast<u32>(spv::MemorySemanticsMask::AcquireRelease |
+                                                      spv::MemorySemanticsMask::WorkgroupMemory)));
+        };
+        if (scratch) {
+            const Id slot = ctx.OpLoad(u32ty, scratch->local_invocation_index);
+            subgroup_base = ctx.OpISub(u32ty, slot, lane);
+            for (u32 word = 0; word < HMMA_LANE_WORDS; ++word) {
+                ctx.OpStore(scratch_pointer(imm(word), slot), inputs[word]);
+            }
+            subgroup_barrier();
+        }
+        const auto fetch = [&](Id value, Id word, Id source) {
+            if (!scratch) {
+                return ctx.OpGroupNonUniformShuffle(u32ty, imm(3), value, source);
+            }
+            return ctx.OpLoad(u32ty, scratch_pointer(word, add(subgroup_base, source)));
+        };
         // Unrolling a K=8 group lets its shuffles overlap, which latency-bound small dispatches
         // need; unrolling all of K=16 raises register pressure and slows large dispatches.
+        // pick(low, high) chooses the K group's register; with immediates, its scratch word.
         const auto emit_group = [&](auto pick) {
+            // vec4: A's rows and B's columns of the group, each four lanes in one load.
+            const bool vec4 = scratch && scratch->vec4;
+            std::array<Id, 2> a_rows{}, b_cols{};
+            if (vec4) {
+                for (u32 row = 0; row < 2; ++row)
+                    a_rows[row] = load4(pick(imm(row), imm(row + 2)), a_base);
+                for (u32 col = 0; col < 2; ++col)
+                    b_cols[col] = load4(pick(imm(4), imm(5)), add(b_base, imm(col * 4)));
+            }
             for (u32 component = 0; component < 4; ++component) {
                 const Id b = pick(inputs[4], inputs[5]);
+                const Id b_word = pick(imm(4), imm(5));
                 std::array<Id, 2> bs;
                 for (u32 col = 0; col < 2; ++col)
-                    bs[col] = unpack(ctx.OpGroupNonUniformShuffle(
-                        u32ty, imm(3), b, add(b_base, imm(component + col * 4))));
+                    bs[col] = unpack(vec4 ? ctx.OpCompositeExtract(u32ty, b_cols[col], component)
+                                          : fetch(b, b_word, add(b_base, imm(component + col * 4))));
                 for (u32 row = 0; row < 2; ++row) {
-                    const Id as = unpack(ctx.OpGroupNonUniformShuffle(
-                        u32ty, imm(3), pick(inputs[row], inputs[row + 2]),
-                        add(a_base, imm(component))));
+                    const Id as = unpack(vec4 ? ctx.OpCompositeExtract(u32ty, a_rows[row], component)
+                                              : fetch(pick(inputs[row], inputs[row + 2]),
+                                                      pick(imm(row), imm(row + 2)),
+                                                      add(a_base, imm(component))));
                     for (u32 col = 0; col < 2; ++col) {
                         Id value = ctx.OpLoad(f32ty, accumulators[row * 2 + col]);
                         for (u32 half = 0; half < 2; ++half) {
@@ -226,6 +388,10 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
             ctx.OpBranch(header);
             ctx.AddLabel(end);
         }
+        if (scratch) {
+            // The warp's next HMMA overwrites the scratch: every lane has read it first.
+            subgroup_barrier();
+        }
         std::array<Id, 2> packed;
         for (u32 row = 0; row < 2; ++row)
             packed[row] = ctx.OpPackHalf2x16(u32ty, ctx.OpCompositeConstruct(ctx.F32[2],
@@ -233,6 +399,37 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
         ctx.OpReturnValue(ctx.OpCompositeConstruct(ctx.U32[2], packed[0], packed[1]));
         ctx.OpFunctionEnd();
     }
+}
+
+// Per-lane-index shuffles of a compute shader through workgroup memory, one word an invocation at
+// [LocalInvocationIndex]; a subgroup's lane L is at its first invocation's index + L, as for the HMMA
+// scratch. BananaNative's shuffle_lds: Donkey Kong Bananza's upscaler network on Turnip, 16-23 ms of
+// its 29 ms were the shuffles' rotate loops. Only where it fits with the guest's shared memory and
+// the HMMA scratch, and not beside the explicit workgroup layout (Block variables alias from 0).
+void DefineShuffleScratch(EmitContext& ctx, const IR::Program& program) {
+    if (!ctx.profile.shuffle_through_workgroup_memory || program.stage != Stage::Compute ||
+        !program.info.uses_subgroup_shuffles || !ctx.SupportsSubgroups() ||
+        (ctx.uses_explicit_workgroup_layout && program.shared_memory_size != 0)) {
+        return;
+    }
+    const u32 slots = HmmaScratchSlots(program);
+    const u32 limit = ctx.profile.max_compute_shared_memory_size;
+    const u32 needed = Common::AlignUp(program.shared_memory_size, 16U) +
+                       (UsesHmmaScratch(ctx, program) ? slots * HMMA_LANE_WORDS * 4 : 0) +
+                       slots * 4;
+    if (slots == 0 || (limit != 0 && needed > limit)) {
+        return;
+    }
+    const Id array_type = ctx.TypeArray(ctx.U32[1], ctx.Const(slots));
+    ctx.shuffle_scratch = ctx.AddGlobalVariable(
+        ctx.TypePointer(spv::StorageClass::Workgroup, array_type), spv::StorageClass::Workgroup);
+    ctx.interfaces.push_back(ctx.shuffle_scratch);
+    ctx.shuffle_scratch_pointer = ctx.TypePointer(spv::StorageClass::Workgroup, ctx.U32[1]);
+    ctx.shuffle_local_invocation_index = ctx.AddGlobalVariable(
+        ctx.TypePointer(spv::StorageClass::Input, ctx.U32[1]), spv::StorageClass::Input);
+    ctx.Decorate(ctx.shuffle_local_invocation_index, spv::Decoration::BuiltIn,
+                 spv::BuiltIn::LocalInvocationIndex);
+    ctx.interfaces.push_back(ctx.shuffle_local_invocation_index);
 }
 
 Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {

@@ -617,8 +617,23 @@ void RasterizerVulkan::Nx2ProveNonWriterDraw(const GraphicsPipeline& pipeline) {
     Tegra::Nx2DrawPrograms programs;
     if (!Tegra::Engines::Maxwell3D::Nx2DrawProgramsOf(
             maxwell3d->regs, maxwell3d->GetNativeMacroEngine().native_turing, gpu_memory->GetID(),
-            map, programs) ||
-        Tegra::Nx2IsNonWriterDraw(programs, epoch)) {
+            map, programs)) {
+        return;
+    }
+    // Draws already seen proven in this epoch skip the shared set's lock and lookup: ~6,000 draws
+    // a frame in Donkey Kong Bananza, 4 % of the GPU back thread on an AYN Thor. A stale miss
+    // only repeats the proof below.
+    struct Proven {
+        Tegra::Nx2DrawPrograms programs;
+        u64 epoch{};
+    };
+    static thread_local std::array<Proven, 256> proven_cache{};
+    Proven& proven = proven_cache[Tegra::Nx2NonWriterSet::Hash{}(programs) % proven_cache.size()];
+    if (proven.epoch == epoch && proven.programs == programs) {
+        return;
+    }
+    if (Tegra::Nx2IsNonWriterDraw(programs, epoch)) {
+        proven = Proven{programs, epoch};
         return;
     }
     // The indirect reset program is drawn by writing guest memory on the host.
@@ -1737,6 +1752,36 @@ void RasterizerVulkan::DrawIndirect() {
             return;
         }
     }
+    if (params.from_record && scheduler.StorageWritesUnordered()) {
+        // The record may come from the stores of earlier draws (DK Bananza's terrain culling
+        // geometry shader, its reset vertex shader): nothing orders the host's argument fetch
+        // after them unless the guest's own wait for idle recorded a barrier since.
+        // EDEN_NX2_INDIRECT_BARRIER=0: draw without it.
+        static const bool barrier = [] {
+            const char* value = std::getenv("EDEN_NX2_INDIRECT_BARRIER");
+            return value == nullptr || value[0] != '0';
+        }();
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::IndirectRecordsUnordered,
+                                     1);
+        if (barrier) {
+            scheduler.RequestOutsideRenderPassOperationContext();
+            scheduler.Record([](vk::CommandBuffer cmdbuf) {
+                static constexpr VkMemoryBarrier STORES_TO_ARGUMENTS{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                                     VK_ACCESS_INDEX_READ_BIT |
+                                     VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                                     VK_ACCESS_SHADER_READ_BIT,
+                };
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                                       VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0,
+                                       STORES_TO_ARGUMENTS);
+            });
+            scheduler.NoteStorageWritesOrdered();
+        }
+    }
     buffer_cache.SetDrawIndirect(&params);
     PrepareDraw(params.is_indexed, true, [this, &params] {
         if (mesh_draw) {
@@ -2293,22 +2338,45 @@ void RasterizerVulkan::FlushSplitIdle() {
 }
 
 VideoCore::RasterizerInterface::GpuWrittenList RasterizerVulkan::ReadGpuWrittenCommandList(
-    DAddr addr, std::span<u8> out, bool past_sync) {
+    DAddr addr, std::span<u8> out, bool past_sync, u64* pending_tick) {
     if (!VideoCommon::GpuSplit::Get().Active() && buffer_cache.HasPendingNx2ListCopies()) {
         std::scoped_lock lock{buffer_cache.mutex};
         SubmitNx2ListCopies();
     }
     // No cache lock: the front only reads the copies, under their own lock.
-    switch (buffer_cache.Nx2ReadListCopy(addr, out, past_sync)) {
+    switch (buffer_cache.Nx2ReadListCopy(addr, out, past_sync, pending_tick)) {
     case BufferCache::Nx2ListRead::Copied:
         return GpuWrittenList::Copied;
     case BufferCache::Nx2ListRead::Synced:
         return GpuWrittenList::Synced;
     case BufferCache::Nx2ListRead::NeedsSync:
         return GpuWrittenList::NeedsSync;
+    case BufferCache::Nx2ListRead::Pending:
+        return GpuWrittenList::Pending;
     default:
         return GpuWrittenList::Unknown;
     }
+}
+
+bool RasterizerVulkan::Nx2ListSpeculationAllowed(DAddr page) {
+    return buffer_cache.Nx2ListSpeculationAllowed(page);
+}
+
+void RasterizerVulkan::Nx2CheckSpeculatedList(DAddr addr, u32 size, u64 hash) {
+    buffer_cache.Nx2CheckSpeculatedList(addr, size, hash);
+}
+
+bool RasterizerVulkan::IsGpuTickDone(u64 tick) {
+    if (scheduler.IsFree(tick)) {
+        return true;
+    }
+    // A deferred submission (Scheduler::DeferFlush) is only made by the split's back: ask it to
+    // submit, or the tick never completes while the front polls.
+    if (!scheduler.IsSubmitted(tick) && VideoCommon::GpuSplit::Get().Active()) {
+        VideoCommon::GpuSplit::Get().RequestIdleHook();
+    }
+    scheduler.GetMasterSemaphore().Refresh();
+    return scheduler.IsFree(tick);
 }
 
 void RasterizerVulkan::NoteGpuWrittenCommandListSynced(DAddr page) {
@@ -2737,6 +2805,7 @@ void RasterizerVulkan::WaitForIdle() {
 
     scheduler.RequestOutsideRenderPassOperationContext();
     if (SyncFixEnabled()) {
+        scheduler.NoteStorageWritesOrdered();
         scheduler.Record([flags](vk::CommandBuffer cmdbuf) {
             // Later work waits for the earlier work and sees its writes.
             static constexpr VkMemoryBarrier WFI_BARRIER{
@@ -2905,6 +2974,12 @@ void RasterizerVulkan::TickFrame() {
 
 bool RasterizerVulkan::AccelerateConditionalRendering() {
     gpu_memory->FlushCaching();
+    // EDEN_NX2_NO_HOST_CONDITIONAL=1: the path of drivers without VK_EXT_conditional_rendering
+    // (Turnip), for tests on other GPUs.
+    static const bool no_host = std::getenv("EDEN_NX2_NO_HOST_CONDITIONAL") != nullptr;
+    if (no_host) {
+        return false;
+    }
     return query_cache.AccelerateHostConditionalRendering();
 }
 

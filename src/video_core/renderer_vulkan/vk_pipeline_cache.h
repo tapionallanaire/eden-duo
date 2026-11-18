@@ -436,6 +436,28 @@ private:
     /// shader cache, so a dispatch that converts to the same SPIR-V finds the driver's work done.
     /// A marker skips it after it ran to the end for this driver and device.
     void StartShaderPrecache(u64 title_id);
+
+    /// What the recorded vertex + fragment pipelines (the disk cache and the filled pipeline
+    /// list) tell BuildShaderPairs.
+    struct RecordedPairs {
+        std::unordered_map<size_t, FixedPipelineState> states; ///< By FixedPipelineState::Hash
+        /// How many records use a state: under 0 all of them, else those with that shader.
+        std::unordered_map<u64, std::unordered_map<size_t, u32>> state_uses;
+        /// The vertex shaders each fragment shader was drawn with.
+        std::unordered_map<u64, std::unordered_set<u64>> fragment_vertices;
+    };
+
+    /// Builds the title's vertex + fragment pairs on the boot workers with guessed reads, and
+    /// drops them: a pipeline made of guesses must never serve a draw, only the driver's cache
+    /// keeps it. The pairs are those of the pairs file (ShaderWarm::PairsWarmPath) and, for every
+    /// fragment shader recorded with many vertex shaders (a pass drawn with whatever vertex
+    /// shader an object has), that shader with each vertex program of the file. A pair takes the
+    /// state most used in the records of its fragment shader, else of its vertex shader, else of
+    /// all. `callback` gets the pairs done and their count. Once per driver and file; a run that
+    /// is stopped goes on with the pairs its last save did not hold.
+    void BuildShaderPairs(u64 title_id, std::stop_token stop_loading,
+                          const VideoCore::DiskResourceLoadCallback& callback,
+                          const RecordedPairs& recorded);
     void StopShaderPrecache();
     /// Precache builds wait while the game builds pipelines (queued translations or driver
     /// compiles, or a pipeline built in the last moments): they share the CPU and the driver.

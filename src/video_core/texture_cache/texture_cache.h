@@ -2191,6 +2191,7 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     image.modification_tick = !old_upload_tick && image.cpu_modification_tick != 0
                                   ? image.cpu_modification_tick
                                   : ++modification_tick;
+    NotifyAliases(image);
 
     // Images uploaded by layer stay tracked while some of their layers are dirty.
     if (False(image.flags & ImageFlagBits::Tracked)) {
@@ -3487,6 +3488,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             }
             CopyImage(new_image_id, aliased->id, aliased->copies);
             new_image.modification_tick = overlap.modification_tick;
+            NotifyAliases(new_image);
             continue;
         }
         if (True(overlap.flags & ImageFlagBits::GpuModified)) {
@@ -3503,6 +3505,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                 runtime.CopyImage(new_image, overlap, copies);
             }
             new_image.modification_tick = overlap.modification_tick;
+            NotifyAliases(new_image);
         }
         if (True(overlap.flags & ImageFlagBits::Tracked)) {
             UntrackImage(overlap, copy_object.id);
@@ -3603,6 +3606,7 @@ bool TextureCache<P>::CopyBlocks(const Tegra::Engines::Fermi2D::Surface& dst,
         Image& image = slot_images[dst_id];
         image.flags |= ImageFlagBits::GpuModified;
         image.modification_tick = tick;
+        NotifyAliases(image);
     }
     return true;
 }
@@ -4494,17 +4498,41 @@ template <class P>
 void TextureCache<P>::MarkModification(ImageBase& image) noexcept {
     image.flags |= ImageFlagBits::GpuModified;
     image.modification_tick = ++modification_tick;
+    NotifyAliases(image);
+}
+
+template <class P>
+void TextureCache<P>::NotifyAliases(ImageBase& image) noexcept {
+    if (image.aliases_notified || image.aliased_images.empty()) {
+        return;
+    }
+    for (const AliasedImage& aliased : image.aliased_images) {
+        slot_images[aliased.id].alias_dirty = true;
+    }
+    image.aliases_notified = true;
 }
 
 template <class P>
 void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
-    boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     Image& image = slot_images[image_id];
+    // Nothing this image aliases has changed since the last look: Donkey Kong Bananza came here
+    // ~80,000 times a second for nothing, 8 % of the GPU back thread on an AYN Thor.
+    // EDEN_NX2_ALIAS_DIRTY=0 looks every time, as before.
+    static const bool skip_clean = [] {
+        const char* value = std::getenv("EDEN_NX2_ALIAS_DIRTY");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (skip_clean && !image.alias_dirty) {
+        return;
+    }
+    image.alias_dirty = false;
+    boost::container::small_vector<const AliasedImage*, 8> aliased_images;
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
     bool any_modified = True(image.flags & ImageFlagBits::GpuModified);
     u64 most_recent_tick = image.modification_tick;
     for (const AliasedImage& aliased : image.aliased_images) {
         ImageBase& aliased_image = slot_images[aliased.id];
+        aliased_image.aliases_notified = false; // its next change marks this image again
         if (True(aliased_image.flags & ImageFlagBits::CpuModified)) {
             continue;
         }
@@ -4527,6 +4555,7 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
         }
     }
     image.modification_tick = most_recent_tick;
+    NotifyAliases(image);
     if (any_modified) {
         image.flags |= ImageFlagBits::GpuModified;
     }

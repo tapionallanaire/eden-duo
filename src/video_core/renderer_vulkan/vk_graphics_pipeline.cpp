@@ -1117,6 +1117,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
         if (!view_span.empty()) {
             texture_cache.CheckFeedbackLoop(view_span);
+            SampleColorTargetCopies(view_span);
         }
         if (scheduler.HasFragmentBarrier() &&
             (scheduler.RenderPassHasStores() ||
@@ -1129,6 +1130,46 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area, is_indexed);
+}
+
+void GraphicsPipeline::SampleColorTargetCopies(std::span<const VideoCommon::ImageViewInOut> views) {
+    // EDEN_NX2_SELF_SAMPLE_COPY=0: sample the colour target itself (undefined in Vulkan).
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_SELF_SAMPLE_COPY");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || !texture_cache.SamplesRenderTarget(views)) {
+        return;
+    }
+    boost::container::small_vector<VideoCommon::ImageViewId, 4> done;
+    for (size_t rt = 0; rt < VideoCommon::NUM_RT; ++rt) {
+        const VideoCommon::ImageViewId rt_view = texture_cache.GetColorBufferId(rt);
+        if (!rt_view) {
+            continue;
+        }
+        const VideoCommon::ImageId rt_image = texture_cache.GetImageView(rt_view).image_id;
+        for (const VideoCommon::ImageViewInOut& view : views) {
+            if (!view.id || std::ranges::find(done, view.id) != done.end()) {
+                continue;
+            }
+            ImageView& sampled = texture_cache.GetImageView(view.id);
+            if (sampled.image_id != rt_image) {
+                continue;
+            }
+            done.push_back(view.id);
+            const VkImageView copy = texture_cache.GetRuntime().CopyForSelfSample(
+                texture_cache.GetImage(rt_image), sampled);
+            if (copy == VK_NULL_HANDLE) {
+                continue;
+            }
+            for (u32 type = 0; type < Shader::NUM_TEXTURE_TYPES; ++type) {
+                const VkImageView handle = sampled.Handle(static_cast<Shader::TextureType>(type));
+                if (handle != VK_NULL_HANDLE) {
+                    guest_descriptor_queue.ReplaceImageView(handle, copy);
+                }
+            }
+        }
+    }
 }
 
 void GraphicsPipeline::LogExecutableStatistics(const std::array<u64, 6>& native_keys) {
@@ -2074,8 +2115,22 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     }, *pipeline_cache);
-    DriverBuildReport::Record(DriverBuildReport::Kind::Graphics,
-                              std::chrono::steady_clock::now() - build_begin);
+    const auto build_time = std::chrono::steady_clock::now() - build_begin;
+    DriverBuildReport::Record(DriverBuildReport::Kind::Graphics, build_time);
+    // A slow build in play: which of its stages the boot-time pair build had compiled ("pair")
+    // and which the game files' pairs did not hold ("new").
+    if (build_time > std::chrono::milliseconds{10} && !DriverBuildReport::OnPrecacheThread() &&
+        DriverBuildReport::PairStageCount() != 0) {
+        std::string stages;
+        for (const u64 hash : key.unique_hashes) {
+            if (hash != 0) {
+                stages += std::format(" {:016x}:{}", hash,
+                                      DriverBuildReport::IsPairStage(hash) ? "pair" : "new");
+            }
+        }
+        LOG_INFO(Render_Vulkan, "Slow driver build in play, {} ms:{}",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(build_time).count(), stages);
+    }
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {

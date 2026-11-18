@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/nx2_timeline.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -478,9 +479,41 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
         return true;
     }};
 
+    // EDEN_NX2_WORKER_SPIN_US=<n>: with nothing queued the worker polls for n microseconds before
+    // it sleeps, so the recording thread does not pay a wake-up (a futex call) for every chunk
+    // (5 % of Donkey Kong Bananza's GPU back thread). 0 sleeps at once, the default but for
+    // Donkey Kong Bananza on Android: 200 there (AYN Odin 2, a dug-out part of the mining tunnel:
+    // 44.7 -> 42.0 ms a frame, the back thread's CPU 31.9 -> 30.1 ms).
+    static const s64 spin_us = [] {
+        const char* value = std::getenv("EDEN_NX2_WORKER_SPIN_US");
+        if (value != nullptr) {
+            return static_cast<s64>(std::atoll(value));
+        }
+#ifdef __ANDROID__
+        if (Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL) {
+            return s64{200};
+        }
+#endif
+        return s64{0};
+    }();
     while (!stop_token.stop_requested()) {
         std::unique_ptr<CommandChunk> work;
 
+        if (spin_us > 0) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds{spin_us};
+            for (u32 i = 0;; ++i) {
+                {
+                    std::scoped_lock lk{queue_mutex};
+                    if (!work_queue.empty()) {
+                        break;
+                    }
+                }
+                if ((i & 15) == 15 && std::chrono::steady_clock::now() >= until) {
+                    break;
+                }
+                std::this_thread::yield();
+            }
+        }
         {
             std::unique_lock lk{queue_mutex};
 
@@ -545,7 +578,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     draws_since_submit = 0;
 
     const u64 signal_value = master_semaphore->NextTick();
-    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value,
+    // EDEN_NX2_TIMELINE: how long a submission waits between the recording thread asking for it
+    // and the worker handing it to the driver, and how long the driver call takes.
+    const auto requested = std::chrono::steady_clock::now();
+    RecordWithUploadBuffer([signal_semaphore, wait_semaphore, signal_value, requested,
                             this](vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) {
         static constexpr VkMemoryBarrier WRITE_BARRIER{
             .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -569,8 +605,35 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         }
 
         std::scoped_lock lock{submit_mutex};
-        switch (const VkResult result = master_semaphore->SubmitQueue(
-                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value)) {
+        const auto submit_start = std::chrono::steady_clock::now();
+        const VkResult submit_result = master_semaphore->SubmitQueue(
+            cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value);
+        if (VideoCommon::Nx2Timeline::Enabled()) {
+            static u64 count, lag_ns, lag_max_ns, call_ns, in_flight, in_flight_max;
+            // Submissions the GPU has not finished when this one goes in.
+            master_semaphore->Refresh();
+            const u64 known = master_semaphore->KnownGpuTick();
+            const u64 pending = signal_value > known ? signal_value - known - 1 : 0;
+            in_flight += pending;
+            in_flight_max = (std::max)(in_flight_max, pending);
+            static auto reported = submit_start;
+            const auto done = std::chrono::steady_clock::now();
+            const u64 lag = static_cast<u64>((submit_start - requested).count());
+            ++count;
+            lag_ns += lag;
+            lag_max_ns = (std::max)(lag_max_ns, lag);
+            call_ns += static_cast<u64>((done - submit_start).count());
+            if (done - reported >= std::chrono::seconds{5}) {
+                LOG_INFO(Render_Vulkan,
+                         "Submits (last 5 s): {}, worker lag avg {} us max {} us, driver call avg {} us, "
+                         "unfinished before each avg {} max {}",
+                         count, lag_ns / count / 1000, lag_max_ns / 1000, call_ns / count / 1000,
+                         in_flight / count, in_flight_max);
+                count = lag_ns = lag_max_ns = call_ns = in_flight = in_flight_max = 0;
+                reported = done;
+            }
+        }
+        switch (const VkResult result = submit_result) {
         case VK_SUCCESS:
             // Log successful queue submission
             if (GPU::Logging::IsActive() &&

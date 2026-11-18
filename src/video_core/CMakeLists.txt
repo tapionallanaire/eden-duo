@@ -16,6 +16,7 @@ endif()
 add_library(video_core STATIC
     buffer_cache/buffer_base.h
     buffer_cache/buffer_cache_base.h
+    buffer_cache/nx2_list_ranges.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h
     buffer_cache/memory_tracker_base.h
@@ -480,6 +481,8 @@ endif()
 target_link_libraries(video_core PUBLIC common core)
 # Shader precache builder: game archives use zstd (also with dictionaries) and zlib.
 target_link_libraries(video_core PRIVATE zstd::zstd ZLIB::ZLIB)
+# Peanuts Native shader keys (SHA-256)
+target_link_libraries(video_core PRIVATE OpenSSL::Crypto)
 target_link_libraries(video_core PUBLIC shader_recompiler stb bc_decoder gpu_logging)
 if (ENABLE_OPENGL)
     target_link_libraries(video_core PUBLIC glad)

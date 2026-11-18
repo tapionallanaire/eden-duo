@@ -182,7 +182,24 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
     std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};
     Common::SetCurrentThreadName(name.c_str());
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
-    Common::SetCurrentThreadToPerformanceCores();
+    // EDEN_NX2_GUEST_CORES=all|critical|performance (Android): the emulated cores' host threads may
+    // use every core, or the performance cores and the prime one, instead of the performance cores
+    // alone (cores 3-6 on a Snapdragon 8 Gen 2, shared with the GPU threads). Donkey Kong Bananza
+    // defaults to critical: AYN Thor, mining tunnel, 72.7 -> 69.1 ms a frame.
+    // EDEN_NX2_CORE_AFFINITY is Windows only.
+    const char* group = std::getenv("EDEN_NX2_GUEST_CORES");
+#ifdef __ANDROID__
+    if (group == nullptr && Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL) {
+        group = "critical";
+    }
+#endif
+    if (group != nullptr && std::string_view{group} == "all") {
+        Common::SetCurrentThreadToAllCores();
+    } else if (group != nullptr && std::string_view{group} == "critical") {
+        Common::SetCurrentThreadToCriticalCores();
+    } else {
+        Common::SetCurrentThreadToPerformanceCores();
+    }
     // EDEN_NX2_CORE_AFFINITY=<hex mask>[,<hex mask>...]: the logical CPUs each emulated core's
     // host thread may run on (the last mask for the remaining cores), e.g. one CCD of a Ryzen
     // so guest hand-offs and their shared cache lines stay in one L3.

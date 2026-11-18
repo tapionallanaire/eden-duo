@@ -63,6 +63,7 @@ enum class TitleID : std::uint64_t {
     /// Switch 2 titles.
     OcarinaOfTimeNx2 = 0x0400486024DEC000ULL,
     FireEmblemFortunesWeaveNx2 = 0x04007EF01F8AE000ULL,
+    DonkeyKongBananzaNx2 = 0x040074A01BF12000ULL,
 };
 
 struct EnvironmentInfo {

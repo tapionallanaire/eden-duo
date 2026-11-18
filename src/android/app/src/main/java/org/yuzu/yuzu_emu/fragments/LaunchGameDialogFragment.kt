@@ -13,6 +13,7 @@ import org.yuzu.yuzu_emu.HomeNavigationDirections
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.SerializableHelper.parcelable
+import org.yuzu.yuzu_emu.utils.ShaderRuns
 
 class LaunchGameDialogFragment : DialogFragment() {
     private var selectedItem = 1
@@ -28,9 +29,14 @@ class LaunchGameDialogFragment : DialogFragment() {
         return MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.launch_options)
             .setPositiveButton(android.R.string.ok) { _: DialogInterface, _: Int ->
-                val action = HomeNavigationDirections
-                    .actionGlobalEmulationActivity(game, selectedItem != 0)
-                requireParentFragment().findNavController().navigate(action)
+                val navController = requireParentFragment().findNavController()
+                val launch = {
+                    navController.navigate(
+                        HomeNavigationDirections.actionGlobalEmulationActivity(game, selectedItem != 0)
+                    )
+                }
+                // Eden Duo: ask once per title whether to compile its shaders first.
+                ShaderRuns.askThenLaunch(requireContext(), game, launch)
             }
             .setSingleChoiceItems(launchOptions, 1) { _: DialogInterface, i: Int ->
                 selectedItem = i

@@ -107,7 +107,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         // banding over the image in Mario Kart World on Intel's Windows driver.
         const bool uses_warp_ops = info.UsesWarpOps() || info.uses_cooperative_matrix;
         VkPipelineCreateFlags flags{};
-        if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
+        static const bool log_statistics = std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr;
+        if (device.IsKhrPipelineExecutablePropertiesEnabled() &&
+            (Settings::values.renderer_debug.GetValue() || log_statistics)) {
             flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         }
         if (uses_descriptor_buffer) {
@@ -167,6 +169,40 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
 
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
+        }
+        // EDEN_NX2_PIPELINE_STATS: the driver's statistics of every compute pipeline (instructions,
+        // registers, spills; Turnip's ir3 lists them), as the graphics pipelines log theirs.
+        if (log_statistics && device.IsKhrPipelineExecutablePropertiesEnabled()) {
+            const auto& logical = device.GetLogical();
+            const auto executables = logical.GetPipelineExecutablePropertiesKHR(*pipeline);
+            for (u32 index = 0; index < executables.size(); ++index) {
+                std::string text;
+                for (const auto& statistic :
+                     logical.GetPipelineExecutableStatisticsKHR(*pipeline, index)) {
+                    switch (statistic.format) {
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                        text += std::format("{}={}; ", std::string_view{statistic.name},
+                                            statistic.value.b32 != 0);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                        text += std::format("{}={}; ", std::string_view{statistic.name},
+                                            statistic.value.i64);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                        text += std::format("{}={}; ", std::string_view{statistic.name},
+                                            statistic.value.u64);
+                        break;
+                    case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                        text += std::format("{}={:.2f}; ", std::string_view{statistic.name},
+                                            statistic.value.f64);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                LOG_INFO(Render_Vulkan, "Compute pipeline statistics {:016x}, {}: {}", shader_hash,
+                         std::string_view{executables[index].name}, text);
+            }
         }
         // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while it
         // lives.

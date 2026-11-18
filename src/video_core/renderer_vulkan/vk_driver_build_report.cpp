@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <mutex>
+#include <unordered_set>
 #include <algorithm>
 #include <mutex>
 #include <string>
@@ -68,6 +70,30 @@ Totals summary;
 std::chrono::steady_clock::time_point window_start{std::chrono::steady_clock::now()};
 
 } // Anonymous namespace
+
+bool OnPrecacheThread() {
+    return precache_thread;
+}
+
+namespace {
+std::mutex pair_stage_mutex;
+std::unordered_set<unsigned long long> pair_stages;
+} // namespace
+
+void NotePairStage(unsigned long long hash) {
+    std::scoped_lock lock{pair_stage_mutex};
+    pair_stages.insert(hash);
+}
+
+bool IsPairStage(unsigned long long hash) {
+    std::scoped_lock lock{pair_stage_mutex};
+    return pair_stages.contains(hash);
+}
+
+unsigned long long PairStageCount() {
+    std::scoped_lock lock{pair_stage_mutex};
+    return pair_stages.size();
+}
 
 PrecacheScope::PrecacheScope() {
     precache_thread = true;

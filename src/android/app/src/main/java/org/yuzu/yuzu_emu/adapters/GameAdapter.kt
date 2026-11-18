@@ -282,7 +282,10 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 // Duet Plus: pull newer Switch saves from the PC first (save sync, like Steam Cloud).
                 org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(activity)
                     .beforeLaunch(activity, org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH) {
-                        navController.navigate(action)
+                        // Eden Duo: ask once per title whether to compile its shaders first.
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.askThenLaunch(activity, game) {
+                            navController.navigate(action)
+                        }
                     }
             }
 

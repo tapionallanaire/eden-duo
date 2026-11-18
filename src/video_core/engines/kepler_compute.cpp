@@ -37,6 +37,8 @@
 #include "video_core/ocarina_upscale.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
+#elif defined(ARCHITECTURE_arm64)
+#include "video_core/macro_turing_jit_a64.h"
 #endif
 #include "video_core/rasterizer_interface.h"
 #include "video_core/texture_cache/image_info.h"
@@ -205,7 +207,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             CallMethod(system, address, value, true);
             return true;
         };
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
         // Compiled macro code, as for 3D macros (macro_turing_jit.h); EDEN_NX2_MME_JIT=0 off.
         static const bool use_jit = [] {
             const char* value = std::getenv("EDEN_NX2_MME_JIT");
@@ -716,6 +718,30 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                    (cross_a > cross_b ? cross_a - cross_b : cross_b - cross_a) * 32 <= cross_a;
         };
         const auto& [reads, stores] = NativeImageHandles(regs.code_loc.Address());
+        // EDEN_NX2_NET_IO_LOG=1 (diagnostic): each compute program's image reads and stores
+        // (handle offset: address, size, format), its first 2 dispatches, to find a network's
+        // input and output.
+        if (static const bool io_log = std::getenv("EDEN_NX2_NET_IO_LOG") != nullptr; io_log) {
+            static std::unordered_map<GPUVAddr, u32> seen;
+            if (seen[regs.code_loc.Address()]++ < 2) {
+                std::string text;
+                const auto list = [&](const char* kind, const std::vector<u32>& offsets) {
+                    for (const u32 offset : offsets) {
+                        const auto tic = image(offset);
+                        text += tic ? std::format(" {} +{:#x}: {:#x} {}x{} fmt {}", kind, offset,
+                                                  tic->Address(), tic->Width(), tic->Height(),
+                                                  static_cast<u32>(tic->format.Value()))
+                                    : std::format(" {} +{:#x}: -", kind, offset);
+                    }
+                };
+                list("read", reads);
+                list("store", stores);
+                LOG_INFO(HW_GPU, "Compute program {:#x} grid {}x{}x{}:{}",
+                         regs.code_loc.Address(), launch_description.grid_dim_x.Value(),
+                         launch_description.grid_dim_y.Value(),
+                         launch_description.grid_dim_z.Value(), text);
+            }
+        }
         std::optional<Texture::TICEntry> replacement_input;
         std::optional<Texture::TICEntry> replacement_output;
         if (native_upscale_input && !stores.empty()) {
@@ -723,6 +749,23 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
                                                            upscale_pair)) {
                 replacement_input = native_upscale_input;
                 replacement_output = image(*store);
+            }
+        }
+        // Donkey Kong Bananza's upscaler network (one program: colour at +0x60 in, the image at
+        // twice the size at +0x70 out; 960x540 -> 1920x1080 on the desktop): EDEN_NX2_DKB_NETWORK=
+        // blit draws a bilinear upscale of its input instead (25 ms of the Odin 2's GPU frame).
+        static const bool dkb_network_blit = [] {
+            const char* value = std::getenv("EDEN_NX2_DKB_NETWORK");
+            return value != nullptr && std::string_view{value} == "blit";
+        }();
+        if (dkb_network_blit && !replacement_input && reads.size() == 1 && stores.size() == 1 &&
+            reads.front() == 0x60 && stores.front() == 0x70 &&
+            Settings::GetCurrentProgramID() == 0x040074A01BF12000ULL) {
+            const auto from = image(0x60);
+            const auto to = image(0x70);
+            if (upscale_pair(from, to, true)) {
+                replacement_input = from;
+                replacement_output = to;
             }
         }
         bool skipping{};
@@ -949,8 +992,15 @@ bool KeplerCompute::UsesCompactTensorPrograms() const {
     // stand-in blits the network's input instead, which leaves the frame flat and far too bright
     // (Kokiri Forest median luma ~0.29 against ~0.10 with the network). The compact form calls a
     // helper that shuffles across 32 lanes, so it needs compute shaders created 32 threads wide.
+    // Donkey Kong Bananza's upscaler network too: expanded, each HMMA rebuilds its fragments with
+    // guest SHFLs, which Turnip runs as loops of rotates (one dispatch 194 ms of a 224 ms GPU frame
+    // on the Odin 2); the compact helper gathers them through workgroup memory in compute. Desktop,
+    // software path: same picture as cooperative matrices, 33.6 ms a frame against 40.8 expanded.
     constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
-    return !dlss_chain.active && Settings::GetCurrentProgramID() == OcarinaOfTimeProgramId &&
+    constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
+    const u64 program_id = Settings::GetCurrentProgramID();
+    return !dlss_chain.active &&
+           (program_id == OcarinaOfTimeProgramId || program_id == DonkeyKongBananzaProgramId) &&
            rasterizer != nullptr && rasterizer->SupportsGameDlssNetwork();
 }
 
@@ -2147,6 +2197,29 @@ void KeplerCompute::FrontNoteWrites(VideoCommon::GpuSplit& split, FrontState& fs
         split.NoteWrite(memory_manager,
                         (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1],
                         16);
+        FrontNoteReport(split, fs, fs.registers[0x6c3]);
+    }
+}
+
+void KeplerCompute::FrontNoteReport(VideoCommon::GpuSplit& split, const FrontState& fs,
+                                    u32 control) {
+    // SET_REPORT_SEMAPHORE_D was sent: what ProcessNativeReportSemaphore will write on the back.
+    const u32 operation = control & 3;
+    if (operation != 0 && operation != 2) {
+        return;
+    }
+    const GPUVAddr address =
+        (GPUVAddr{fs.registers[0x6c0] & 0x1ffffff} << 32) | fs.registers[0x6c1];
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return;
+    }
+    // A reduction combines the payload with the word's value then.
+    const bool reduction = ((control >> 3) & 1) != 0;
+    split.NoteSemaphoreWrite(*device, fs.registers[0x6c2], !reduction);
+    if (!reduction && ((control >> 28) & 1) == 0) {
+        // 64 bits (a timestamp follows).
+        split.NoteSemaphoreWrite(*device + 4, 0, true);
     }
 }
 
@@ -2182,7 +2255,7 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs) {
-#ifdef ARCHITECTURE_x86_64
+#if defined(ARCHITECTURE_x86_64) || defined(ARCHITECTURE_arm64) // front macros (x86: macro_turing_jit.h, A64: _a64.h)
     const auto positions = FrontMacroPositions(fs);
     const u32 start = positions[((*fs.executing_macro - 0xe00) / 2) % positions.size()];
     fs.executing_macro.reset();
