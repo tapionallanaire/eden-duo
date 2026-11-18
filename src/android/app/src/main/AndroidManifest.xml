@@ -58,6 +58,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
         android:networkSecurityConfig="@xml/save_sync_network"
         android:name="org.yuzu.yuzu_emu.YuzuApplication"
+        android:appComponentFactory="org.yuzu.yuzu_emu.duo.nativeplay.NativeSessionComponentFactory"
+        tools:replace="android:appComponentFactory"
         android:label="${appNameBase}${appNameSuffix}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -106,6 +108,32 @@ SPDX-License-Identifier: GPL-3.0-or-later
             android:exported="false"
             android:theme="@style/Theme.Yuzu.Main"
             android:label="@string/save_transfer"/>
+
+        <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeLaunchActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Yuzu.Main" />
+
+        <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativePreparationActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Yuzu.Main"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode" />
+
+        <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeCompilationActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Yuzu.Main" />
+
+        <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Yuzu.Main" />
+
+        <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeSessionWaitActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
 
         <activity
             android:name="org.yuzu.yuzu_emu.activities.EmulationActivity"

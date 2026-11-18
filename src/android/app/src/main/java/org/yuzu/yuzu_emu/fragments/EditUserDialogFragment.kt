@@ -38,6 +38,7 @@ import org.yuzu.yuzu_emu.databinding.FragmentEditUserDialogBinding
 import org.yuzu.yuzu_emu.model.HomeViewModel
 import org.yuzu.yuzu_emu.model.ProfileUtils
 import org.yuzu.yuzu_emu.model.UserProfile
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import java.io.File
 import java.io.FileOutputStream
 import androidx.core.graphics.scale
@@ -48,6 +49,7 @@ class EditUserDialogFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val homeViewModel: HomeViewModel by activityViewModels()
+    private lateinit var saveIdentity: String
 
     private var currentUUID: String = ""
     private var isEditMode = false
@@ -103,6 +105,12 @@ class EditUserDialogFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         homeViewModel.setStatusBarShadeVisibility(visible = false)
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                saveIdentity = savedInstanceState?.getString("saveIdentity")
+                    ?: arguments?.getString("saveIdentity")
+                    ?: NativeSaveSession.identity(requireContext())
+                NativeSaveSession.assertIdentity(requireContext(), saveIdentity)
 
         val existingUUID = arguments?.getString(ARG_UUID)
         val existingUsername = arguments?.getString(ARG_USERNAME)
@@ -131,6 +139,12 @@ class EditUserDialogFragment : Fragment() {
             binding.toolbarNewUser.title = getString(R.string.profile_new_user)
             binding.textUuid.text = formatUUID(currentUUID)
             loadDefaultAvatar()
+        }
+            }
+        } catch (e: IllegalStateException) {
+            showError(e.message.orEmpty())
+            findNavController().popBackStack()
+            return
         }
 
         binding.toolbarNewUser.setNavigationOnClickListener {
@@ -313,8 +327,16 @@ class EditUserDialogFragment : Fragment() {
         loadDefaultAvatar()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        if (::saveIdentity.isInitialized) outState.putString("saveIdentity", saveIdentity)
+    }
+
     private fun saveUser() {
         val username = binding.editUsername.text.toString()
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                NativeSaveSession.assertIdentity(requireContext(), saveIdentity)
 
         if (isEditMode) {
             if (NativeLibrary.updateUserUsername(currentUUID, username)) {
@@ -330,6 +352,10 @@ class EditUserDialogFragment : Fragment() {
             } else {
                 showError(getString(R.string.profile_create_failed))
             }
+        }
+            }
+        } catch (e: IllegalStateException) {
+            showError(e.message.orEmpty())
         }
     }
 

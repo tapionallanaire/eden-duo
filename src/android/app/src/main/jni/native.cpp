@@ -227,24 +227,24 @@ void EmulationSession::SurfaceChanged() {
     m_window->OnSurfaceChanged(m_native_window);
 }
 
-void EmulationSession::ConfigureFilesystemProvider(const std::string& filepath) {
+bool EmulationSession::ConfigureFilesystemProvider(const std::string& filepath) {
     const auto file = m_system.GetFilesystem()->OpenFile(filepath, FileSys::OpenMode::Read);
     if (!file) {
-        return;
+        return false;
     }
 
     if (m_manual_provider->AddEntriesFromContainer(file)) {
-        return;
+        return true;
     }
 
     auto loader = Loader::GetLoader(m_system, file);
     if (!loader) {
-        return;
+        return false;
     }
 
     const auto file_type = loader->GetFileType();
     if (file_type == Loader::FileType::Unknown || file_type == Loader::FileType::Error) {
-        return;
+        return false;
     }
 
     u64 program_id = 0;
@@ -253,14 +253,16 @@ void EmulationSession::ConfigureFilesystemProvider(const std::string& filepath) 
         m_manual_provider->AddEntry(FileSys::TitleType::Application,
                                     FileSys::GetCRTypeFromNCAType(FileSys::NCA{file}.GetType()),
                                     program_id, file);
+        return true;
     }
+    return false;
 }
 
-void EmulationSession::ConfigureFilesystemProviderFromGameFolder(const std::string& filepath) {
+bool EmulationSession::ConfigureFilesystemProviderFromGameFolder(const std::string& filepath) {
     if (!Settings::values.ext_content_from_game_dirs.GetValue()) {
-        return;
+        return true;
     }
-    ConfigureFilesystemProvider(filepath);
+    return ConfigureFilesystemProvider(filepath);
 }
 
 void EmulationSession::InitializeSystem(bool reload) {
@@ -1855,16 +1857,17 @@ jstring Java_org_yuzu_yuzu_1emu_NativeLibrary_getDefaultProfileSaveDataRoot(JNIE
     return Common::Android::ToJString(env, user_save_data_root);
 }
 
-void Java_org_yuzu_yuzu_1emu_NativeLibrary_addFileToFilesystemProvider(JNIEnv* env, jobject jobj,
-                                                                       jstring jpath) {
-    EmulationSession::GetInstance().ConfigureFilesystemProvider(
-        Common::Android::GetJString(env, jpath));
+jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_addFileToFilesystemProvider(JNIEnv* env, jobject jobj,
+                                                                           jstring jpath) {
+    return static_cast<jboolean>(EmulationSession::GetInstance().ConfigureFilesystemProvider(
+        Common::Android::GetJString(env, jpath)));
 }
 
-void Java_org_yuzu_yuzu_1emu_NativeLibrary_addGameFolderFileToFilesystemProvider(
+jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_addGameFolderFileToFilesystemProvider(
     JNIEnv* env, jobject jobj, jstring jpath) {
-    EmulationSession::GetInstance().ConfigureFilesystemProviderFromGameFolder(
-        Common::Android::GetJString(env, jpath));
+    return static_cast<jboolean>(
+        EmulationSession::GetInstance().ConfigureFilesystemProviderFromGameFolder(
+            Common::Android::GetJString(env, jpath)));
 }
 
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_clearFilesystemProvider(JNIEnv* env, jobject jobj) {

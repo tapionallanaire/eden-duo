@@ -1903,8 +1903,8 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     </string>
 
-    <string name="license_peanuts" translatable="false">Peanuts Native shader lists</string>
-    <string name="license_peanuts_description" translatable="false">The per-game shader lists under shader_lists/peanuts come from Peanuts Native / Banana Native</string>
+    <string name="license_peanuts" translatable="false">Native shader lists</string>
+    <string name="license_peanuts_description" translatable="false">Per-game shader lists used by native rendering</string>
     <string name="license_peanuts_link" translatable="false">https://github.com/igawa6/peanuts-native</string>
     <string name="license_peanuts_copyright" translatable="false">Copyright © 2026 seedds</string>
     <string name="license_peanuts_text" translatable="false">
@@ -2020,11 +2020,60 @@ SOFTWARE.
     <string name="shader_compile_max_description">Also builds every vertex and fragment shader combination the title knows, not only the pairs it has drawn. Takes longer and uses more disk, but should compile less while you play.</string>
     <string name="shader_compile_done">Compiled %1$d of %2$d pipelines</string>
     <string name="shader_compile_max_done">Compiled %1$d of %2$d pipelines, plus shader combinations</string>
-    <string name="native_test_launch_title">Choose how to play</string>
-    <string name="native_test_launch_message">Native test play uses a separate test save.</string>
-    <string name="native_test_launch_unavailable">Native test play is unavailable for this game file.</string>
-    <string name="native_test_play">Play natively</string>
-    <string name="native_launch_emulate">Emulate</string>
+    <string name="native_launch_title">Choose how to play</string>
+    <string name="native_prepare_title">Prepare native play</string>
+    <string name="native_play">Play natively</string>
+    <string name="native_compile_play">Compile &amp; play</string>
+    <string name="native_close_current_game">A native game is still running. Close the current game before launching another game.</string>
+    <string name="native_prepare_interrupted">Native preparation was interrupted. You can run the game emulated.</string>
+    <string name="native_prepare_cancelled">Native preparation was cancelled.</string>
+    <string name="native_prepare_cancelling">Cancelling… Waiting for the current read to stop.</string>
+    <string name="native_content_changed">The selected game, update, DLC, or settings changed. Prepare the current selection before playing natively.</string>
+    <string name="native_runtime_unavailable">The native runtime is unavailable in this app build.</string>
+    <string name="native_storage_unavailable">Duet cannot access its native preparation storage.</string>
+    <string name="native_space_needed">Preparing this game needs approximately %1$s more free space. Free storage or run emulated.</string>
+    <string name="native_reading_content">Reading the selected game and enabled content…</string>
+    <string name="native_reading_progress">Preparing game content: %1$s of %2$s</string>
+    <string name="native_prepare_unavailable">Native preparation is unavailable: %1$s</string>
+    <string name="native_launch_emulate">Play emulated</string>
     <string name="native_launch_failed">Native play stopped</string>
-    <string name="native_run_emulated">Run emulated</string>
+    <string name="native_run_emulated">Play emulated</string>
+    <string name="native_checking">Checking native play…</string>
+    <string name="native_ready">Native play · Ready</string>
+    <string name="native_ready_summary">Prepared for this game build. Ready to launch.</string>
+    <string name="native_needs_preparation">Native play · Preparation needed</string>
+    <string name="native_prepare_summary">%1$s\nAbout %2$s free storage needed</string>
+    <string name="native_prepare_details">%1$s\n\nSelected storage\n%2$s</string>
+    <string name="native_not_available">Native play unavailable</string>
+    <string name="native_not_available_message">This exact game build is not supported for native play in this app. You can still play emulated.</string>
+    <string name="native_shared_save_notice">Native and emulated play use the same save for your selected Duet profile.</string>
+    <string name="native_show_details">Show details</string>
+    <string name="native_hide_details">Hide details</string>
+    <string name="native_details_expanded">Expanded</string>
+    <string name="native_details_collapsed">Collapsed</string>
+    <string name="native_recovery_summary">Native play could not continue. Try again or play emulated.</string>
+    <string name="native_retry">Try again</string>
+    <string name="native_preparation_in_progress">Preparing native play…</string>
+    <string name="native_verifying">Checking the prepared game before launch…</string>
+    <string name="native_compile_preserves_data">Compiling keeps the game source, saves and previous prepared game unchanged.</string>
+    <string name="native_compiler_cancelling">Cancelling… Waiting for the compiler to stop.</string>
+    <string name="native_cancelled_pack_kept">Preparation was cancelled. The completed native game was kept.</string>
+    <string name="native_resume">Resume</string>
+    <string name="native_return_to_duet">Return to Duet</string>
+    <string name="native_cancel_preparation">Cancel preparation</string>
+    <string name="native_cancellation_wait">Waiting for the compiler to acknowledge cancellation. The retained input is kept.</string>
+    <string name="native_publication_interrupted">Native preparation stopped during publication. The retained input and recovery files were kept. Prepare a new generation.</string>
+    <string name="native_compiler_not_started">The compiler did not become active. Choose Resume to try again.</string>
+    <string name="native_settings">Native play</string>
+    <string name="native_settings_description">Choose play mode and manage prepared game data.</string>
+    <string name="native_mode_ask">Ask each time</string>
+    <string name="native_mode_emulated">Always emulate</string>
+    <string name="native_mode_native">Prefer native when prepared</string>
+    <string name="native_mode_explanation">Your choice applies to this game. Preparing a new or incompatible game build always needs your confirmation.</string>
+    <string name="native_recompile">Recompile</string>
+    <string name="native_delete_compiled">Delete prepared data</string>
+    <string name="native_delete_compiled_confirmation">Remove this game’s prepared code, shaders and retained native input? The original game and all saves are kept.</string>
+    <string name="native_data_size">Prepared data: %1$s\nRetained native input: %2$s</string>
+    <string name="native_data_busy">Close the game and stop its compiler before changing prepared data.</string>
+    <string name="native_data_deleted">Prepared data deleted. The original game and saves were kept.</string>
 </resources>

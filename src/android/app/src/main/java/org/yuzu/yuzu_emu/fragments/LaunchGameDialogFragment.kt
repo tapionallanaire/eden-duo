@@ -13,7 +13,6 @@ import org.yuzu.yuzu_emu.HomeNavigationDirections
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.SerializableHelper.parcelable
-import org.yuzu.yuzu_emu.utils.ShaderRuns
 
 class LaunchGameDialogFragment : DialogFragment() {
     private var selectedItem = 1
@@ -35,8 +34,7 @@ class LaunchGameDialogFragment : DialogFragment() {
                         HomeNavigationDirections.actionGlobalEmulationActivity(game, selectedItem != 0)
                     )
                 }
-                // Eden Duo: ask once per title whether to compile its shaders first.
-                ShaderRuns.askThenLaunch(requireContext(), game, launch)
+                launch()
             }
             .setSingleChoiceItems(launchOptions, 1) { _: DialogInterface, i: Int ->
                 selectedItem = i

@@ -161,6 +161,10 @@ public:
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
+    /// Narrow indexed snapshot contract: program/0/romfs exists, and program/1 trees
+    /// reference exactly the root executable/RomFS extents (without reading ROM bytes).
+    bool HasIndexedProgramLayout(std::size_t package_index) const;
+
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(
         std::function<bool(std::size_t, std::size_t)> progress_callback) const;

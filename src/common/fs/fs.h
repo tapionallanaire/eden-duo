@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <system_error>
 
 #include "common/fs/fs_types.h"
 #include "common/fs/fs_util.h"
@@ -138,6 +139,14 @@ template <typename Path>
 #endif
 
 // Directory Operations
+
+/**
+ * Commits an existing directory's entries using open(O_DIRECTORY), fsync and close.
+ * An empty path means the current directory. Returns the first open/fsync/close error;
+ * unsupported platforms (including Windows) and filesystems are errors, never success.
+ * Does not commit file data or newly created ancestor directories.
+ */
+[[nodiscard]] std::error_code SyncDirectory(const std::filesystem::path& path);
 
 /**
  * Creates a directory at path.

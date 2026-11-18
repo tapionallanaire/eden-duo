@@ -333,6 +333,7 @@ play {
 
 dependencies {
     findProject(":peanutsHost")?.let { implementation(it) }
+    findProject(":bananaHost")?.let { implementation(it) }
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")

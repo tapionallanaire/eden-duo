@@ -39,6 +39,10 @@ VirtualDir OffsetVfsFile::GetContainingDirectory() const {
     return nullptr;
 }
 
+std::vector<std::string> OffsetVfsFile::GetSourcePaths() const {
+    return file->GetSourcePaths();
+}
+
 bool OffsetVfsFile::IsWritable() const {
     return file->IsWritable();
 }

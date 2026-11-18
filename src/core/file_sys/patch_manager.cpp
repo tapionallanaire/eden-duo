@@ -253,138 +253,134 @@ std::vector<std::string> PatchManager::GetDisabledAddons() const {
     return disabled;
 }
 
-std::pair<VirtualDir, std::optional<u32>> PatchManager::ReadExeFSUpdate() const {
+PatchManager::SelectedUpdate PatchManager::ResolveUpdate(
+    ContentRecordType type, VirtualFile packed_update_raw) const {
     const auto disabled = GetDisabledAddons();
-
-    bool update_disabled = true;
-    std::optional<u32> enabled_version;
-    bool checked_external = false;
-    bool checked_manual = false;
-
-    const auto* content_union = static_cast<const ContentProviderUnion*>(&content_provider);
+    const auto is_disabled = [&](std::string_view name) {
+        return std::find(disabled.cbegin(), disabled.cend(), name) != disabled.cend();
+    };
+    const auto& content_union = static_cast<const ContentProviderUnion&>(content_provider);
     const auto update_tid = GetUpdateTitleID(title_id);
+    bool has_versioned_updates = false;
 
-    if (content_union) {
-        // First, check ExternalContentProvider
-        const auto* external_provider = content_union->GetExternalProvider();
-        if (external_provider) {
-            const auto update_versions = external_provider->ListUpdateVersions(update_tid);
-
-            if (!update_versions.empty()) {
-                checked_external = true;
-                for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
-                        update_disabled = false;
-                        enabled_version = update_entry.version;
-                        break;
-                    }
-                }
+    // External versions take precedence over manual versions, even when all are disabled.
+    for (const auto slot :
+         {ContentProviderUnionSlot::External, ContentProviderUnionSlot::FrontendManual}) {
+        const auto* provider = content_union.GetSlotProvider(slot);
+        if (provider == nullptr) {
+            continue;
+        }
+        const auto versions = slot == ContentProviderUnionSlot::External
+                                  ? static_cast<const ExternalContentProvider*>(provider)
+                                        ->ListUpdateVersions(update_tid)
+                                  : static_cast<const ManualContentProvider*>(provider)
+                                        ->ListUpdateVersions(update_tid);
+        if (versions.empty()) {
+            continue;
+        }
+        has_versioned_updates = true;
+        for (const auto& entry : versions) {
+            if (!IsVersionedExternalUpdateDisabled(disabled, entry.version)) {
+                // Retain this exact source, including an absent record. Never substitute a
+                // different version/provider merely because the selected content cannot open.
+                return {.selected = true,
+                        .raw = entry.files[static_cast<size_t>(type)],
+                        .metadata_raw = entry.files[static_cast<size_t>(ContentRecordType::Meta)],
+                        .version = entry.version,
+                        .source = slot};
             }
         }
-
-        // Also check ManualContentProvider (for Android)
-        if (!checked_external) {
-            const auto* manual_provider = static_cast<const ManualContentProvider*>(
-                content_union->GetSlotProvider(ContentProviderUnionSlot::FrontendManual));
-            if (manual_provider) {
-                const auto manual_update_versions = manual_provider->ListUpdateVersions(update_tid);
-
-                if (!manual_update_versions.empty()) {
-                    checked_manual = true;
-                    for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
-                            update_disabled = false;
-                            enabled_version = update_entry.version;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        break;
     }
 
-    // check for original NAND style
-    // Check NAND if: no external updates exist, OR all external updates are disabled
-    if (!checked_external && !checked_manual) {
-        // Only enable NAND update if it exists AND is not disabled
-        // We need to check if an update actually exists in the content provider
-        const bool has_nand_update = content_provider.HasEntry(update_tid, ContentRecordType::Program);
-
-        if (has_nand_update) {
-            const bool nand_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (NAND)") != disabled.cend();
-            const bool sdmc_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (SDMC)") != disabled.cend();
-            const bool generic_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
-
-            if (!nand_disabled && !sdmc_disabled && !generic_disabled) {
-                update_disabled = false;
+    if (!has_versioned_updates) {
+        if (is_disabled("Update") || is_disabled("Update (NAND)") ||
+            is_disabled("Update (SDMC)")) {
+            return {};
+        }
+        if (const auto slot = content_union.GetSlotForEntry(update_tid, type)) {
+            const auto* provider = content_union.GetSlotProvider(*slot);
+            return {.selected = true,
+                    .raw = provider->GetEntryRaw(update_tid, type),
+                    .metadata_raw = provider->GetEntryRaw(update_tid, ContentRecordType::Meta),
+                    .version = provider->GetEntryVersion(update_tid),
+                    .source = slot};
+        }
+    } else {
+        // Preserve the installed-update fallback when every versioned update is disabled, but
+        // read the allowed slot itself rather than re-querying a union with a disabled winner.
+        const auto entries = content_union.ListEntriesFilterOrigin(
+            std::nullopt, TitleType::Update, type, update_tid);
+        for (const auto& [slot, entry] : entries) {
+            const bool allowed =
+                ((slot == ContentProviderUnionSlot::SysNAND ||
+                  slot == ContentProviderUnionSlot::UserNAND) &&
+                 !is_disabled("Update (NAND)")) ||
+                (slot == ContentProviderUnionSlot::SDMC && !is_disabled("Update (SDMC)"));
+            if (allowed) {
+                const auto* provider = content_union.GetSlotProvider(slot);
+                return {.selected = true,
+                        .raw = provider->GetEntryRaw(update_tid, type),
+                        .metadata_raw = provider->GetEntryRaw(update_tid, ContentRecordType::Meta),
+                        .version = provider->GetEntryVersion(update_tid),
+                        .source = slot};
             }
         }
-    } else if (update_disabled && content_union) {
-        const bool nand_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (NAND)") != disabled.cend();
-        const bool sdmc_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (SDMC)") != disabled.cend();
-
-        if (!nand_disabled || !sdmc_disabled) {
-            const auto nand_sdmc_entries = content_union->ListEntriesFilterOrigin(
-                std::nullopt, TitleType::Update, ContentRecordType::Program, update_tid);
-
-            for (const auto& [slot, entry] : nand_sdmc_entries) {
-                if (slot == ContentProviderUnionSlot::UserNAND ||
-                    slot == ContentProviderUnionSlot::SysNAND) {
-                    if (!nand_disabled) {
-                        update_disabled = false;
-                        break;
-                    }
-                } else if (slot == ContentProviderUnionSlot::SDMC) {
-                    if (!sdmc_disabled) {
-                        update_disabled = false;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Game Updates
-    std::unique_ptr<NCA> update = nullptr;
-    std::optional<u32> resolved_version;
-
-    // If we have a specific enabled version from external provider, use it
-    if (enabled_version.has_value() && content_union) {
-        const auto* external_provider = content_union->GetExternalProvider();
-        if (external_provider) {
-            auto file = external_provider->GetEntryForVersion(update_tid, ContentRecordType::Program, *enabled_version);
-            if (file != nullptr) {
-                update = std::make_unique<NCA>(file);
-                resolved_version = enabled_version;
-            }
-        }
-
-        // Also try ManualContentProvider
-        if (update == nullptr) {
-            const auto* manual_provider = static_cast<const ManualContentProvider*>(
-                content_union->GetSlotProvider(ContentProviderUnionSlot::FrontendManual));
-            if (manual_provider) {
-                auto file = manual_provider->GetEntryForVersion(update_tid, ContentRecordType::Program, *enabled_version);
-                if (file != nullptr) {
-                    update = std::make_unique<NCA>(file);
-                    resolved_version = enabled_version;
-                }
-            }
-        }
-    }
-
-    // Fallback to regular content provider if no external update was loaded
-    if (update == nullptr && !update_disabled) {
-        update = content_provider.GetEntry(update_tid, ContentRecordType::Program);
-        if (const auto slot = content_union->GetSlotForEntry(update_tid, ContentRecordType::Program)) {
-            resolved_version = content_union->GetSlotProvider(*slot)->GetEntryVersion(update_tid);
-        }
-    }
-
-    if (update_disabled || update == nullptr) {
         return {};
     }
-    return {update->GetExeFS(), resolved_version};
+
+    return {.selected = packed_update_raw != nullptr, .raw = std::move(packed_update_raw)};
+}
+
+std::pair<VirtualDir, std::optional<u32>> PatchManager::ReadExeFSUpdate() const {
+    const auto update = ResolveUpdate();
+    if (!update.selected || update.raw == nullptr) {
+        return {nullptr, update.version};
+    }
+    return {NCA{update.raw}.GetExeFS(), update.version};
+}
+
+bool PatchManager::HasEnabledMods() const {
+    const auto disabled = GetDisabledAddons();
+    const auto is_disabled = [&](std::string_view name) {
+        return std::find(disabled.cbegin(), disabled.cend(), name) != disabled.cend();
+    };
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id == title_id && !is_disabled(patch.name)) {
+            return true;
+        }
+    }
+    const auto has_mod_content = [](const VirtualDir& dir) {
+        for (const auto name : {"exefs", "romfs", "romfslite", "romfs_ext", "cheats",
+                                "manual_html", "dualscreen"}) {
+            if (IsDirValidAndNonEmpty(FindSubdirectoryCaseless(dir, name))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (const auto root = GetModificationLoadRoot()) {
+        for (const auto& file : root->GetFiles()) {
+            const auto name = file->GetName();
+            if (name.starts_with("cheat_") && !is_disabled(name)) {
+                return true;
+            }
+        }
+        for (const auto& dir : root->GetSubdirectories()) {
+            if (!is_disabled(dir->GetName()) && has_mod_content(dir)) {
+                return true;
+            }
+        }
+    }
+    if (const auto sdmc = GetModificationLoadRoot(true)) {
+        // ExeFS loading also checks the directory name, while LayeredFS uses the SDMC key.
+        if ((!is_disabled(sdmc->GetName()) &&
+             IsDirValidAndNonEmpty(FindSubdirectoryCaseless(sdmc, "exefs"))) ||
+            (!is_disabled("SDMC") && has_mod_content(sdmc))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
@@ -778,110 +774,14 @@ VirtualFile PatchManager::PatchRomFS(const NCA* base_nca, VirtualFile base_romfs
 
     auto romfs = base_romfs;
 
-    // Game Updates
-    const auto update_tid = GetUpdateTitleID(title_id);
-    const auto disabled = GetDisabledAddons();
-
-    bool update_disabled = true;
-    std::optional<u32> enabled_version;
-    VirtualFile update_raw = nullptr;
-    bool checked_external = false;
-    bool checked_manual = false;
-
-    const auto* content_union = static_cast<const ContentProviderUnion*>(&content_provider);
-    if (content_union) {
-        // First, check ExternalContentProvider
-        const auto* external_provider = content_union->GetExternalProvider();
-        if (external_provider) {
-            const auto update_versions = external_provider->ListUpdateVersions(update_tid);
-
-            if (!update_versions.empty()) {
-                checked_external = true;
-                for (const auto& update_entry : update_versions) {
-                    if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
-                        update_disabled = false;
-                        enabled_version = update_entry.version;
-                        update_raw = external_provider->GetEntryForVersion(update_tid, type, update_entry.version);
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (!checked_external) {
-            const auto* manual_provider = static_cast<const ManualContentProvider*>(
-                content_union->GetSlotProvider(ContentProviderUnionSlot::FrontendManual));
-            if (manual_provider) {
-                const auto manual_update_versions = manual_provider->ListUpdateVersions(update_tid);
-
-                if (!manual_update_versions.empty()) {
-                    checked_manual = true;
-                    for (const auto& update_entry : manual_update_versions) {
-                        if (!IsVersionedExternalUpdateDisabled(disabled, update_entry.version)) {
-                            update_disabled = false;
-                            enabled_version = update_entry.version;
-                            update_raw = manual_provider->GetEntryForVersion(update_tid, type, update_entry.version);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (!checked_external && !checked_manual) {
-        const bool nand_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (NAND)") != disabled.cend();
-        const bool sdmc_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (SDMC)") != disabled.cend();
-        const bool generic_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update") != disabled.cend();
-
-        if (!nand_disabled && !sdmc_disabled && !generic_disabled) {
-            update_disabled = false;
-        }
-        if (!update_disabled) {
-            update_raw = content_provider.GetEntryRaw(update_tid, type);
-        }
-    } else if (update_disabled && content_union) {
-        const bool nand_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (NAND)") != disabled.cend();
-        const bool sdmc_disabled = std::find(disabled.cbegin(), disabled.cend(), "Update (SDMC)") != disabled.cend();
-
-        if (!nand_disabled || !sdmc_disabled) {
-            const auto nand_sdmc_entries = content_union->ListEntriesFilterOrigin(
-                std::nullopt, TitleType::Update, type, update_tid);
-
-            for (const auto& [slot, entry] : nand_sdmc_entries) {
-                if (slot == ContentProviderUnionSlot::UserNAND ||
-                    slot == ContentProviderUnionSlot::SysNAND) {
-                    if (!nand_disabled) {
-                        update_disabled = false;
-                        update_raw = content_provider.GetEntryRaw(update_tid, type);
-                        break;
-                    }
-                } else if (slot == ContentProviderUnionSlot::SDMC) {
-                    if (!sdmc_disabled) {
-                        update_disabled = false;
-                        update_raw = content_provider.GetEntryRaw(update_tid, type);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if (!update_disabled && update_raw != nullptr && base_nca != nullptr) {
-        const auto new_nca = std::make_shared<NCA>(update_raw, base_nca);
-        if (new_nca->GetStatus() == Loader::ResultStatus::Success &&
-            new_nca->GetRomFS() != nullptr) {
+    const auto update = ResolveUpdate(type, std::move(packed_update_raw));
+    if (update.selected && update.raw != nullptr && base_nca != nullptr) {
+        const NCA new_nca{update.raw, base_nca};
+        if (new_nca.GetStatus() == Loader::ResultStatus::Success &&
+            new_nca.GetRomFS() != nullptr) {
             LOG_INFO(Loader, "    RomFS: Update ({}) applied successfully",
-                     enabled_version.has_value() ? FormatTitleVersion(*enabled_version) :
-                     FormatTitleVersion(content_provider.GetEntryVersion(update_tid).value_or(0)));
-            romfs = new_nca->GetRomFS();
-        }
-    } else if (!update_disabled && packed_update_raw != nullptr && base_nca != nullptr) {
-        const auto new_nca = std::make_shared<NCA>(packed_update_raw, base_nca);
-        if (new_nca->GetStatus() == Loader::ResultStatus::Success &&
-            new_nca->GetRomFS() != nullptr) {
-            LOG_INFO(Loader, "    RomFS: Update (PACKED) applied successfully");
-            romfs = new_nca->GetRomFS();
+                     update.source ? FormatTitleVersion(update.version.value_or(0)) : "PACKED");
+            romfs = new_nca.GetRomFS();
         }
     }
 

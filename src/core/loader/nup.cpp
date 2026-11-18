@@ -251,6 +251,12 @@ std::optional<std::pair<u32, FileSys::VirtualDir>> AppLoader_NUP::ReadPackagedEx
     if (!packaged_exefs) {
         return std::nullopt;
     }
+    const auto update = nup->FindBestUpdatePackage();
+    if (update && nup->GetPackages()[*update].version != packaged_version) {
+        // The emulation view can overlay a RomFS-only update, but it is not an exact
+        // executable/data snapshot and must never acquire a native build identity.
+        return std::nullopt;
+    }
     return std::pair{packaged_version, nup->GetExeFSDir(*packaged_exefs)};
 }
 

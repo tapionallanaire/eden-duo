@@ -15,6 +15,8 @@ import org.yuzu.yuzu_emu.databinding.ListItemProfileBinding
 import org.yuzu.yuzu_emu.model.UserProfile
 import java.io.File
 import org.yuzu.yuzu_emu.NativeLibrary
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
+import android.widget.Toast
 
 class ProfileAdapter(
     private val onProfileClick: (UserProfile) -> Unit,
@@ -65,6 +67,8 @@ class ProfileAdapter(
             binding.textUsername.text = profile.username
             binding.textUuid.text = formatUUID(profile.uuid)
 
+            try {
+                NativeSaveSession.acquire(binding.root.context).use {
             val imageFile = File(profile.imagePath)
             if (imageFile.exists()) {
                 val bitmap = BitmapFactory.decodeFile(profile.imagePath)
@@ -73,6 +77,11 @@ class ProfileAdapter(
                     val jpegData = NativeLibrary.getDefaultAccountBackupJpeg()
                     val bitmap = BitmapFactory.decodeByteArray(jpegData, 0, jpegData.size)
                     binding.imageAvatar.setImageBitmap(bitmap)
+            }
+                }
+            } catch (e: IllegalStateException) {
+                binding.imageAvatar.setImageDrawable(null)
+                Toast.makeText(binding.root.context, e.message, Toast.LENGTH_LONG).show()
             }
 
             if (profile.uuid == currentUserUUID) {

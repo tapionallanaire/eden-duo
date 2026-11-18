@@ -23,12 +23,17 @@ import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.navigation.findNavController
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.navArgs
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.transition.MaterialSharedAxis
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.databinding.FragmentSettingsBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.yuzu.yuzu_emu.features.input.NativeInput
 import org.yuzu.yuzu_emu.features.settings.model.Settings
 import org.yuzu.yuzu_emu.features.settings.model.view.PathSetting
@@ -49,6 +54,35 @@ class SettingsFragment : Fragment() {
     private val args by navArgs<SettingsFragmentArgs>()
 
     private val settingsViewModel: SettingsViewModel by activityViewModels()
+    private var pathIdentity: String? = null
+
+    private fun withPathAccess(identity: String?, action: () -> Unit) {
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                NativeSaveSession.assertIdentity(
+                    requireContext(), checkNotNull(identity) { "The save/profile selection expired; choose the directory again." }
+                )
+                action()
+            }
+        } catch (e: IllegalStateException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun capturePathIdentity(): Boolean = try {
+        NativeSaveSession.acquire(requireContext()).use {
+            pathIdentity = NativeSaveSession.identity(requireContext())
+        }
+        true
+    } catch (e: IllegalStateException) {
+        Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+        false
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("pathIdentity", pathIdentity)
+    }
 
     private val requestAllFilesPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -66,6 +100,7 @@ class SettingsFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pathIdentity = savedInstanceState?.getString("pathIdentity")
         enterTransition = MaterialSharedAxis(MaterialSharedAxis.X, true)
         returnTransition = MaterialSharedAxis(MaterialSharedAxis.X, false)
         reenterTransition = MaterialSharedAxis(MaterialSharedAxis.X, false)
@@ -249,6 +284,7 @@ private fun getPlayerIndex(): Int =
     }
 
     private fun handlePathPickerRequest() {
+        if (!capturePathIdentity()) return
         if (!hasAllFilesPermission()) {
             MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.all_files_permission_required)
@@ -264,7 +300,7 @@ private fun getPlayerIndex(): Int =
     }
 
     private fun showPathPickerDialog() {
-        directoryPickerLauncher.launch(null)
+        withPathAccess(pathIdentity) { directoryPickerLauncher.launch(null) }
     }
 
     private val directoryPickerLauncher = registerForActivityResult(
@@ -286,26 +322,29 @@ private fun getPlayerIndex(): Int =
     }
 
     private fun handleSelectedPath(pathSetting: PathSetting, path: String) {
+        val identity = pathIdentity
+        withPathAccess(identity) {
         if (!PathUtil.validateDirectory(path)) {
             Toast.makeText(
                 requireContext(),
                 R.string.invalid_directory,
                 Toast.LENGTH_SHORT
             ).show()
-            return
+            return@withPathAccess
         }
 
         if (pathSetting.pathType == PathSetting.PathType.SAVE_DATA) {
             val oldPath = pathSetting.getCurrentPath()
             if (oldPath != path) {
-                promptSaveMigration(pathSetting, oldPath, path)
+                promptSaveMigration(pathSetting, oldPath, path, requireNotNull(identity))
             }
         } else {
-            setPathAndNotify(pathSetting, path)
+            setPathAndNotify(pathSetting, path, requireNotNull(identity))
+        }
         }
     }
 
-    private fun promptSaveMigration(pathSetting: PathSetting, fromPath: String, toPath: String) {
+    private fun promptSaveMigration(pathSetting: PathSetting, fromPath: String, toPath: String, identity: String) {
         val sourceSavePath = "$fromPath/user/save"
         val destSavePath = "$toPath/user/save"
         val sourceSaveDir = File(sourceSavePath)
@@ -315,7 +354,7 @@ private fun getPlayerIndex(): Int =
         val destHasSaves = PathUtil.hasContent(destSavePath)
 
         if (!sourceHasSaves) {
-            setPathAndNotify(pathSetting, toPath)
+            setPathAndNotify(pathSetting, toPath, identity)
             return
         }
 
@@ -324,10 +363,10 @@ private fun getPlayerIndex(): Int =
                 .setTitle(R.string.migrate_save_data)
                 .setMessage(R.string.destination_has_saves)
                 .setPositiveButton(R.string.confirm) { _, _ ->
-                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, toPath)
+                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, toPath, identity)
                 }
                 .setNegativeButton(R.string.skip_migration) { _, _ ->
-                    setPathAndNotify(pathSetting, toPath)
+                    setPathAndNotify(pathSetting, toPath, identity)
                 }
                 .setNeutralButton(R.string.cancel, null)
                 .show()
@@ -336,10 +375,10 @@ private fun getPlayerIndex(): Int =
                 .setTitle(R.string.migrate_save_data)
                 .setMessage(R.string.migrate_save_data_question)
                 .setPositiveButton(R.string.confirm) { _, _ ->
-                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, toPath)
+                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, toPath, identity)
                 }
                 .setNegativeButton(R.string.skip_migration) { _, _ ->
-                    setPathAndNotify(pathSetting, toPath)
+                    setPathAndNotify(pathSetting, toPath, identity)
                 }
                 .setNeutralButton(R.string.cancel, null)
                 .show()
@@ -350,35 +389,45 @@ private fun getPlayerIndex(): Int =
         pathSetting: PathSetting,
         sourceDir: File,
         destDir: File,
-        newPath: String
+        newPath: String,
+        identity: String
     ) {
-        Thread {
-            val success = PathUtil.copyDirectory(sourceDir, destDir, overwrite = true)
-
-            requireActivity().runOnUiThread {
-                if (success) {
-                    setPathAndNotify(pathSetting, newPath)
-                    Toast.makeText(
-                        requireContext(),
-                        R.string.save_migration_complete,
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    Toast.makeText(
-                        requireContext(),
-                        R.string.save_migration_failed,
-                        Toast.LENGTH_SHORT
-                    ).show()
+        val context = requireContext().applicationContext
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    NativeSaveSession.acquire(context).use {
+                        NativeSaveSession.assertIdentity(context, identity)
+                        check(PathUtil.copyDirectory(sourceDir, destDir, overwrite = true)) {
+                            context.getString(R.string.save_migration_failed)
+                        }
+                        applyPath(pathSetting, newPath)
+                    }
                 }
+                notifyPathChanged(pathSetting)
+                Toast.makeText(context, R.string.save_migration_complete, Toast.LENGTH_SHORT).show()
+            } catch (e: IllegalStateException) {
+                Toast.makeText(context, e.message, Toast.LENGTH_LONG).show()
             }
-        }.start()
+        }
     }
 
-    private fun setPathAndNotify(pathSetting: PathSetting, path: String) {
+    private fun setPathAndNotify(pathSetting: PathSetting, path: String, identity: String) =
+        withPathAccess(identity) {
+            applyPath(pathSetting, path)
+            notifyPathChanged(pathSetting)
+        }
+
+    private fun applyPath(pathSetting: PathSetting, path: String) {
+        NativeSaveSession.invalidateSourceReadBoundaries()
         pathSetting.setPath(path)
         NativeConfig.saveGlobalConfig()
 
         NativeConfig.reloadGlobalConfig()
+        NativeSaveSession.refreshSourceReadBoundaries(requireContext())
+    }
+
+    private fun notifyPathChanged(pathSetting: PathSetting) {
 
         val messageResId = if (pathSetting.pathType == PathSetting.PathType.SAVE_DATA) {
             R.string.save_directory_set
@@ -400,9 +449,12 @@ private fun getPlayerIndex(): Int =
 
     private fun showPathResetDialog() {
         val pathSetting = settingsViewModel.clickedItem as? PathSetting ?: return
+        if (!capturePathIdentity()) return
+        val identity = requireNotNull(pathIdentity)
+        withPathAccess(identity) {
 
         if (pathSetting.isUsingDefaultPath()) {
-            return
+            return@withPathAccess
         }
 
         val currentPath = pathSetting.getCurrentPath()
@@ -412,18 +464,21 @@ private fun getPlayerIndex(): Int =
             .setTitle(R.string.reset_to_nand)
             .setMessage(R.string.migrate_save_data_question)
             .setPositiveButton(R.string.confirm) { _, _ ->
+                withPathAccess(identity) {
                 val sourceSaveDir = File(currentPath, "user/save")
                 val destSaveDir = File(defaultPath, "user/save")
 
                 if (sourceSaveDir.exists() && sourceSaveDir.listFiles()?.isNotEmpty() == true) {
-                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, defaultPath)
+                    migrateSaveData(pathSetting, sourceSaveDir, destSaveDir, defaultPath, identity)
                 } else {
-                    setPathAndNotify(pathSetting, defaultPath)
+                    setPathAndNotify(pathSetting, defaultPath, identity)
+                }
                 }
             }
             .setNegativeButton(R.string.cancel) { _, _ ->
                 // just dismiss
             }
             .show()
+        }
     }
 }

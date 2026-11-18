@@ -102,6 +102,7 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
     private var romSwapThreadStopped = false
     private var romSwapGeneration = 0
     private var hasEmulationSession = processHasEmulationSession
+    private var hadEmulationSession = processHasEmulationSession
     private var launchRedirected = false
     private val romSwapStopTimeoutRunnable = Runnable { onRomSwapStopTimeout() }
 
@@ -128,6 +129,7 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         ThemeHelper.setTheme(this)
 
         super.onCreate(savedInstanceState)
+        hadEmulationSession = savedInstanceState?.getBoolean("HadEmulationSession") ?: hadEmulationSession
 
         // Eden Duo: "Swap screens" / a game already running on the second display.
         if (savedInstanceState == null && ScreenSwap.redirectLaunch(this, hasEmulationSession)) {
@@ -168,7 +170,7 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         setContentView(binding.root)
 
         val launchIntent = Intent(intent)
-        val shouldDeferLaunchForSwap = hasEmulationSession && isSwapIntent(launchIntent)
+        val shouldDeferLaunchForSwap = savedInstanceState == null && hasEmulationSession && isSwapIntent(launchIntent)
         if (shouldDeferLaunchForSwap) {
             Log.info("[EmulationActivity] onCreate detected existing session; deferring new game setup for swap")
             emulationViewModel.setIsEmulationStopping(true)
@@ -184,7 +186,9 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         } else {
             intent.extras
         }
-        navHostFragment.navController.setGraph(R.navigation.emulation_navigation, initialArgs)
+        if (navHostFragment.navController.currentDestination == null) {
+            navHostFragment.navController.setGraph(R.navigation.emulation_navigation, initialArgs)
+        }
         if (shouldDeferLaunchForSwap) {
             mainHandler.post {
                 handleSwapIntent(launchIntent)
@@ -228,6 +232,11 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
                     .apply()
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("HadEmulationSession", hadEmulationSession)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -314,11 +323,6 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
         super.onDestroy()
         if (launchRedirected) return // nothing was set up (see ScreenSwap)
         if (isFinishing) CompanionApp.endSession() // Eden Duo: No Companion App
-        // Duet Plus: push the saves this session wrote.
-        if (isFinishing) {
-            org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this)
-                .afterExit(org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH)
-        }
         inputManager.unregisterInputDeviceListener(this)
         stopForegroundService(this)
         NativeLibrary.playTimeManagerStop()
@@ -841,6 +845,7 @@ class EmulationActivity : AppCompatActivity(), SensorEventListener, InputManager
             return
         }
         hasEmulationSession = true
+        hadEmulationSession = true
         processHasEmulationSession = true
         emulationViewModel.setEmulationStarted(true)
         emulationViewModel.setIsEmulationStopping(false)

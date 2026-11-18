@@ -53,10 +53,15 @@ class ForegroundService : Service() {
     }
 
     override fun onCreate() {
-        showRunningNotification()
+        super.onCreate()
+        if (!org.yuzu.yuzu_emu.YuzuApplication.startupDeferred) showRunningNotification()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (org.yuzu.yuzu_emu.YuzuApplication.startupDeferred) {
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             try {
                 NotificationManagerCompat.from(this).cancel(EMULATION_RUNNING_NOTIFICATION)

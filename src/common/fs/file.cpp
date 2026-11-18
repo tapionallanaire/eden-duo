@@ -437,7 +437,7 @@ void IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, File
     }
 }
 
-void IOFile::Close() {
+bool IOFile::Close() {
 #if defined(__APPLE__)
     // NO IMPLEMENTATION YET
 #else
@@ -452,7 +452,9 @@ void IOFile::Close() {
                 PathToUTF8String(file_path), ec.message());
         }
         file = nullptr;
+        return close_result;
     }
+    return true;
 }
 
 bool IOFile::IsOpen() const {

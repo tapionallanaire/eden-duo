@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "core/file_sys/nup_container.h"
 
 // Packs a loose dump into a NUP container. Every package is kept: base/, each
 // updates/<version>/ and each dlc/<titleid>/<n>/.
@@ -74,6 +75,40 @@ PackResult PackDump(const std::filesystem::path& dump_root, const std::filesyste
                     const PackOptions& options = {},
                     const std::function<void(const PackProgress&)>& progress = {},
                     const std::atomic_bool* cancel = nullptr, std::string* error_out = nullptr);
+
+// A complete, already resolved snapshot, not an update overlay. Exactly one application
+// package is required: Base at version 0, or Update at its exact nonzero version with flags=1
+// (standalone update). Remaining packages are Addon snapshots with flags=0.
+struct ResolvedPackage {
+    NupContainer::PackageKind kind{};
+    u8 flags{};
+    u64 title_id{};
+    u32 version{};
+    VirtualDir exefs;
+    VirtualDir romfs;
+    // Indexed native snapshot only: required for program 1; other nonzero indices are rejected.
+    // Root ExeFS/RomFS remain the truthful selected program 1 and are also exposed at
+    // program/1/{exefs,romfs}; original resources live at program/0/romfs.
+    // Aliases share extents and retained file sources, not a second application package.
+    VirtualDir program0_romfs{};
+};
+
+// Streams retained VirtualFile sources through the same serializer as PackDump. Sources are
+// never deleted; delete_sources is rejected. Both application trees and each add-on RomFS must
+// be present. The archive's parent must not exist: the writer exclusively creates that generation
+// directory, and its ancestor must already be durable. No other producer may write inside it.
+// Existing generations/archive/partial/journal files are never replaced; failed or cancelled
+// exports remove only their owned output and the generation directory if empty. Success commits
+// file data, the generation and its parent directory on POSIX; unsupported directory sync fails.
+// Windows uses same-volume MoveFileExW(MOVEFILE_WRITE_THROUGH), without replacement/copy flags.
+// No loose staging copy or resumable journal is created.
+// During discovery progress has unknown totals (all zero); it is polled between entries so a
+// callback can update cancel. During serialization it is polled for each bounded source read.
+PackResult PackResolved(const std::vector<ResolvedPackage>& packages,
+                        const std::filesystem::path& archive, const PackOptions& options = {},
+                        const std::function<void(const PackProgress&)>& progress = {},
+                        const std::atomic_bool* cancel = nullptr,
+                        std::string* error_out = nullptr);
 
 bool HasResumableJournal(const std::filesystem::path& archive);
 

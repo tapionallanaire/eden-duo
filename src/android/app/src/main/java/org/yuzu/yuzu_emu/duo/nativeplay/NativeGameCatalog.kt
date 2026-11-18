@@ -27,6 +27,7 @@ internal data class NativeGameProfile(
 
 internal class NativeGameCatalog private constructor(profiles: List<NativeGameProfile>) {
     private val byProgram = profiles.groupBy { it.programId }
+    val programIndices = profiles.map { it.programId.takeLast(3).toInt(16) }.distinct().sorted()
 
     fun versions(programId: String): List<NativeGameProfile> =
         byProgram[programId.uppercase()].orEmpty()

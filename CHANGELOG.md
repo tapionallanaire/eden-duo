@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Native launch and preparation use full-screen Duet pages with game artwork, time/storage estimates, fixed actions and collapsible technical details instead of an oversized launch dialog.
+- Native play inherits the game's effective Duet GPU driver, including its per-game override; there is no separate native driver picker or preference.
+- Cancelling native preparation keeps emulated launch available. Cancelling after pack publication preserves the prepared data without granting permission to launch the game.
+- Publish effective-game snapshots on app-owned microSD volumes that reject no-replace rename, using exclusive generation ownership without replacing another exporter's data.
+- Native and emulated play share the selected Duet account's canonical save, with distinct device-save parts and one Duet Sync client. Process-lifetime exclusion and journal recovery guard launch, Sync, import/export, profile changes and external document access.
+- Per-game Native play settings remember the preferred mode, recompile a fresh generation and delete owned compiled data without touching original games or saves. Cancelled pre-job exports are accounted for and can be removed.
+- Optional embedded Switch 1 and Switch 2 backends use exact effective content/build matching; indexed editions preserve both original and selected program resources.
 - Preserve all touched GPU buffer-read units across unaligned and page-crossing ranges so overlapping CPU uploads cannot be reordered ahead of those reads.
 - Preserve shadow-RAM tracking and replay in accelerated shader-binding and constant-buffer setup macros.
 - Keep busy Vulkan upload-ring regions reserved after a wrap fallback instead of overwriting in-flight geometry or shader data.

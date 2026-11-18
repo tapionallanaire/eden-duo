@@ -28,4 +28,15 @@ class IntentGameSetupRulesTest {
     fun allUnsetStaysNull() {
         assertNull(IntentGameSetupRules.deferredGame<String>(null, null, null))
     }
+
+    @Test
+    fun onlyOrdinaryGamesReachNativeDecision() {
+        val title = "0100F2C0115B6000"
+        assertEquals(true, IntentGameSetupRules.ordinaryLaunch(title, 0, false, false, false))
+        assertEquals(false, IntentGameSetupRules.ordinaryLaunch("0100000000001000", 0, false, false, false))
+        assertEquals(false, IntentGameSetupRules.ordinaryLaunch(title, 5, false, false, false))
+        assertEquals(false, IntentGameSetupRules.ordinaryLaunch(title, 0, true, false, false))
+        assertEquals(false, IntentGameSetupRules.ordinaryLaunch(title, 0, false, true, false))
+        assertEquals(false, IntentGameSetupRules.ordinaryLaunch(title, 0, false, false, true))
+    }
 }

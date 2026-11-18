@@ -6,8 +6,7 @@
 // user's PC) accepts the device and the folder once. An app that syncs only some consoles (Duet Plus: Switch) ignores
 // the other console folders. Before a game starts and after it ends the console's
 // saves are reconciled three ways (this device, the synced copy, the hash at the last sync, kept in SQLite).
-// The same file lives in Calamansi (org.calamansi.sync, GPL-2.0-or-later there); keep the copies identical apart from
-// the licence header and the package line.
+// Duet's host boundaries also share NativeSaveSession with native play and save maintenance.
 
 package org.yuzu.yuzu_emu.duo.sync
 
@@ -45,6 +44,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import org.json.JSONArray
 import org.json.JSONObject
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 
 /**
  * One console's saves. In the synced folder they are units [depth] levels below `<id>/`; [units] maps each unit this
@@ -57,10 +57,71 @@ class SyncConsole(
     val depth: Int,
     val units: (synced: List<String>) -> Map<String, File>,
     /** The game's name for a unit, when this app knows it (shown in the conflict dialog). */
-    val name: (unit: String) -> String? = { null }
+    val name: (unit: String) -> String? = { null },
+    /** Pins an explicitly approved legacy peer owner before its first connection. */
+    val preparePairing: () -> Unit = {},
+    /** Null only when the selected profile/root has a real peer mapping. */
+    val unpairedReason: () -> String? = { null },
+    val scopeDescription: String? = null,
+    /** Explicit human confirmation for an existing legacy slot whose original owner was not recorded. */
+    val ownerConfirmation: () -> SyncOwnerConfirmation? = { null }
 )
 
-class Conflict(val console: SyncConsole, val unit: String, val local: File, val remote: File)
+class SyncOwnerConfirmation(val description: String, val confirm: () -> Unit)
+
+class Conflict internal constructor(
+    val console: SyncConsole,
+    val unit: String,
+    val local: File,
+    val remote: File,
+    internal val snapshot: SyncConflictSnapshot,
+    internal val reservationToken: String?
+)
+
+internal class UnpairedSyncException(message: String) : IllegalStateException(message)
+
+internal data class SyncSaveSummary(val modified: Long, val bytes: Long) {
+    companion object {
+        fun capture(file: File): SyncSaveSummary {
+            var modified = 0L
+            var bytes = 0L
+            for (child in file.walkTopDown().onEnter { it == file || !isSyncthingFile(it.name) }) {
+                if (child.isFile && !isSyncthingFile(child.name)) {
+                    modified = maxOf(modified, child.lastModified())
+                    bytes += child.length()
+                }
+            }
+            return SyncSaveSummary(modified, bytes)
+        }
+    }
+}
+
+/** Captured only under the save lease; a delayed dialog never re-reads a live save. */
+internal data class SyncConflictSnapshot(
+    val identity: String,
+    val localPath: String,
+    val remotePath: String,
+    val localHash: String?,
+    val remoteHash: String?,
+    val localSummary: SyncSaveSummary,
+    val remoteSummary: SyncSaveSummary
+) {
+    fun assertCurrent(identity: String, local: File?, remote: File) {
+        check(this.identity == identity && local?.canonicalPath == localPath && remote.canonicalPath == remotePath) {
+            "The selected profile, save root or save location changed. Compare saves again."
+        }
+        check(hash(local!!) == localHash && hash(remote) == remoteHash) {
+            "The saves changed while the choice was open. Compare saves again."
+        }
+    }
+
+    companion object {
+        fun capture(identity: String, local: File, remote: File) = SyncConflictSnapshot(
+            identity, local.canonicalPath, remote.canonicalPath, hash(local), hash(remote),
+            SyncSaveSummary.capture(local), SyncSaveSummary.capture(remote)
+        )
+    }
+}
 
 class SaveSync(
     private val context: Context,
@@ -197,25 +258,28 @@ class SaveSync(
     }
 
     /** Adds the hub and offers it the saves folder; the user accepts both on the PC. */
-    fun connect(id: String, name: String) {
-        api(
-            "PUT", "/rest/config/devices/$id",
-            JSONObject().put("deviceID", id).put("name", name).put("addresses", JSONArray(listOf("dynamic")))
-        )
-        File(synced, ".stfolder").mkdirs()
-        api(
-            "PUT", "/rest/config/folders/$FOLDER",
-            JSONObject().put("id", FOLDER).put("label", "Calamansi saves").put("path", synced.path)
-                .put("type", "sendreceive").put("fsWatcherEnabled", true)
-                .put("devices", JSONArray().put(JSONObject().put("deviceID", id)))
-        )
-        // Only this app's consoles: Duet Plus never downloads (or uploads) another console's saves.
-        api(
-            "POST", "/rest/db/ignores?folder=$FOLDER",
-            JSONObject().put("ignore", JSONArray(consoles.map { "!/${it.id}" } + "*"))
-        )
-        prefs.edit().putString("hub", id).putString("hub_name", name).apply()
-    }
+    fun connect(id: String, name: String, expectedIdentity: String? = null) =
+        NativeSaveSession.acquire(context).use {
+            expectedIdentity?.let { NativeSaveSession.assertIdentity(context, it) }
+            consoles.forEach { it.preparePairing() }
+            api(
+                "PUT", "/rest/config/devices/$id",
+                JSONObject().put("deviceID", id).put("name", name).put("addresses", JSONArray(listOf("dynamic")))
+            )
+            File(synced, ".stfolder").mkdirs()
+            api(
+                "PUT", "/rest/config/folders/$FOLDER",
+                JSONObject().put("id", FOLDER).put("label", "Calamansi saves").put("path", synced.path)
+                    .put("type", "sendreceive").put("fsWatcherEnabled", true)
+                    .put("devices", JSONArray().put(JSONObject().put("deviceID", id)))
+            )
+            // Only this app's consoles: Duet Plus never downloads (or uploads) another console's saves.
+            api(
+                "POST", "/rest/db/ignores?folder=$FOLDER",
+                JSONObject().put("ignore", JSONArray(consoles.map { "!/${it.id}" } + "*"))
+            )
+            prefs.edit().putString("hub", id).putString("hub_name", name).apply()
+        }
 
     fun disconnect() {
         val id = hub ?: return
@@ -244,7 +308,7 @@ class SaveSync(
      * download. False when the hub stays unreachable: the caller then leaves the synced folder alone.
      */
     fun waitInSync(timeoutMs: Long, skip: () -> Boolean = { false }): Boolean {
-        rescan()
+        rescan().getOrThrow()
         val begin = System.currentTimeMillis()
         val end = begin + timeoutMs
         var quiet = 0
@@ -267,24 +331,42 @@ class SaveSync(
 
     // ---- reconciliation ----
 
-    /** Reconciles [console]'s saves. Returns the units both sides changed; those are left for the user. */
-    fun reconcile(console: SyncConsole): List<Conflict> {
-        if (playing() == console.id) return emptyList()
-        val remoteRoot = File(synced, console.id)
-        val units = console.units(listUnits(remoteRoot, console.depth))
-        val (conflicts, pushed) = reconcileUnits(units, remoteRoot, File(backups, console.id), db.of(console.id)) {
-            Log.i(TAG, "${console.id} $it")
+    /** Reconciles only while the kernel lease excludes every native/emulated writer. */
+    fun reconcile(console: SyncConsole, reservationToken: String? = null): List<Conflict> =
+        NativeSaveSession.acquire(context, reservationToken).use {
+            check(playing() != console.id) { "Saves are in use by a running game." }
+            console.unpairedReason()?.let { throw UnpairedSyncException(it) }
+            val identity = NativeSaveSession.identity(context)
+            val remoteRoot = File(synced, console.id)
+            val units = console.units(listUnits(remoteRoot, console.depth))
+            NativeSaveSession.assertIdentity(context, identity)
+            val (conflicts, pushed) = reconcileUnits(units, remoteRoot, File(backups, console.id), db.of(console.id)) {
+                Log.i(TAG, "${console.id} $it")
+                // SaveMerge otherwise logs a failed copy and reports an apparently successful sync.
+                check(!it.startsWith("failed ")) { it }
+            }
+            NativeSaveSession.assertIdentity(context, identity)
+            if (pushed) rescan().getOrThrow()
+            conflicts.map {
+                val local = units.getValue(it)
+                val remote = File(remoteRoot, it)
+                Conflict(console, it, local, remote, SyncConflictSnapshot.capture(identity, local, remote), reservationToken)
+            }
         }
-        if (pushed) rescan()
-        return conflicts.map { Conflict(console, it, units.getValue(it), File(remoteRoot, it)) }
-    }
 
     @Synchronized
-    fun resolve(c: Conflict, keepLocal: Boolean) {
-        resolveConflict(c.unit, c.local, c.remote, File(backups, c.console.id), keepLocal, db.of(c.console.id))
-        forget(c)
-        if (keepLocal) rescan()
-    }
+    fun resolve(c: Conflict, keepLocal: Boolean) =
+        NativeSaveSession.acquire(context, c.reservationToken).use {
+            NativeSaveSession.assertIdentity(context, c.snapshot.identity)
+            check(playing() != c.console.id) { "Saves are in use by a running game." }
+            c.console.unpairedReason()?.let { throw UnpairedSyncException(it) }
+            val local = c.console.units(listOf(c.unit))[c.unit]
+            val remote = File(File(synced, c.console.id), c.unit)
+            c.snapshot.assertCurrent(NativeSaveSession.identity(context), local, remote)
+            resolveConflict(c.unit, local!!, remote, File(backups, c.console.id), keepLocal, db.of(c.console.id))
+            if (keepLocal) rescan().getOrThrow()
+            forget(c)
+        }
 
     private fun rescan() = runCatching { api("POST", "/rest/db/scan?folder=$FOLDER") }
 
@@ -293,18 +375,49 @@ class SaveSync(
      * at a time, so the exit job never reconciles alongside a launch or background sync.
      */
     @Synchronized
-    fun sync(consoles: List<SyncConsole>, timeoutMs: Long, skip: () -> Boolean = { false }): List<Conflict>? {
-        if (hub == null || !start() || !waitInSync(timeoutMs, skip) || skip()) return null
-        return consoles.flatMap { reconcile(it) }.also(::remember)
+    fun sync(
+        consoles: List<SyncConsole>,
+        timeoutMs: Long,
+        reservationToken: String? = null,
+        skip: () -> Boolean = { false }
+    ): List<Conflict>? = NativeSaveSession.acquire(context, reservationToken).use {
+        consoles.forEach { console -> console.unpairedReason()?.let { throw UnpairedSyncException(it) } }
+        if (hub == null || !start() || !waitInSync(timeoutMs, skip) || skip()) return@use null
+        consoles.flatMap { reconcile(it, reservationToken) }.also(::remember)
     }
 
 
     // ---- UI: Material dialogs only for decisions and waits the user sits through; snackbars for feedback ----
 
-    /** Syncs [consoleId]'s saves, asks about conflicts, then runs [launch]. Always launches, like Steam. */
-    fun beforeLaunch(activity: Activity, consoleId: String, launch: () -> Unit) {
+    /** Offline play is allowed, but a busy save lease must never be bypassed. */
+    fun beforeLaunch(
+        activity: Activity,
+        consoleId: String,
+        reservationToken: String? = null,
+        onFailure: ((String) -> Unit)? = null,
+        launch: () -> Unit
+    ) {
         val console = consoles.find { it.id == consoleId }
         if (hub == null || console == null || !available) return launch()
+        var expectedIdentity: String? = null
+        fun refuse(message: String) {
+            note(activity, message)
+            onFailure?.invoke(message)
+        }
+        val launchChecked = {
+            worker.execute {
+                val error = runCatching {
+                    NativeSaveSession.acquire(context, reservationToken).use {
+                        expectedIdentity?.let { NativeSaveSession.assertIdentity(context, it) }
+                    }
+                }.exceptionOrNull()
+                main.post {
+                    if (!activity.isFinishing && !activity.isDestroyed) {
+                        if (error == null) launch() else refuse(error.message ?: "Saves are in use.")
+                    }
+                }
+            }
+        }
         // "Play now" only stops the wait for the PC; a copy already under way finishes before the game starts.
         val skipped = java.util.concurrent.atomic.AtomicBoolean()
         val finished = java.util.concurrent.atomic.AtomicBoolean()
@@ -314,8 +427,14 @@ class SaveSync(
         main.postDelayed({ if (!finished.get() && !activity.isFinishing) dialog.show() }, 1500)
         worker.execute {
             val began = System.currentTimeMillis()
-            val conflicts = runCatching { sync(listOf(console), 10_000) { skipped.get() } }
-                .onFailure { Log.w(TAG, "sync before launch", it) }.getOrNull()
+            val result = runCatching {
+                NativeSaveSession.acquire(context, reservationToken).use {
+                    expectedIdentity = NativeSaveSession.identity(context)
+                    sync(listOf(console), 10_000, reservationToken) { skipped.get() }
+                }
+            }
+                .onFailure { Log.w(TAG, "sync before launch", it) }
+            val conflicts = result.getOrNull()
             Log.i(
                 TAG, "before launch ${console.id}: " + (conflicts?.let { "${it.size} conflicts" } ?: "hub unreachable") +
                     ", ${System.currentTimeMillis() - began} ms${if (skipped.get()) ", skipped" else ""}"
@@ -324,12 +443,17 @@ class SaveSync(
                 finished.set(true)
                 if (dialog.isShowing) dialog.dismiss()
                 if (activity.isFinishing || activity.isDestroyed) return@post
-                if (skipped.get()) return@post launch()
+                val failure = result.exceptionOrNull()
+                if (failure != null && failure !is UnpairedSyncException) {
+                    refuse(failure.message ?: "Save sync could not safely complete. Try again.")
+                    return@post
+                }
+                if (skipped.get()) return@post launchChecked()
                 if (conflicts == null) {
                     // ponytail: a toast, not a snackbar: the game's window covers this one at once.
-                    Toast.makeText(activity, "Couldn't reach $hubName. Playing with this device's saves.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(activity, failure?.message ?: "Couldn't reach $hubName. Playing with this device's saves.", Toast.LENGTH_LONG).show()
                 }
-                askConflicts(activity, conflicts.orEmpty(), launch)
+                askConflicts(activity, conflicts.orEmpty(), onFailure = onFailure, then = launchChecked)
             }
         }
     }
@@ -356,11 +480,18 @@ class SaveSync(
      * One upload of [consoleId] ([EVERY] for all consoles): true once the PC holds everything this device has.
      * Blocking.
      */
-    fun upload(consoleId: String): Boolean {
+    @Synchronized
+    fun upload(consoleId: String): Boolean = NativeSaveSession.acquire(context).use {
         val which = if (consoleId == EVERY) consoles else consoles.filter { it.id == consoleId }
-        if (which.isEmpty() || hub == null || !available) return true
-        sync(which, 15_000) ?: return false
-        return waitUploaded(120_000)
+        if (which.isEmpty() || hub == null || !available) return@use false
+        val identity = NativeSaveSession.identity(context)
+        // Recovery may have added records while acquiring the lease. Never acknowledge them on an offline/no-op upload.
+        val recovered = NativeSaveSession.recoveryUploadsPending(context)
+        val conflicts = sync(which, 15_000) ?: return@use false
+        if (conflicts.isNotEmpty() || !waitInSync(15_000) || !waitUploaded(120_000)) return@use false
+        NativeSaveSession.assertIdentity(context, identity)
+        if (recovered && which.size == consoles.size) NativeSaveSession.completeRecoveryUploads(context)
+        true
     }
 
     /**
@@ -386,7 +517,8 @@ class SaveSync(
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
             val c = runCatching { JSONObject(api("GET", "/rest/db/completion?folder=$FOLDER&device=$hub")) }.getOrNull()
-            if (c != null && c.optDouble("completion") >= 100.0 && c.optLong("needItems") == 0L) return true
+            if (c != null && hubOnline() && c.optString("remoteState") == "valid" &&
+                c.optDouble("completion") >= 100.0 && c.optLong("needItems", -1L) == 0L) return true
             Thread.sleep(1000)
         }
         return false
@@ -402,7 +534,10 @@ class SaveSync(
         val now = System.currentTimeMillis()
         if (now - lastAll >= 5 * 60_000) {
             lastAll = now
-            worker.execute { runCatching { sync(consoles, 10_000) }.onFailure { Log.w(TAG, "sync all", it) } }
+            worker.execute {
+                runCatching { sync(consoles, 10_000) }
+                    .onFailure { lastAll = 0L; Log.w(TAG, "sync all deferred", it) }
+            }
         }
         // Queued behind that sync, so it asks about what it found too.
         if (activity != null) worker.execute { main.post { askPending(activity) } }
@@ -416,41 +551,75 @@ class SaveSync(
         askConflicts(activity, conflicts) { asking = false }
     }
 
-    private fun askConflicts(activity: Activity, conflicts: List<Conflict>, then: () -> Unit) {
+    private fun askConflicts(
+        activity: Activity,
+        conflicts: List<Conflict>,
+        onFailure: ((String) -> Unit)? = null,
+        then: () -> Unit
+    ) {
         val c = conflicts.firstOrNull() ?: return then()
-        val next = { askConflicts(activity, conflicts.drop(1), then) }
+        val next = { askConflicts(activity, conflicts.drop(1), onFailure, then) }
         val fmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-        fun files(f: File) = f.walkTopDown().filter { it.isFile && !isSyncthingFile(it.name) }.toList()
-        fun newest(f: File) = files(f).maxOfOrNull { it.lastModified() } ?: 0L
-        fun size(f: File) = files(f).sumOf { it.length() }
-            .let { if (it < 1024 * 1024) "${(it + 1023) / 1024} KB" else "%.1f MB".format(it / 1048576.0) }
-        val here = newest(c.local)
-        val there = newest(c.remote)
-        fun side(name: String, at: Long, f: File, newer: Boolean) =
-            "$name${if (newer) " (newer)" else ""}\n${if (at > 0) fmt.format(Date(at)) else "Date unknown"} · ${size(f)}"
+        val here = c.snapshot.localSummary.modified
+        val there = c.snapshot.remoteSummary.modified
+        fun side(name: String, summary: SyncSaveSummary, newer: Boolean): String {
+            val bytes = summary.bytes
+            val size = if (bytes < 1024 * 1024) "${(bytes + 1023) / 1024} KB" else "%.1f MB".format(bytes / 1048576.0)
+            return "$name${if (newer) " (newer)" else ""}\n" +
+                "${if (summary.modified > 0) fmt.format(Date(summary.modified)) else "Date unknown"} · $size"
+        }
         val game = c.console.name(c.unit) ?: "${c.console.label} ${c.unit}"
         val left = if (conflicts.size > 1) " (${conflicts.size} to choose)" else ""
         MaterialAlertDialogBuilder(activity)
             .setTitle("Which save do you want to keep?$left")
             .setMessage(
                 "$game changed on this device and on $hubName since they last matched.\n\n" +
-                    side("This device", here, c.local, here > there) + "\n\n" +
-                    side("Synced save", there, c.remote, there > here) + "\n\n" +
+                    side("This device", c.snapshot.localSummary, here > there) + "\n\n" +
+                    side("Synced save", c.snapshot.remoteSummary, there > here) + "\n\n" +
                     "The save you replace is kept as a backup."
             )
             .setCancelable(false)
-            .setPositiveButton("Use synced save") { _, _ -> resolveThen(activity, c, false, next) }
-            .setNegativeButton("Use this device's") { _, _ -> resolveThen(activity, c, true, next) }
-            .setNeutralButton("Decide later") { _, _ -> forget(c); next() }
+            .setPositiveButton("Use synced save") { _, _ -> resolveThen(activity, c, false, onFailure, next) }
+            .setNegativeButton("Use this device's") { _, _ -> resolveThen(activity, c, true, onFailure, next) }
+            .setNeutralButton("Decide later") { _, _ ->
+                worker.execute {
+                    val error = runCatching {
+                        NativeSaveSession.acquire(context, c.reservationToken).use {
+                            NativeSaveSession.assertIdentity(context, c.snapshot.identity)
+                            forget(c)
+                        }
+                    }.exceptionOrNull()
+                    main.post {
+                        if (error == null) next()
+                        else {
+                            val message = error.message ?: "Saves are in use."
+                            note(activity, message)
+                            asking = false
+                            onFailure?.invoke(message)
+                        }
+                    }
+                }
+            }
             .show()
     }
 
-    private fun resolveThen(activity: Activity, c: Conflict, keepLocal: Boolean, then: () -> Unit) {
+    private fun resolveThen(
+        activity: Activity,
+        c: Conflict,
+        keepLocal: Boolean,
+        onFailure: ((String) -> Unit)?,
+        then: () -> Unit
+    ) {
         worker.execute {
             val error = runCatching { resolve(c, keepLocal) }.exceptionOrNull()
             main.post {
-                if (error != null) note(activity, "Couldn't copy the save: ${error.message}")
-                then()
+                if (error == null) then()
+                else {
+                    val message = "Couldn't copy the save: ${error.message}"
+                    note(activity, message)
+                    asking = false
+                    onFailure?.invoke(message)
+                }
             }
         }
     }
@@ -463,7 +632,49 @@ class SaveSync(
                 .setPositiveButton(android.R.string.ok, null).show()
             return
         }
-        if (hub == null) askConnect(activity) else showStatus(activity)
+        worker.execute {
+            val result = runCatching {
+                NativeSaveSession.acquire(context).use {
+                    consoles.firstNotNullOfOrNull { it.ownerConfirmation() }
+                }
+            }
+            main.post {
+                if (activity.isFinishing || activity.isDestroyed) return@post
+                val error = result.exceptionOrNull()
+                val confirmation = result.getOrNull()
+                when {
+                    error != null -> note(activity, "Couldn't open save sync: ${error.message}")
+                    confirmation != null -> confirmLegacyOwner(activity, confirmation)
+                    hub == null -> askConnect(activity)
+                    else -> showStatus(activity)
+                }
+            }
+        }
+    }
+
+    private fun confirmLegacyOwner(activity: Activity, confirmation: SyncOwnerConfirmation) {
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Verify the original Switch account")
+            .setMessage(confirmation.description)
+            .setPositiveButton("This is the original account") { _, _ ->
+                worker.execute {
+                    val error = runCatching {
+                        NativeSaveSession.acquire(context).use { confirmation.confirm() }
+                    }.exceptionOrNull()
+                    main.post {
+                        if (activity.isFinishing || activity.isDestroyed) return@post
+                        if (error != null) note(activity, "Ownership was not changed: ${error.message}")
+                        else {
+                            note(activity, "Original account recorded. No saves were copied. Use Sync now when ready.")
+                            if (hub == null) askConnect(activity) else showStatus(activity)
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Not this account") { _, _ ->
+                note(activity, "Select the original paired account, then open Save sync again. Saves stay local.")
+            }
+            .show()
     }
 
     private fun askConnect(activity: Activity) {
@@ -527,6 +738,9 @@ class SaveSync(
     }
 
     private fun pick(activity: Activity, me: String, found: List<Pair<String, String>>) {
+        val identity = runCatching {
+            NativeSaveSession.acquire(context).use { NativeSaveSession.identity(context) }
+        }.getOrElse { note(activity, it.message ?: "Saves are in use."); return }
         val b = MaterialAlertDialogBuilder(activity)
         when {
             found.isEmpty() -> b.setTitle("No PC found")
@@ -538,20 +752,22 @@ class SaveSync(
                 .setNeutralButton("Set up your PC") { _, _ -> openHubGuide(activity) }
             found.size == 1 -> b.setTitle("Connect to this PC?")
                 .setMessage("${found[0].second}\n\nYou'll approve $deviceName on the PC next.")
-                .setPositiveButton("Connect") { _, _ -> choose(activity, found[0]) }
+                .setPositiveButton("Connect") { _, _ -> choose(activity, found[0], identity) }
                 .setNeutralButton("Search again") { _, _ -> scan(activity) }
             else -> b.setTitle("Choose your PC")
-                .setItems(found.map { it.second }.toTypedArray()) { _, i -> choose(activity, found[i]) }
+                .setItems(found.map { it.second }.toTypedArray()) { _, i -> choose(activity, found[i], identity) }
                 .setNeutralButton("Search again") { _, _ -> scan(activity) }
         }
         b.setNegativeButton(android.R.string.cancel, null).show()
     }
 
-    private fun choose(activity: Activity, device: Pair<String, String>) {
+    private fun choose(activity: Activity, device: Pair<String, String>, identity: String) {
         val (id, label) = device
         worker.execute {
             // A pending device carries the PC's name; otherwise leave it blank for the PC's hello to fill in.
-            val error = runCatching { connect(id, label.takeUnless { it.startsWith("Syncthing at ") }.orEmpty()) }.exceptionOrNull()
+            val error = runCatching {
+                connect(id, label.takeUnless { it.startsWith("Syncthing at ") }.orEmpty(), identity)
+            }.exceptionOrNull()
             main.post { if (error != null) note(activity, "Couldn't add the PC: ${error.message}") else waitAccept(activity) }
         }
     }
@@ -567,10 +783,12 @@ class SaveSync(
                 if (online) refreshHubName()
                 if (online && folderAccepted()) {
                     main.post { dialog.setTitle("Connected to $hubName"); dialog.setMessage("Comparing saves…") }
-                    val conflicts = runCatching { sync(consoles, 20_000) }.getOrNull()
+                    val result = runCatching { sync(consoles, 20_000) }
+                    val conflicts = result.getOrNull()
                     main.post {
                         dialog.dismiss()
-                        note(activity, "Connected to $hubName. Saves sync before and after every game.")
+                        note(activity, result.exceptionOrNull()?.message
+                            ?: "Connected to $hubName. Saves sync before and after every game.")
                         askConflicts(activity, conflicts.orEmpty()) {}
                     }
                     return@execute
@@ -626,6 +844,11 @@ class SaveSync(
                     append('\n')
                 }
                 append("\nThis device: $deviceName")
+                consoles.mapNotNull { it.scopeDescription }.forEach { append("\n\n$it") }
+                runCatching {
+                    NativeSaveSession.acquire(context).use { consoles.mapNotNull { it.unpairedReason() } }
+                }.getOrElse { listOf(it.message ?: "Saves are in use; sync is deferred.") }
+                    .distinct().forEach { append("\n\n$it") }
             }
             main.post {
                 if (!dialog.isShowing) return@post
@@ -641,10 +864,11 @@ class SaveSync(
             }
             dialog.setMessage("Syncing…")
             worker.execute {
-                val conflicts = runCatching { sync(consoles, 15_000) }.getOrNull()
+                val result = runCatching { sync(consoles, 15_000) }
+                val conflicts = result.getOrNull()
                 main.post {
                     if (!dialog.isShowing) return@post
-                    if (conflicts == null) note(activity, "Couldn't reach $hubName.")
+                    if (conflicts == null) note(activity, result.exceptionOrNull()?.message ?: "Couldn't reach $hubName.")
                     else if (conflicts.isEmpty()) note(activity, "Saves are in sync.")
                     askConflicts(activity, conflicts.orEmpty()) { refresh() }
                 }
@@ -765,8 +989,14 @@ abstract class SaveSyncJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val console = params.extras.getString("console") ?: return false
         Thread {
-            val done = runCatching { saveSync(applicationContext).upload(console) }
-                .onFailure { Log.w("SaveSync", "exit upload $console", it) }.getOrDefault(false)
+            val done = runCatching {
+                if (org.yuzu.yuzu_emu.YuzuApplication.startupDeferred) {
+                    // No Activity is required to finish recovery after the native process releases its lease.
+                    org.yuzu.yuzu_emu.YuzuApplication.application.initializeHost()
+                }
+                check(!org.yuzu.yuzu_emu.YuzuApplication.startupDeferred) { "Guarded host initialization is still deferred" }
+                saveSync(applicationContext).upload(console)
+            }.onFailure { Log.w("SaveSync", "exit upload $console", it) }.getOrDefault(false)
             val what = if (console == SaveSync.EVERY) "periodic sync" else "exit upload $console"
             Log.i("SaveSync", "$what: ${if (done) "on the PC" else "not yet, will retry"}")
             jobFinished(params, !done)

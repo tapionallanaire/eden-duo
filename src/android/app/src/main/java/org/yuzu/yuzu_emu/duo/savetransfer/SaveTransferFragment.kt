@@ -33,6 +33,7 @@ import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.databinding.FragmentSaveTransferBinding
 import org.yuzu.yuzu_emu.model.Game
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.utils.GameHelper
 import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.PathUtil
@@ -53,6 +54,9 @@ class SaveTransferFragment : Fragment() {
     private var sourceSaves: List<SaveEntry> = emptyList()
     private var destinationEntries: Map<String, SaveEntry> = emptyMap()
     private var destination: DestinationSaves? = null
+    private var destinationIdentity: String? = null
+    private var pickerIdentity: String? = null
+    private var pickerPackage: String? = null
     private var games: Map<String, Game> = emptyMap()
     private val selected = mutableSetOf<String>()
     private val copied = mutableSetOf<String>()
@@ -148,13 +152,36 @@ class SaveTransferFragment : Fragment() {
         val context = requireContext().applicationContext
         val selectedPackage = currentSource?.source?.packageName
         val includeDuetPlus = requireArguments().getBoolean(ARG_INCLUDE_DUET_PLUS)
-        withContext(Dispatchers.IO) {
-            games = cachedGames()
-            destination = DestinationSaves(
-                File(PathUtil.saveDir() + NativeLibrary.getDefaultProfileSaveDataRoot(false))
-            )
-            destinationEntries = destination!!.list()
-            sources = SaveSources.available(context, includeDuetPlus)
+        try {
+            withContext(Dispatchers.IO) {
+                NativeSaveSession.acquire(context).use {
+                    val identity = NativeSaveSession.identity(context)
+                    if (destinationIdentity != identity) {
+                        selected.clear()
+                        copied.clear()
+                    }
+                    games = cachedGames()
+                    destination = DestinationSaves(
+                        File(PathUtil.saveDir() + NativeLibrary.getDefaultProfileSaveDataRoot(false))
+                    )
+                    destinationEntries = destination!!.list()
+                    destinationIdentity = identity
+                    sources = SaveSources.available(context, includeDuetPlus)
+                }
+            }
+        } catch (e: IllegalStateException) {
+            destination = null
+            destinationIdentity = null
+            destinationEntries = emptyMap()
+            sourceSaves = emptyList()
+            selected.clear()
+            copied.clear()
+            if (_binding != null) {
+                showDestination()
+                showSource()
+                showSourceMessage(e.message.orEmpty(), access = false)
+            }
+            return
         }
         sourceIndex = sources.indexOfFirst { it.source.packageName == selectedPackage }.coerceAtLeast(0)
         if (currentSource?.source?.packageName != selectedPackage) {
@@ -201,8 +228,13 @@ class SaveTransferFragment : Fragment() {
         val context = requireContext().applicationContext
         var elsewhere: File? = null
         var shared = false
+        var accessError: String? = null
         val saves = withContext(Dispatchers.IO) {
             try {
+                NativeSaveSession.acquire(context).use {
+                    NativeSaveSession.assertIdentity(
+                        context, checkNotNull(destinationIdentity) { "Reload the save/profile selection before browsing." }
+                    )
                 val reader = SourceReader(context, tree)
                 elsewhere = reader.elsewhere
                 shared = reader.elsewhere?.canonicalFile == File(PathUtil.saveDir()).canonicalFile
@@ -211,7 +243,9 @@ class SaveTransferFragment : Fragment() {
                 } else {
                     SaveCatalog.newestPerTitle(reader.saves())
                 }
+                }
             } catch (e: Exception) {
+                if (e is IllegalStateException) accessError = e.message
                 // Revoked access, an uninstalled app, or a provider that went away.
                 Log.warning("[SaveTransfer] Cannot read ${app.source.packageName}: ${e.message}")
                 null
@@ -220,7 +254,7 @@ class SaveTransferFragment : Fragment() {
         if (_binding == null || currentSource != app) return
         binding.sourceLoading.visibility = View.GONE
         if (saves == null) {
-            showSourceMessage(getString(R.string.save_transfer_lost_access, app.source.label), access = true)
+            showSourceMessage(accessError ?: getString(R.string.save_transfer_lost_access, app.source.label), access = accessError == null)
             return
         }
         val outside = elsewhere
@@ -302,7 +336,17 @@ class SaveTransferFragment : Fragment() {
 
     private fun askForAccess() {
         val app = currentSource ?: return
-        pickTree.launch(app.source.initialUri)
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                val identity = checkNotNull(destinationIdentity) { "Reload the save/profile selection before browsing." }
+                NativeSaveSession.assertIdentity(requireContext(), identity)
+                pickerIdentity = identity
+                pickerPackage = app.source.packageName
+                pickTree.launch(app.source.initialUri)
+            }
+        } catch (e: IllegalStateException) {
+            showSourceMessage(e.message.orEmpty(), access = false)
+        }
     }
 
     private fun onTreePicked(uri: Uri?) {
@@ -318,12 +362,21 @@ class SaveTransferFragment : Fragment() {
             return
         }
         try {
+            NativeSaveSession.acquire(requireContext()).use {
+                NativeSaveSession.assertIdentity(
+                    requireContext(), checkNotNull(pickerIdentity) { "The save/profile selection expired; choose the folder again." }
+                )
+                check(pickerPackage == app.source.packageName) { "The selected source changed; choose the folder again." }
             requireContext().contentResolver.takePersistableUriPermission(
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
+            }
         } catch (e: SecurityException) {
             Log.warning("[SaveTransfer] Cannot keep access to ${app.source.packageName}: ${e.message}")
+        } catch (e: IllegalStateException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+            return
         }
         // onResume, which comes next, reloads the sources with the new grant.
     }
@@ -333,6 +386,7 @@ class SaveTransferFragment : Fragment() {
         val app = currentSource ?: return
         val tree = app.grantedTree ?: return
         val target = destination ?: return
+        val identity = destinationIdentity
         viewLifecycleOwner.lifecycleScope.launch {
             if (NativeLibrary.isRunning()) {
                 Toast.makeText(requireContext(), R.string.save_transfer_running, Toast.LENGTH_LONG).show()
@@ -356,6 +410,11 @@ class SaveTransferFragment : Fragment() {
             setBusy(true)
             val context = requireContext().applicationContext
             val failures = withContext(Dispatchers.IO) {
+                try {
+                    NativeSaveSession.acquire(context).use {
+                        NativeSaveSession.assertIdentity(
+                            context, checkNotNull(identity) { "Reload the save/profile selection before transferring." }
+                        )
                 val reader = SourceReader(context, tree)
                 confirmed.mapNotNull { entry ->
                     try {
@@ -368,6 +427,10 @@ class SaveTransferFragment : Fragment() {
                         entry to (e.message ?: e.javaClass.simpleName)
                     }
                 }.also { destinationEntries = target.list() }
+                    }
+                } catch (e: Exception) {
+                    confirmed.map { it to (e.message ?: e.javaClass.simpleName) }
+                }
             }
             if (_binding == null) return@launch
             selected.clear()

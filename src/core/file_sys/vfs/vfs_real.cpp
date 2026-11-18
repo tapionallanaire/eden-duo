@@ -368,6 +368,10 @@ VirtualDir RealVfsFile::GetContainingDirectory() const {
     return base.OpenDirectory(ParentPath(), perms);
 }
 
+std::vector<std::string> RealVfsFile::GetSourcePaths() const {
+    return {path};
+}
+
 bool RealVfsFile::IsWritable() const {
     return True(perms & OpenMode::Write);
 }

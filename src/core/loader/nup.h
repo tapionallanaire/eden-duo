@@ -52,7 +52,8 @@ public:
     ResultStatus ReadControlData(FileSys::NACP& control) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
 
-    // The executable selected from this file, before frontend update or mod overrides.
+    // Native snapshot identity before frontend overrides; absent when the selected RomFS update
+    // and packaged executable have different versions. Emulation's overlay policy is unchanged.
     [[nodiscard]] std::optional<std::pair<u32, FileSys::VirtualDir>> ReadPackagedExeFS() const;
 
 private:

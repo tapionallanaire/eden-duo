@@ -15,7 +15,6 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
@@ -44,9 +43,6 @@ import org.yuzu.yuzu_emu.model.TaskViewModel
 import org.yuzu.yuzu_emu.utils.*
 import org.yuzu.yuzu_emu.utils.ViewUtils.setVisible
 import androidx.core.content.edit
-import androidx.lifecycle.lifecycleScope
-import org.yuzu.yuzu_emu.adapters.GameAdapter
-import org.yuzu.yuzu_emu.duo.nativeplay.PreparedNativeGame
 import org.yuzu.yuzu_emu.activities.EmulationActivity
 import kotlin.text.compareTo
 import androidx.core.net.toUri
@@ -75,9 +71,6 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
 
     private val CHECKED_DECRYPTION = "CheckedDecryption"
     private var checkedDecryption = false
-    private var nativeFailure: Pair<String, String>? = null
-    private var nativeFailureDialog: AlertDialog? = null
-    private var nativeFailureLaunchInProgress = false
 
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(YuzuApplication.applyLanguage(base))
@@ -109,11 +102,6 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
 
         if (savedInstanceState != null) {
             checkedDecryption = savedInstanceState.getBoolean(CHECKED_DECRYPTION)
-            val nativePath = savedInstanceState.getString("NativeFailurePath")
-            val nativeReason = savedInstanceState.getString("NativeFailureReason")
-            if (nativePath != null && nativeReason != null) {
-                nativeFailure = nativePath to nativeReason
-            }
         }
         if (!checkedDecryption) {
             val firstTimeSetup = PreferenceManager.getDefaultSharedPreferences(applicationContext)
@@ -341,10 +329,6 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(CHECKED_DECRYPTION, checkedDecryption)
-        nativeFailure?.let { (path, reason) ->
-            outState.putString("NativeFailurePath", path)
-            outState.putString("NativeFailureReason", reason)
-        }
     }
 
     fun finishSetup(navController: NavController) {
@@ -386,58 +370,8 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         super.onResume()
         applyFullscreenPreference()
         org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this).syncAllInBackground(this) // Duet Plus: save sync
-        showNativeFailure()
-        PreparedNativeGame.watchExits(this) { path, reason ->
-            if (nativeFailure == null) {
-                nativeFailure = path to reason
-                showNativeFailure()
-            }
-        }
     }
 
-    override fun onPause() {
-        PreparedNativeGame.stopWatchingExits()
-        super.onPause()
-    }
-
-    private fun showNativeFailure() {
-        val (path, reason) = nativeFailure ?: return
-        if (nativeFailureDialog != null || nativeFailureLaunchInProgress) return
-        nativeFailureDialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.native_launch_failed)
-            .setMessage(reason)
-            .setPositiveButton(R.string.native_run_emulated) { _, _ ->
-                nativeFailureLaunchInProgress = true
-                lifecycleScope.launch {
-                    try {
-                        val game = gamesViewModel.games.value.firstOrNull { it.path == path }
-                            ?: withContext(Dispatchers.IO) {
-                                GameHelper.getGame(path.toUri(), addedToLibrary = false)
-                            }
-                        if (game == null) {
-                            Toast.makeText(
-                                this@MainActivity,
-                                R.string.loader_error_file_not_found,
-                                Toast.LENGTH_LONG
-                            ).show()
-                        } else {
-                            val navHost = supportFragmentManager
-                                .findFragmentById(R.id.fragment_container) as NavHostFragment
-                            GameAdapter.launchEmulated(this@MainActivity, game, navHost.navController)
-                            nativeFailure = null
-                        }
-                    } finally {
-                        nativeFailureLaunchInProgress = false
-                    }
-                }
-            }
-            .setNegativeButton(android.R.string.cancel) { _, _ -> nativeFailure = null }
-            .setOnCancelListener { nativeFailure = null }
-            .setOnDismissListener {
-                nativeFailureDialog = null
-            }
-            .show()
-    }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
@@ -590,30 +524,4 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         )
     }
 
-    val exportUserData = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/zip")
-    ) { result ->
-        if (result == null) {
-            return@registerForActivityResult
-        }
-        InstallableActions.exportUserData(
-            activity = this,
-            fragmentManager = supportFragmentManager,
-            result = result
-        )
-    }
-
-    val importUserData =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { result ->
-            if (result == null) {
-                return@registerForActivityResult
-            }
-            InstallableActions.importUserData(
-                activity = this,
-                fragmentManager = supportFragmentManager,
-                gamesViewModel = gamesViewModel,
-                driverViewModel = driverViewModel,
-                result = result
-            )
-        }
 }

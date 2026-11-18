@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <string>
@@ -15,6 +16,21 @@
 
 #include <format>
 #include <openssl/evp.h>
+
+#include "common/fs/file.h"
+#include "common/fs/fs.h"
+
+#ifdef __linux__
+#include <cerrno>
+#include <cstddef>
+#include <fcntl.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/nup_writer.h"
@@ -193,6 +209,95 @@ Loader::ResultStatus StatusAfterPatch(std::string nup, Patch&& patch) {
     return NupContainer{std::make_shared<FileSys::VectorVfsFile>(data, "bad.nup")}.GetStatus();
 }
 
+FileSys::VirtualFile MemoryFile(std::string name, std::string_view data) {
+    return std::make_shared<FileSys::VectorVfsFile>(
+        std::vector<u8>{data.begin(), data.end()}, std::move(name));
+}
+
+std::vector<FileSys::Nup::ResolvedPackage> ResolvedPackages() {
+    using FileSys::VectorVfsDirectory;
+    auto exefs = std::make_shared<VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{MemoryFile("main", "effective main"),
+                                         MemoryFile("main.npdm", Npdm(TitleId))});
+    auto romfs = std::make_shared<VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{MemoryFile("data", std::string(5000, 'x'))});
+    auto addon = std::make_shared<VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{MemoryFile("addon", "effective addon")});
+    return {{NupContainer::PackageKind::Update, 1, TitleId, 458752, exefs, romfs},
+            {NupContainer::PackageKind::Addon, 0, 0x0400ABCD00011001ULL, 131072, {}, addon}};
+}
+
+class InterruptedMemoryFile : public FileSys::VectorVfsFile {
+public:
+    InterruptedMemoryFile(bool short_read_, std::atomic_bool* cancel_ = nullptr)
+        : VectorVfsFile(std::vector<u8>(8 * 1024 * 1024, 'r'), "interrupted"),
+          short_read{short_read_}, cancel{cancel_} {}
+
+    size_t Read(u8* data, size_t length, size_t offset) const override {
+        if (cancel) {
+            cancel->store(true);
+            return VectorVfsFile::Read(data, length, offset);
+        }
+        return short_read && length != 0
+                   ? VectorVfsFile::Read(data, length - 1, offset)
+                   : 0;
+    }
+
+private:
+    bool short_read;
+    std::atomic_bool* cancel;
+};
+
+class CancellingMemoryDirectory : public FileSys::VectorVfsDirectory {
+public:
+    explicit CancellingMemoryDirectory(std::atomic_bool& cancel_) : cancel{cancel_} {}
+
+    std::vector<FileSys::VirtualFile> GetFiles() const override {
+        cancel = true;
+        return VectorVfsDirectory::GetFiles();
+    }
+
+private:
+    std::atomic_bool& cancel;
+};
+
+#ifdef __linux__
+// Keep syscall fault injection in a child: the filter is irreversible and must not affect
+// Catch or other tests. For openat only directory opens fail; other selected calls always fail.
+bool WithDirectoryFailure(int syscall_number, const std::function<bool()>& scenario) {
+    const pid_t child = fork();
+    if (child < 0) {
+        return false;
+    }
+    if (child == 0) {
+        sock_filter filter[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<unsigned int>(syscall_number), 0, 3),
+            {static_cast<unsigned short>(BPF_LD | BPF_W |
+                                         (syscall_number == SYS_openat ? BPF_ABS : BPF_IMM)),
+             0, 0, syscall_number == SYS_openat
+                       ? static_cast<unsigned int>(offsetof(seccomp_data, args[2]))
+                       : static_cast<unsigned int>(O_DIRECTORY)},
+            BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, O_DIRECTORY, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EIO),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        const sock_fprog program{static_cast<unsigned short>(std::size(filter)), filter};
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) {
+            _exit(2);
+        }
+        try {
+            _exit(scenario() ? 0 : 1);
+        } catch (...) {
+            _exit(3);
+        }
+    }
+    int status{};
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+
 } // namespace
 
 TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContainer", "[nup]") {
@@ -211,6 +316,7 @@ TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContain
     NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
     REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE_FALSE(nup.HasIndexedProgramLayout(0));
 
     const auto& packages = nup.GetPackages();
     REQUIRE(packages.size() == 4);
@@ -273,6 +379,89 @@ TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContain
     REQUIRE(random.codec == 0);
     REQUIRE(random.extent_size == 3000);
     REQUIRE_FALSE(by_name.contains(".listing"));
+}
+
+TEST_CASE("NUP indexed snapshot keeps program one at root and aliases its extents", "[nup]") {
+    TempDir t;
+    auto packages = ResolvedPackages();
+    auto& application = packages.front();
+    application.title_id = 0x040015100B514001ULL;
+    application.exefs = std::make_shared<FileSys::VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{
+            MemoryFile("main", "program one executable"),
+            MemoryFile("main.npdm", Npdm(0x040015100B514001ULL))});
+    application.program0_romfs = std::make_shared<FileSys::VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{MemoryFile("original", "program zero resources")});
+    const auto archive = t.path / "generation" / "indexed.nup";
+    FileSys::Nup::PackOptions options{.zstd_level = 0};
+    std::string error;
+    const auto result = FileSys::Nup::PackResolved(packages, archive, options, {}, nullptr, &error);
+    INFO(error);
+    REQUIRE(result == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem real;
+    const auto file = real.OpenFile(archive.string(), FileSys::OpenMode::Read);
+    NupContainer nup{file};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(nup.HasIndexedProgramLayout(0));
+    REQUIRE(nup.GetPackages().size() == 2);
+    REQUIRE(nup.GetPackages()[0].title_id == 0x040015100B514001ULL);
+    const auto root = nup.GetPackageDir(0);
+    const auto original = root->GetDirectoryRelative("program/0/romfs");
+    const auto selected_exefs = root->GetDirectoryRelative("program/1/exefs");
+    const auto selected_romfs = root->GetDirectoryRelative("program/1/romfs");
+    REQUIRE(original != nullptr);
+    REQUIRE(selected_exefs != nullptr);
+    REQUIRE(selected_romfs != nullptr);
+    REQUIRE(Read(original->GetFile("original")) == "program zero resources");
+    REQUIRE(PackedTree(selected_exefs) == PackedTree(nup.GetExeFSDir(0)));
+    REQUIRE(PackedTree(selected_romfs) == PackedTree(nup.GetRomFSDir(0)));
+    Loader::AppLoader_NUP loader{file};
+    u64 program_id{};
+    REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+    REQUIRE(program_id == 0x040015100B514001ULL);
+    REQUIRE(loader.ReadPackagedExeFS()->first == 458752);
+    std::map<std::string, RawFile> first;
+    size_t aliases{};
+    for (const auto& member : RawFiles(ReadAll(archive))) {
+        if (const auto [it, inserted] = first.emplace(member.name, member); !inserted) {
+            ++aliases;
+            REQUIRE(member.extent_offset == it->second.extent_offset);
+            REQUIRE(member.extent_size == it->second.extent_size);
+        }
+    }
+    REQUIRE(aliases == 3);
+    auto incoherent = ReadAll(archive);
+    const u64 toc = Le(incoherent, 0x08, 8);
+    const u64 file_records = toc + 0x30 + Le(incoherent, toc + 0x04, 4) * 0x40 +
+                             Le(incoherent, toc + 0x08, 8) * 0x18;
+    const u64 pool = toc + Le(incoherent, toc + 0x18, 8);
+    bool changed{};
+    for (u64 i = 0; i < Le(incoherent, toc + 0x10, 8); ++i) {
+        const u64 record = file_records + i * 0x50;
+        const auto name = incoherent.substr(pool + Le(incoherent, record, 4),
+                                           Le(incoherent, record + 4, 4));
+        if (name == "main") {
+            incoherent[record + 0x20] ^= 1;
+            changed = true;
+            break;
+        }
+    }
+    REQUIRE(changed);
+    const auto toc_hash = Sha256(std::string_view{incoherent}.substr(toc, Le(incoherent, 0x10, 8)));
+    std::copy(toc_hash.begin(), toc_hash.end(), incoherent.begin() + 0x18);
+    NupContainer mismatched{MemoryFile("incoherent.nup", incoherent)};
+    REQUIRE(mismatched.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE_FALSE(mismatched.HasIndexedProgramLayout(0));
+    const auto original_romfs = application.program0_romfs;
+    application.program0_romfs = nullptr;
+    REQUIRE(FileSys::Nup::PackResolved(packages, t.path / "missing-original" / "input.nup") ==
+            FileSys::Nup::PackResult::InvalidSource);
+    application.program0_romfs = original_romfs;
+    application.title_id = TitleId;
+    application.exefs = ResolvedPackages().front().exefs;
+    REQUIRE(FileSys::Nup::PackResolved(packages, t.path / "invalid" / "input.nup") ==
+            FileSys::Nup::PackResult::InvalidSource);
 }
 
 TEST_CASE("NUP reads zstd members above the memory cache through a temporary file", "[nup]") {
@@ -874,4 +1063,319 @@ TEST_CASE("NUP edits localized titles and keeps the rest", "[nup]") {
     FileSys::NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     REQUIRE(nup.GetPackages()[0].localized_titles.empty());
     REQUIRE(nup.GetPackages()[0].title_name == "Renamed");
+}
+
+TEST_CASE("NUP resolved exports cannot adopt another producer's empty generation", "[nup]") {
+    TempDir t;
+    const auto generation = t.path / "claimed";
+    REQUIRE(fs::create_directory(generation));
+    const auto packages = ResolvedPackages();
+    REQUIRE(FileSys::Nup::PackResolved(packages, generation / "game.nup") ==
+            FileSys::Nup::PackResult::IoError);
+    REQUIRE(fs::is_empty(generation));
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+}
+
+#ifdef __linux__
+TEST_CASE("NUP resolved publication does not require renameat2 support", "[nup]") {
+    TempDir t;
+    const auto archive = t.path / "generation" / "game.nup";
+    const auto packages = ResolvedPackages();
+    REQUIRE(WithDirectoryFailure(SYS_renameat2, [&] {
+        return FileSys::Nup::PackResolved(packages, archive) ==
+               FileSys::Nup::PackResult::Success;
+    }));
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(Read(nup.GetRomFSDir(0)->GetFile("data")) == std::string(5000, 'x'));
+}
+#endif
+
+TEST_CASE("NUP packs one resolved effective version and exact DLC from VFS", "[nup]") {
+    TempDir t;
+    const auto archive = t.path / "generation" / "effective.nup";
+    auto packages = ResolvedPackages();
+    const auto original_npdm = Read(packages[0].exefs->GetFile("main.npdm"));
+    FileSys::Nup::PackProgress last;
+    REQUIRE(FileSys::Nup::PackResolved(packages, archive, {},
+                                     [&](const auto& progress) { last = progress; }) ==
+            FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+    REQUIRE(nup.GetPackages().size() == 2);
+    REQUIRE_FALSE(nup.FindBasePackage());
+    REQUIRE(nup.GetPackages()[0].kind == NupContainer::PackageKind::Update);
+    REQUIRE(nup.GetPackages()[0].standalone_update);
+    REQUIRE(nup.GetPackages()[0].version == 458752);
+    REQUIRE(nup.GetPackages()[0].title_id == TitleId);
+    REQUIRE(nup.GetPackages()[1].version == 131072);
+    REQUIRE(nup.GetPackages()[1].title_id == 0x0400ABCD00011001ULL);
+    REQUIRE(Read(nup.GetExeFSDir(0)->GetFile("main")) == "effective main");
+    REQUIRE(Read(nup.GetExeFSDir(0)->GetFile("main.npdm")) == original_npdm);
+    REQUIRE(Read(nup.GetRomFSDir(0)->GetFile("data")) == std::string(5000, 'x'));
+    REQUIRE(Read(nup.GetRomFSDir(1)->GetFile("addon")) == "effective addon");
+    REQUIRE(Read(packages[0].exefs->GetFile("main.npdm")) == original_npdm);
+    REQUIRE(last.files_done == last.files_total);
+    REQUIRE(last.bytes_done == last.bytes_total);
+    REQUIRE_FALSE(fs::exists(archive.string() + ".part"));
+    Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    const auto packaged = loader.ReadPackagedExeFS();
+    REQUIRE(packaged);
+    REQUIRE(packaged->first == 458752);
+}
+
+TEST_CASE("NUP resolved source short reads and failures never publish output", "[nup]") {
+    TempDir t;
+    for (const bool short_read : {false, true}) {
+        auto packages = ResolvedPackages();
+        auto file = std::make_shared<InterruptedMemoryFile>(short_read);
+        std::static_pointer_cast<FileSys::VectorVfsDirectory>(packages[0].romfs)->AddFile(file);
+        const auto archive = t.path / (short_read ? "short" : "failed") / "game.nup";
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive) ==
+                FileSys::Nup::PackResult::IoError);
+        REQUIRE_FALSE(fs::exists(archive));
+        REQUIRE_FALSE(fs::exists(archive.string() + ".part"));
+        REQUIRE(file->GetSize() == 8 * 1024 * 1024);
+        REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+    }
+}
+
+TEST_CASE("NUP resolved cancellation preserves sources and previous archives", "[nup]") {
+    TempDir t;
+    const auto old_archive = t.path / "old.nup";
+    Put(old_archive, "old immutable archive");
+    auto packages = ResolvedPackages();
+    std::atomic_bool cancel{};
+    REQUIRE(FileSys::Nup::PackResolved(packages, old_archive, {}, {}, &cancel) ==
+            FileSys::Nup::PackResult::IoError);
+    REQUIRE(ReadAll(old_archive) == "old immutable archive");
+
+    const auto archive = t.path / "cancelled" / "game.nup";
+    SECTION("Before traversal") {
+        cancel = true;
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive, {}, {}, &cancel) ==
+                FileSys::Nup::PackResult::Cancelled);
+    }
+    SECTION("Between bounded source reads") {
+        std::static_pointer_cast<FileSys::VectorVfsDirectory>(packages[0].romfs)
+            ->AddFile(std::make_shared<InterruptedMemoryFile>(false, &cancel));
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive, {}, {}, &cancel) ==
+                FileSys::Nup::PackResult::Cancelled);
+    }
+    SECTION("After the last file before promotion") {
+        REQUIRE(FileSys::Nup::PackResolved(
+                    packages, archive, {},
+                    [&](const auto& progress) {
+                        if (progress.files_total != 0 &&
+                            progress.files_done == progress.files_total) {
+                            cancel = true;
+                        }
+                    },
+                    &cancel) == FileSys::Nup::PackResult::Cancelled);
+    }
+    SECTION("An archive appearing during packing is never replaced") {
+        REQUIRE(FileSys::Nup::PackResolved(
+                    packages, archive, {},
+                    [&](const auto& progress) {
+                        if (progress.files_total != 0 &&
+                            progress.files_done == progress.files_total) {
+                            Put(archive, "concurrent archive");
+                        }
+                    }) == FileSys::Nup::PackResult::IoError);
+        REQUIRE(ReadAll(archive) == "concurrent archive");
+    }
+    if (cancel) {
+        REQUIRE_FALSE(fs::exists(archive));
+    }
+    REQUIRE_FALSE(fs::exists(archive.string() + ".part"));
+    REQUIRE(ReadAll(old_archive) == "old immutable archive");
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+    REQUIRE(Read(packages[0].romfs->GetFile("data")) == std::string(5000, 'x'));
+}
+
+TEST_CASE("NUP resolved traversal cancellation never creates an archive", "[nup]") {
+    TempDir t;
+    auto packages = ResolvedPackages();
+    std::atomic_bool cancel{};
+    packages[0].romfs = std::make_shared<CancellingMemoryDirectory>(cancel);
+    const auto archive = t.path / "traversal" / "game.nup";
+    REQUIRE(FileSys::Nup::PackResolved(packages, archive, {}, {}, &cancel) ==
+            FileSys::Nup::PackResult::Cancelled);
+    REQUIRE_FALSE(fs::exists(archive));
+    REQUIRE_FALSE(fs::exists(archive.string() + ".part"));
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+}
+
+TEST_CASE("NUP resolved exports require complete identity and preserve unrelated partials", "[nup]") {
+    TempDir t;
+    auto packages = ResolvedPackages();
+    const auto archive = t.path / "invalid" / "game.nup";
+    SECTION("NPDM identity is not rewritten") {
+        packages[0].title_id += 1;
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive) ==
+                FileSys::Nup::PackResult::InvalidSource);
+        REQUIRE(Read(packages[0].exefs->GetFile("main.npdm")) == Npdm(TitleId));
+    }
+    SECTION("Only one executable snapshot is accepted") {
+        auto other = packages[0];
+        other.title_id += 1;
+        packages.push_back(std::move(other));
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive) ==
+                FileSys::Nup::PackResult::InvalidSource);
+    }
+    SECTION("Sources cannot be deleted") {
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive, {.delete_sources = true}) ==
+                FileSys::Nup::PackResult::InvalidSource);
+    }
+    SECTION("Pre-existing partial output is not owned by this export") {
+        Put(archive.string() + ".part", "another export");
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive) ==
+                FileSys::Nup::PackResult::IoError);
+        REQUIRE(ReadAll(archive.string() + ".part") == "another export");
+    }
+    SECTION("Base version zero retains the original program") {
+        packages[0].kind = NupContainer::PackageKind::Base;
+        packages[0].flags = 0;
+        packages[0].version = 0;
+        REQUIRE(FileSys::Nup::PackResolved(packages, archive) ==
+                FileSys::Nup::PackResult::Success);
+        FileSys::RealVfsFilesystem real;
+        NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(nup.GetPackages()[0].kind == NupContainer::PackageKind::Base);
+        REQUIRE(nup.GetPackages()[0].version == 0);
+        REQUIRE(Read(nup.GetExeFSDir(0)->GetFile("main.npdm")) == Npdm(TitleId));
+        Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+        const auto packaged = loader.ReadPackagedExeFS();
+        REQUIRE(packaged);
+        REQUIRE(packaged->first == 0);
+        return;
+    }
+    REQUIRE_FALSE(fs::exists(archive));
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+}
+
+TEST_CASE("NUP resolved callbacks can cancel discovery and source chunks", "[nup]") {
+    TempDir t;
+    auto packages = ResolvedPackages();
+    const auto archive = t.path / "callback-cancel" / "game.nup";
+    std::atomic_bool cancel{};
+    SECTION("Discovery polls before output exists") {
+        size_t polls = 0;
+        REQUIRE(FileSys::Nup::PackResolved(
+                    packages, archive, {},
+                    [&](const auto& progress) {
+                        if (progress.files_total == 0 && ++polls == 3) {
+                            cancel = true;
+                        }
+                    },
+                    &cancel) == FileSys::Nup::PackResult::Cancelled);
+    }
+    SECTION("Chunk progress polls below the loose writer report threshold") {
+        std::static_pointer_cast<FileSys::VectorVfsDirectory>(packages[0].romfs)->AddFile(
+            MemoryFile("large", std::string(8 * 1024 * 1024, 'x')));
+        REQUIRE(FileSys::Nup::PackResolved(
+                    packages, archive, {.zstd_level = 0},
+                    [&](const auto& progress) {
+                        if (progress.bytes_done >= 4 * 1024 * 1024 &&
+                            progress.files_done < progress.files_total) {
+                            cancel = true;
+                        }
+                    },
+                    &cancel) == FileSys::Nup::PackResult::Cancelled);
+    }
+    REQUIRE_FALSE(fs::exists(archive));
+    REQUIRE_FALSE(fs::exists(archive.string() + ".part"));
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+    REQUIRE(Read(packages[0].romfs->GetFile("data")) == std::string(5000, 'x'));
+}
+
+TEST_CASE("Directory durability never treats failed sync as success", "[nup][fs]") {
+    TempDir t;
+#ifdef _WIN32
+    REQUIRE(Common::FS::SyncDirectory(t.path) == std::errc::operation_not_supported);
+#else
+    REQUIRE_FALSE(Common::FS::SyncDirectory(t.path));
+    REQUIRE(Common::FS::SyncDirectory(t.path / "missing"));
+    Put(t.path / "not-a-directory", "existing file");
+    REQUIRE(Common::FS::SyncDirectory(t.path / "not-a-directory") ==
+            std::errc::not_a_directory);
+#endif
+#ifdef __linux__
+    for (const int syscall_number : {SYS_openat, SYS_fsync, SYS_close}) {
+        INFO(syscall_number);
+        REQUIRE(WithDirectoryFailure(syscall_number, [&] {
+            return Common::FS::SyncDirectory(t.path) == std::errc::io_error;
+        }));
+    }
+#endif
+}
+
+#ifdef __linux__
+TEST_CASE("File data commit does not hide a subsequent close failure", "[nup][fs]") {
+    TempDir t;
+    const auto path = t.path / "committed";
+    const std::string bytes{"committed data"};
+    REQUIRE(WithDirectoryFailure(SYS_close, [&] {
+        Common::FS::IOFile file{path, Common::FS::FileAccessMode::Write};
+        return file.IsOpen() && file.WriteString(bytes) == 14 && file.Commit() &&
+               !file.Close() && !file.IsOpen();
+    }));
+    REQUIRE(ReadAll(path) == "committed data");
+}
+
+TEST_CASE("NUP resolved directory durability failure removes only owned publication", "[nup]") {
+    TempDir t;
+    const auto archive = t.path / "unsynced" / "game.nup";
+    const auto competing = t.path / "competing.nup";
+    Put(competing, "another export");
+    const auto packages = ResolvedPackages();
+    REQUIRE(WithDirectoryFailure(SYS_openat, [&] {
+        std::string error;
+        return FileSys::Nup::PackResolved(packages, archive, {}, {}, nullptr, &error) ==
+                   FileSys::Nup::PackResult::IoError &&
+               error.find("directory") != std::string::npos &&
+               !fs::exists(archive) && !fs::exists(archive.string() + ".part") &&
+               ReadAll(competing) == "another export";
+    }));
+    REQUIRE(Read(packages[0].exefs->GetFile("main")) == "effective main");
+}
+#endif
+
+TEST_CASE("NUP native identity rejects RomFS from a different executable version", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    Put(root / "base/exefs/main", "base main");
+    Put(root / "base/exefs/main.npdm", Npdm(TitleId));
+    Put(root / "base/romfs/data", "base data");
+    Put(root / "updates/65536/romfs/data", "new data");
+    SECTION("Base executable with a higher RomFS-only update") {}
+    SECTION("Older executable update with a higher RomFS-only update") {
+        Put(root / "updates/32768/exefs/main", "older update main");
+        Put(root / "updates/32768/exefs/main.npdm", Npdm(TitleId));
+    }
+    SECTION("Matching executable and RomFS update remain accepted") {
+        Put(root / "updates/65536/exefs/main", "new update main");
+        Put(root / "updates/65536/exefs/main.npdm", Npdm(TitleId));
+    }
+    const auto archive = t.path / "mixed.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem real;
+    Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    const auto identity = loader.ReadPackagedExeFS();
+    if (fs::exists(root / "updates/65536/exefs")) {
+        REQUIRE(identity);
+        REQUIRE(identity->first == 65536);
+        REQUIRE(Read(identity->second->GetFile("main")) == "new update main");
+    } else {
+        REQUIRE_FALSE(identity);
+        // Emulation retains its existing best-effort view; only native identity is strict.
+        u64 program_id{};
+        REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+        REQUIRE(program_id == TitleId);
+    }
 }

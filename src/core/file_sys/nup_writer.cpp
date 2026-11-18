@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -15,6 +17,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,7 +26,12 @@
 #include <openssl/evp.h>
 #include <zstd.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "common/fs/file.h"
+#include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_container.h"
@@ -323,6 +331,8 @@ struct PlanEntry {
     std::string path;   // inside the package tree, e.g. "romfs/Data/file.bin"
     std::string source; // relative to the dump root
     bool directory{};
+    VirtualFile file{}; // retained concrete source for resolved exports; never journaled
+    u64 size{};
 };
 
 struct Plan {
@@ -802,6 +812,189 @@ private:
         loaders;
 };
 
+void CheckCancelled(const std::atomic_bool* cancel) {
+    if (cancel && cancel->load()) {
+        throw PackError(PackResult::Cancelled, "cancelled");
+    }
+}
+
+void PollResolvedDiscovery(const std::atomic_bool* cancel,
+                           const std::function<void(const PackProgress&)>& progress) {
+    CheckCancelled(cancel);
+    if (progress) {
+        progress({});
+    }
+    CheckCancelled(cancel);
+}
+
+void CollectResolvedTree(Plan& plan, u32 package, const VirtualDir& dir,
+                         const std::string& prefix, const std::atomic_bool* cancel,
+                         std::unordered_set<const VfsDirectory*>& ancestors,
+                         const std::function<void(const PackProgress&)>& progress) {
+    PollResolvedDiscovery(cancel, progress);
+    if (!dir || !dir->IsReadable() || !ancestors.insert(dir.get()).second) {
+        throw PackError(PackResult::InvalidSource, "unreadable or cyclic directory: " + prefix);
+    }
+    plan.entries.push_back({package, prefix, {}, true});
+    std::unordered_set<std::string> names;
+    const auto check_name = [&](const std::string& name) {
+        if (name.empty() || name == "." || name == ".." ||
+            name.find_first_of("/\\") != std::string::npos ||
+            name.find('\0') != std::string::npos || !names.insert(name).second) {
+            throw PackError(PackResult::InvalidSource, "invalid or duplicate VFS name in " + prefix);
+        }
+    };
+    const auto files = dir->GetFiles();
+    PollResolvedDiscovery(cancel, progress);
+    for (const auto& file : files) {
+        PollResolvedDiscovery(cancel, progress);
+        if (!file || !file->IsReadable()) {
+            throw PackError(PackResult::InvalidSource, "unreadable file in " + prefix);
+        }
+        const auto name = file->GetName();
+        check_name(name);
+        plan.entries.push_back({package, prefix + "/" + name, {}, false, file, file->GetSize()});
+    }
+    const auto directories = dir->GetSubdirectories();
+    PollResolvedDiscovery(cancel, progress);
+    for (const auto& child : directories) {
+        PollResolvedDiscovery(cancel, progress);
+        if (!child) {
+            throw PackError(PackResult::InvalidSource, "missing directory in " + prefix);
+        }
+        const auto name = child->GetName();
+        check_name(name);
+        CollectResolvedTree(plan, package, child, prefix + "/" + name, cancel, ancestors, progress);
+    }
+    ancestors.erase(dir.get());
+    PollResolvedDiscovery(cancel, progress);
+}
+
+std::vector<u8> ReadResolvedMetadata(
+    const PlanEntry& entry, const std::atomic_bool* cancel,
+    const std::function<void(const PackProgress&)>& progress) {
+    // NPDM must fit a metadata TLV; ordinary file content is always streamed, never copied here.
+    if (entry.size > std::numeric_limits<u32>::max() - 8) {
+        throw PackError(PackResult::InvalidSource, "NPDM is too large for NUP metadata");
+    }
+    std::vector<u8> bytes(static_cast<size_t>(entry.size));
+    for (size_t offset = 0; offset < bytes.size();) {
+        PollResolvedDiscovery(cancel, progress);
+        const auto count = std::min(ReadBufferSize, bytes.size() - offset);
+        if (entry.file->Read(bytes.data() + offset, count, offset) != count) {
+            throw PackError(PackResult::IoError, "cannot read resolved NPDM");
+        }
+        offset += count;
+    }
+    PollResolvedDiscovery(cancel, progress);
+    if (entry.file->GetSize() != entry.size) {
+        throw PackError(PackResult::IoError, "resolved NPDM changed while packing");
+    }
+    return bytes;
+}
+
+std::vector<u8> SerializeLocalizedTitles(
+    const std::vector<std::pair<std::string, std::string>>& titles);
+
+Plan BuildResolvedPlan(const std::vector<ResolvedPackage>& packages, const Metadata& metadata,
+                       const std::atomic_bool* cancel,
+                       const std::function<void(const PackProgress&)>& progress) {
+    CheckCancelled(cancel);
+    if (packages.empty() || packages.size() > std::numeric_limits<u32>::max()) {
+        throw PackError(PackResult::InvalidSource, "expected one resolved application and its DLC");
+    }
+    Plan plan;
+    bool have_application = false;
+    std::unordered_set<u64> title_ids;
+    std::unordered_set<const VfsDirectory*> ancestors;
+    for (const auto& package : packages) {
+        PollResolvedDiscovery(cancel, progress);
+        const auto kind = static_cast<u8>(package.kind);
+        const bool application = kind == KindBase || kind == KindUpdate;
+        if (package.title_id == 0 || !title_ids.insert(package.title_id).second ||
+            !package.romfs ||
+            (application && (have_application || !package.exefs ||
+                             (kind == KindBase && (package.version != 0 || package.flags != 0)) ||
+                             (kind == KindUpdate &&
+                              (package.version == 0 || package.flags != FlagStandaloneUpdate)))) ||
+            (!application && (kind != KindAddon || package.flags != 0 || package.exefs))) {
+            throw PackError(PackResult::InvalidSource, "invalid complete resolved package");
+        }
+        if ((package.program0_romfs && !application) ||
+            (application && (package.title_id & 0xFFF) != 0 &&
+             ((package.title_id & 0xFFF) != 1 || !package.program0_romfs)) ||
+            (package.program0_romfs && (package.title_id & 0xFFF) != 1)) {
+            throw PackError(PackResult::InvalidSource,
+                            "indexed snapshot requires program one and original program zero RomFS");
+        }
+        const auto index = static_cast<u32>(plan.packages.size());
+        const auto first_entry = plan.entries.size();
+        if (package.exefs) {
+            CollectResolvedTree(plan, index, package.exefs, "exefs", cancel, ancestors, progress);
+        }
+        CollectResolvedTree(plan, index, package.romfs, "romfs", cancel, ancestors, progress);
+        if (package.program0_romfs) {
+            const auto selected_end = plan.entries.size();
+            plan.entries.push_back({index, "program", {}, true});
+            plan.entries.push_back({index, "program/0", {}, true});
+            CollectResolvedTree(plan, index, package.program0_romfs, "program/0/romfs",
+                                cancel, ancestors, progress);
+            plan.entries.push_back({index, "program/1", {}, true});
+            for (size_t i = first_entry; i < selected_end; ++i) {
+                PollResolvedDiscovery(cancel, progress);
+                auto alias = plan.entries[i];
+                alias.path = "program/1/" + alias.path;
+                plan.entries.push_back(std::move(alias));
+            }
+        }
+
+        std::vector<std::pair<u16, std::vector<u8>>> tlvs;
+        if (application) {
+            have_application = true;
+            const PlanEntry* npdm = nullptr;
+            bool have_main = false;
+            for (size_t i = first_entry; i < plan.entries.size(); ++i) {
+                PollResolvedDiscovery(cancel, progress);
+                const auto& entry = plan.entries[i];
+                if (!entry.directory && entry.path == "exefs/main.npdm") {
+                    npdm = &entry;
+                }
+                have_main |= !entry.directory && entry.path == "exefs/main" && entry.size != 0;
+            }
+            if (!npdm || !have_main) {
+                throw PackError(PackResult::InvalidSource, "resolved ExeFS needs main and main.npdm");
+            }
+            auto bytes = ReadResolvedMetadata(*npdm, cancel, progress);
+            if (NpdmProgramId(bytes) != package.title_id) {
+                throw PackError(PackResult::InvalidSource, "resolved NPDM program ID mismatch");
+            }
+            tlvs.emplace_back(TlvNpdm, std::move(bytes));
+            for (const auto& [type, value] :
+                 {std::pair{TlvTitleName, &metadata.title_name},
+                  std::pair{TlvPublisher, &metadata.publisher},
+                  std::pair{TlvDisplayVersion, &metadata.display_version}}) {
+                if (!value->empty()) {
+                    tlvs.emplace_back(type, StringBytes(*value));
+                }
+            }
+            if (!metadata.icon.empty()) {
+                tlvs.emplace_back(TlvIcon, metadata.icon);
+            }
+            if (!metadata.localized_titles.empty()) {
+                tlvs.emplace_back(TlvLocalizedTitles,
+                                  SerializeLocalizedTitles(metadata.localized_titles));
+            }
+        }
+        plan.packages.push_back({kind, package.flags, package.title_id, package.version,
+                                 SerializeTlvs(std::move(tlvs))});
+    }
+    if (!have_application) {
+        throw PackError(PackResult::InvalidSource, "missing resolved application package");
+    }
+    PollResolvedDiscovery(cancel, progress);
+    return plan;
+}
+
 Json PlanToJson(const Plan& plan) {
     Json packages = Json::array();
     for (const auto& package : plan.packages) {
@@ -887,20 +1080,40 @@ class Packer {
 public:
     Packer(const fs::path& dump_root_, const fs::path& archive_, const PackOptions& options_,
            const std::function<void(const PackProgress&)>& progress_,
-           const std::atomic_bool* cancel_)
+           const std::atomic_bool* cancel_,
+           const std::vector<ResolvedPackage>* resolved_ = nullptr)
         : dump_root{dump_root_}, archive{archive_}, part{WithSuffix(archive_, ".part")},
           journal{WithSuffix(archive_, ".journal")}, options{options_}, progress_cb{progress_},
-          cancel{cancel_} {}
+          cancel{cancel_}, resolved{resolved_} {}
 
     PackResult Run() {
         std::error_code ec;
         if (fs::exists(archive, ec)) {
             throw PackError(PackResult::IoError, "archive already exists: " + ToUtf8(archive));
         }
+        if (resolved) {
+            if (options.delete_sources) {
+                throw PackError(PackResult::InvalidSource,
+                                "resolved exports cannot delete sources");
+            }
+            for (const auto& path : {part, journal}) {
+                if (fs::symlink_status(path, ec).type() != fs::file_type::not_found) {
+                    throw PackError(PackResult::IoError, "output already exists: " + ToUtf8(path));
+                }
+            }
+            plan = BuildResolvedPlan(*resolved, options.metadata, cancel, progress_cb);
+            layout = BuildLayout(plan);
+            CheckCancelled(cancel);
+            // One producer owns this entire generation. Android FUSE may support neither
+            // renameat2(NOREPLACE) nor hard links, but exclusive mkdir is supported.
+            if (!fs::create_directory(archive.parent_path(), ec)) {
+                throw PackError(PackResult::IoError, "cannot reserve output generation: " +
+                    (ec ? ec.message() : "directory already exists"));
+            }
+            generation_owned = true;
+            OpenNew();
         // A journal without a complete plan line was cut short before anything was deleted.
-        const bool resume =
-            options.delete_sources && HasResumableJournal(archive) && LoadJournal();
-        if (resume) {
+        } else if (options.delete_sources && HasResumableJournal(archive) && LoadJournal()) {
             OpenForResume();
         } else {
             if (!IsLooseDump(dump_root)) {
@@ -926,6 +1139,9 @@ public:
         Report();
 
         for (size_t i = 0; i < layout.files.size(); ++i) {
+            if (resolved) {
+                CheckCancelled(cancel);
+            }
             if (done[i]) {
                 continue;
             }
@@ -940,7 +1156,40 @@ public:
         }
 
         Finish();
-        out.Close();
+        if (!out.Close() && resolved) {
+            throw PackError(PackResult::IoError, "cannot close " + ToUtf8(part));
+        }
+        if (resolved) {
+            CheckCancelled(cancel);
+            // Publication stays inside our exclusively reserved generation; other exporters
+            // must claim a different directory, never just a different partial filename.
+            if (fs::exists(archive, ec) || ec) {
+                throw PackError(PackResult::IoError, "archive appeared in owned generation");
+            }
+#ifdef _WIN32
+            if (!MoveFileExW(part.c_str(), archive.c_str(), MOVEFILE_WRITE_THROUGH)) {
+                ec = std::error_code(GetLastError(), std::system_category());
+            }
+#else
+            fs::rename(part, archive, ec);
+#endif
+            if (ec) {
+                throw PackError(PackResult::IoError, "cannot publish archive: " + ec.message());
+            }
+            part_owned = false;
+            archive_owned = true;
+#ifndef _WIN32
+            if (const auto error = Common::FS::SyncDirectory(archive.parent_path())) {
+                throw PackError(PackResult::IoError,
+                                "cannot sync archive directory: " + error.message());
+            }
+            if (const auto error = Common::FS::SyncDirectory(archive.parent_path().parent_path())) {
+                throw PackError(PackResult::IoError,
+                                "cannot sync generation parent directory: " + error.message());
+            }
+#endif
+            return PackResult::Success;
+        }
         fs::rename(part, archive, ec);
         if (ec) {
             throw PackError(PackResult::IoError, "cannot rename archive: " + ec.message());
@@ -955,18 +1204,45 @@ public:
 
     void Abort() {
         out.Close();
-        if (!options.delete_sources) {
+        if (!options.delete_sources && (!resolved || part_owned)) {
             RemoveFile(part);
+        }
+        if (archive_owned) {
+            RemoveFile(archive);
+        }
+        if (generation_owned) {
+            // Never recurse: an unexpected foreign entry must survive rollback.
+            RemoveFile(archive.parent_path());
         }
     }
 
 private:
     void OpenNew() {
-        RemoveFile(journal);
-        out.Open(part, Common::FS::FileAccessMode::Write);
+        if (resolved) {
+            // Reserve the partial name exclusively as well; a competing export owns its own
+            // partial output and must never have that output truncated or removed by Abort.
+#ifdef _WIN32
+            std::FILE* reservation = nullptr;
+            _wfopen_s(&reservation, part.c_str(), L"wbx");
+#else
+            std::FILE* reservation = std::fopen(part.c_str(), "wbx");
+#endif
+            if (!reservation) {
+                throw PackError(PackResult::IoError, "cannot create " + ToUtf8(part));
+            }
+            part_owned = true;
+            if (std::fclose(reservation) != 0) {
+                throw PackError(PackResult::IoError, "cannot close " + ToUtf8(part));
+            }
+            out.Open(part, Common::FS::FileAccessMode::ReadWrite);
+        } else {
+            RemoveFile(journal);
+            out.Open(part, Common::FS::FileAccessMode::Write);
+        }
         if (!out.IsOpen()) {
             throw PackError(PackResult::IoError, "cannot create " + ToUtf8(part));
         }
+        part_owned = true;
         WriteZeros(layout.blob_offset);
         cursor = layout.blob_offset;
         if (options.delete_sources) {
@@ -1048,6 +1324,13 @@ private:
                 progress.bytes_total += extents[i].size;
                 progress.bytes_done += extents[i].size;
                 ++progress.files_done;
+            } else if (const auto& entry = plan.entries[layout.files[i].entry]; entry.file) {
+                CheckCancelled(cancel);
+                if (entry.file->GetSize() != entry.size ||
+                    entry.size > std::numeric_limits<u64>::max() - progress.bytes_total) {
+                    throw PackError(PackResult::IoError, "resolved source size changed or overflowed");
+                }
+                progress.bytes_total += entry.size;
             } else {
                 std::error_code ec;
                 const auto size = fs::file_size(SourceOf(i), ec);
@@ -1075,6 +1358,9 @@ private:
     void WriteZeros(u64 count) {
         static constexpr std::array<u8, 4096> zeros{};
         while (count > 0) {
+            if (resolved) {
+                CheckCancelled(cancel);
+            }
             const auto n = static_cast<size_t>(std::min<u64>(count, zeros.size()));
             Write(zeros.data(), n);
             count -= n;
@@ -1089,7 +1375,7 @@ private:
 
     void AddProgress(u64 bytes) {
         progress.bytes_done += bytes;
-        if (progress.bytes_done - last_report >= ProgressStep) {
+        if (resolved || progress.bytes_done - last_report >= ProgressStep) {
             Report();
         }
     }
@@ -1128,7 +1414,44 @@ private:
         }
     }
 
-    Digest HashSource(Common::FS::IOFile& in, u64 size) {
+    template <typename Sink>
+    void ReadSource(const VirtualFile& in, u64 size, Sink&& sink) {
+        CheckCancelled(cancel);
+        if (!in->IsReadable() || in->GetSize() != size) {
+            throw PackError(PackResult::IoError, "resolved source changed or is unreadable");
+        }
+        buffer.resize(static_cast<size_t>(std::min<u64>(ReadBufferSize, size)));
+        u64 total = 0;
+        while (total < size) {
+            CheckCancelled(cancel);
+            const auto count = static_cast<size_t>(std::min<u64>(buffer.size(), size - total));
+            const auto read = in->Read(buffer.data(), count, static_cast<size_t>(total));
+            CheckCancelled(cancel);
+            if (read != count) {
+                throw PackError(PackResult::IoError, "short read from resolved source");
+            }
+            total += read;
+            if (total > file_counted) {
+                AddProgress(total - file_counted);
+                file_counted = total;
+            } else {
+                // Re-reads for dedup/compression do not count twice, but must still poll the
+                // callback: JNI cancellation is delivered through that same callback.
+                Report();
+            }
+            CheckCancelled(cancel);
+            if (!sink(buffer.data(), read)) {
+                return;
+            }
+        }
+        CheckCancelled(cancel);
+        if (in->GetSize() != size) {
+            throw PackError(PackResult::IoError, "resolved source changed while packing");
+        }
+    }
+
+    template <typename Source>
+    Digest HashSource(Source& in, u64 size) {
         hash.Reset();
         ReadSource(in, size, [this](const u8* data, size_t n) {
             hash.Update(data, n);
@@ -1146,7 +1469,8 @@ private:
 
     // Streams one zstd frame into the archive. Gives up (returns false) as soon as the output is
     // no smaller than the input.
-    bool WriteCompressed(Common::FS::IOFile& in, u64 size, u64& stored) {
+    template <typename Source>
+    bool WriteCompressed(Source& in, u64 size, u64& stored) {
         auto& zstd = Compressor();
         zstd.Begin(size);
         out_buffer.resize(ZSTD_CStreamOutSize());
@@ -1187,13 +1511,34 @@ private:
     }
 
     void PackFile(size_t index) {
+        const auto& entry = plan.entries[layout.files[index].entry];
+        if (entry.file) {
+            if (const auto it = resolved_extents.find(entry.file.get());
+                it != resolved_extents.end()) {
+                CheckCancelled(cancel);
+                if (entry.file->GetSize() != entry.size || it->second.size != entry.size) {
+                    throw PackError(PackResult::IoError, "resolved alias source size changed");
+                }
+                progress.bytes_done += entry.size;
+                Complete(index, it->second);
+                return;
+            }
+            PackFileFrom(index, entry.file, entry.size);
+            resolved_extents.emplace(entry.file.get(), extents[index]);
+            return;
+        }
         const auto source = SourceOf(index);
         Common::FS::IOFile in{source, Common::FS::FileAccessMode::Read};
         if (!in.IsOpen()) {
             throw PackError(PackResult::IoError, "cannot read " + ToUtf8(source));
         }
+        PackFileFrom(index, in, in.GetSize());
+    }
+
+    template <typename Source>
+    void PackFileFrom(size_t index, Source& in, u64 size) {
         Extent extent;
-        extent.size = in.GetSize();
+        extent.size = size;
         file_counted = 0;
 
         std::optional<Digest> known_hash;
@@ -1437,10 +1782,15 @@ private:
     PackOptions options;
     std::function<void(const PackProgress&)> progress_cb;
     const std::atomic_bool* cancel;
+    const std::vector<ResolvedPackage>* resolved;
+    bool part_owned = false;
+    bool archive_owned = false;
+    bool generation_owned = false;
 
     Plan plan;
     Layout layout;
     std::vector<Extent> extents;
+    std::unordered_map<const VfsFile*, Extent> resolved_extents;
     std::vector<bool> done;
     std::vector<std::pair<size_t, Extent>> journaled;
 
@@ -1579,6 +1929,28 @@ PackResult PackDump(const fs::path& dump_root, const fs::path& archive, const Pa
                     const std::function<void(const PackProgress&)>& progress,
                     const std::atomic_bool* cancel, std::string* error_out) {
     Packer packer{dump_root, archive, options, progress, cancel};
+    try {
+        return packer.Run();
+    } catch (const PackError& e) {
+        packer.Abort();
+        if (error_out) {
+            *error_out = e.what();
+        }
+        return e.result;
+    } catch (const std::exception& e) {
+        packer.Abort();
+        if (error_out) {
+            *error_out = e.what();
+        }
+        return PackResult::IoError;
+    }
+}
+
+PackResult PackResolved(const std::vector<ResolvedPackage>& packages, const fs::path& archive,
+                        const PackOptions& options,
+                        const std::function<void(const PackProgress&)>& progress,
+                        const std::atomic_bool* cancel, std::string* error_out) {
+    Packer packer{{}, archive, options, progress, cancel, &packages};
     try {
         return packer.Run();
     } catch (const PackError& e) {

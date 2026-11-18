@@ -29,6 +29,8 @@ class ContentProvider;
 class NCA;
 class NACP;
 
+enum class ContentProviderUnionSlot;
+
 enum class PatchType { Update, DLC, Mod };
 
 enum class PatchSource {
@@ -57,6 +59,16 @@ public:
     using BuildID = std::array<u8, 0x20>;
     using Metadata = std::pair<std::unique_ptr<NACP>, VirtualFile>;
 
+    struct SelectedUpdate {
+        bool selected{};
+        VirtualFile raw;
+        // Meta NCA from the same version and provider; strict consumers validate its CNMT.
+        VirtualFile metadata_raw;
+        std::optional<u32> version;
+        // Absent for a packed update supplied directly by the caller.
+        std::optional<ContentProviderUnionSlot> source;
+    };
+
     explicit PatchManager(u64 title_id_,
                           const Service::FileSystem::FileSystemController& fs_controller_,
                           const ContentProvider& content_provider_);
@@ -68,9 +80,18 @@ public:
     // - Game Updates
     [[nodiscard]] VirtualDir PatchExeFS(VirtualDir exefs) const;
 
-    // Selects the update executable without applying mods or dumping files. A missing directory
-    // means the base ExeFS stays active. A missing version means the selected update is unverified.
+    // Captures the chosen update without opening it or applying mods. Strict consumers must
+    // refuse missing content and prove the numeric version against metadata_raw's CNMT.
+    [[nodiscard]] SelectedUpdate ResolveUpdate(
+        ContentRecordType type = ContentRecordType::Program,
+        VirtualFile packed_update_raw = nullptr) const;
+
+    // Selects the update executable without applying mods or dumping files. Emulation retains
+    // its base ExeFS when the selected update cannot supply one.
     [[nodiscard]] std::pair<VirtualDir, std::optional<u32>> ReadExeFSUpdate() const;
+
+    // Includes inherited mods, cheats, LayeredFS and built-in code patches.
+    [[nodiscard]] bool HasEnabledMods() const;
 
     // Currently tracked NSO patches:
     // - IPS

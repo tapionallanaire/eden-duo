@@ -20,6 +20,7 @@ import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.adapters.ProfileAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentProfileManagerBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.model.HomeViewModel
 import org.yuzu.yuzu_emu.model.UserProfile
 import org.yuzu.yuzu_emu.utils.NativeConfig
@@ -60,14 +61,19 @@ class ProfileManagerFragment : Fragment() {
         loadProfiles()
 
         binding.buttonAddUser.setOnClickListener {
-            if (NativeLibrary.canCreateUser()) {
-                findNavController().navigate(R.id.action_profileManagerFragment_to_newUserDialog)
-            } else {
-                MaterialAlertDialogBuilder(requireContext())
-                    .setTitle(R.string.profile_max_users_title)
-                    .setMessage(R.string.profile_max_users_message)
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
+            withProfileAccess {
+                if (NativeLibrary.canCreateUser()) {
+                    findNavController().navigate(
+                        R.id.action_profileManagerFragment_to_newUserDialog,
+                        Bundle().apply { putString("saveIdentity", NativeSaveSession.identity(requireContext())) }
+                    )
+                } else {
+                    MaterialAlertDialogBuilder(requireContext())
+                        .setTitle(R.string.profile_max_users_title)
+                        .setMessage(R.string.profile_max_users_message)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                }
             }
         }
 
@@ -91,7 +97,7 @@ class ProfileManagerFragment : Fragment() {
         }
     }
 
-    private fun loadProfiles() {
+    private fun loadProfiles() = withProfileAccess {
         val profiles = mutableListOf<UserProfile>()
         val userUUIDs = NativeLibrary.getAllUsers() ?: emptyArray()
         val currentUserUUID = NativeLibrary.getCurrentUser()
@@ -112,22 +118,24 @@ class ProfileManagerFragment : Fragment() {
         binding.buttonAddUser.isEnabled = NativeLibrary.canCreateUser()
     }
 
-    private fun selectProfile(profile: UserProfile) {
+    private fun selectProfile(profile: UserProfile) = withProfileAccess {
         if (NativeLibrary.setCurrentUser(profile.uuid)) {
             loadProfiles()
         }
     }
 
 
-    private fun editProfile(profile: UserProfile) {
+    private fun editProfile(profile: UserProfile) = withProfileAccess {
         val bundle = Bundle().apply {
             putString("uuid", profile.uuid)
             putString("username", profile.username)
+            putString("saveIdentity", NativeSaveSession.identity(requireContext()))
         }
         findNavController().navigate(R.id.action_profileManagerFragment_to_newUserDialog, bundle)
     }
 
-    private fun confirmDeleteProfile(profile: UserProfile) {
+    private fun confirmDeleteProfile(profile: UserProfile) = withProfileAccess {
+        val identity = NativeSaveSession.identity(requireContext())
         val currentUser = NativeLibrary.getCurrentUser()
         val isCurrentUser = profile.uuid == currentUser
 
@@ -141,7 +149,7 @@ class ProfileManagerFragment : Fragment() {
                 }
             )
             .setPositiveButton(R.string.profile_delete) { _, _ ->
-                deleteProfile(profile)
+                withProfileAccess(identity) { deleteProfile(profile) }
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
@@ -161,6 +169,21 @@ class ProfileManagerFragment : Fragment() {
 
         if (NativeLibrary.removeUser(profile.uuid)) {
             loadProfiles()
+        }
+    }
+
+    private fun withProfileAccess(expectedIdentity: String? = null, action: () -> Unit) {
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                expectedIdentity?.let { NativeSaveSession.assertIdentity(requireContext(), it) }
+                action()
+            }
+        } catch (e: IllegalStateException) {
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.error)
+                .setMessage(e.message)
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
         }
     }
 
@@ -194,7 +217,7 @@ class ProfileManagerFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
-        NativeConfig.saveGlobalConfig()
+        withProfileAccess { NativeConfig.saveGlobalConfig() }
         _binding = null
     }
 }

@@ -24,36 +24,119 @@ If the work is licensed/vendored from other people or projects, you may omit the
 
 For more information on the license header script, run `.ci/license-header.sh -h`.
 
-## Embedded native test launch
+## Embedded native play
 
-Debug Android builds can offer the already-prepared Peanuts Hogwarts pack on Android 13+
-when the optional engine is included. Native test play still uses `native-test-saves`;
-it does not share the emulated game's saves.
+Android 13+ builds can include the Peanuts Switch 1 and Banana Switch 2 modules.
+`NativeGameSupport` matches the effective installed update, program index and full
+module build IDs against the bundled Android catalogs. Unsupported builds use
+ordinary emulation without a native prompt. Switch 2 editions retain the original
+program 0 RomFS and the selected program 1, rather than relabelling a base dump.
 
-`PreparedNativeGame` accesses `dev.nxnative.android.EmbeddedGame` through reflection so
-stock builds have no engine dependency. `MainActivity` registers `watchExits(Activity,
-BiConsumer<String, String>)` on resume and calls `stopWatchingExits()` on pause. The
-engine consumes unexpected exits after the child has gone and supplies the original
-Duet game path and a readable reason; normal stop/Back must not report a failure.
+`PreparedNativeGame` calls each engine's `EmbeddedGame` facade through reflection;
+stock builds need no engine dependency. Duet owns the full-screen launch, export,
+`NativeCompilationActivity` and per-game settings surfaces. The selected Duet
+global/per-game GPU driver is supplied to the private child process; there is no
+second driver preference. Required upstream licence notices remain intact.
 
-The parent offers **Run emulated** or **Cancel**, without retrying native launch or
-remembering a launch mode. Recovery resolves the original path from the library, or
-through `GameHelper.getGame` if the library is still loading, then calls the same
-`GameAdapter.launchEmulated` used by a library tap: firmware confirmation, last-played
-time and shortcuts, Save Sync, shader preparation, and navigation with optimal
-settings and the existing default program index.
+Native and emulated play use the canonical selected-account/device save paths
+resolved from original retail control metadata. No per-mode save copy is made.
+`NativeSaveSession` hands the child a duplicated kernel lease through Binder and
+retains durable recovery/upload records outside replaceable save trees. Activity
+destruction is not proof that a writer has stopped. The native child keeps its
+lease until process death and reuses its admitted binding across recreation,
+without recovering a live writer's journal. Embedded native Sync is disabled;
+Duet remains the only Sync client.
 
-Recovery smoke check (use only test saves):
+The parent defers core initialization while a surviving child owns saves.
+Recovery must finish under the lease before emulation, Sync or maintenance can
+touch those saves. Never weaken this to an Activity flag or stopped-file check.
 
-1. Launch a prepared native test game and stop with Android Back: no recovery dialog.
-2. Trigger a native startup validation failure or unexpected child exit: one parent
-   dialog shows its reason. Resume the parent again: no duplicate failure prompt.
-3. Choose **Cancel**: remain in Duet. Repeat with **Run emulated**: the original game
-   follows the normal firmware/Save Sync/shader flow, never the native chooser.
-4. Recreate the parent while that dialog is open, including with the game library
-   still loading, and confirm recovery still resolves the original game.
-5. Open and background/resume a stock APK without the optional engine: no watcher
-   registration failure or native dialog.
+Per-game **Native play** settings remember Ask / Always emulate / Prefer native
+when prepared. Native preference never silently grants an expensive incompatible
+rebuild. Recompile creates a fresh generation while retaining the last valid pack
+until verified promotion. Delete compiled data is source/title-owned and excludes
+original games, saves and drivers. Private input-export ownership is recorded
+before bytes are written, so cancelled pre-job exports remain maintainable.
+
+Device acceptance still requires backed-up disposable progress, clean native
+exit, startup-failure fallback, compiler cancel/retry, effective-driver checks and
+both shared-save directions. Back up the user's real saves before any real-save
+access; the standalone-current Hogwarts seed must precede testing on Odin.
+
+## Android save maintenance boundaries
+
+Save/profile maintenance holds `NativeSaveSession.acquire(context).use { ... }`
+through every live-tree read, copy, replacement, deletion, and profile mutation.
+Acquisition recovers pending shared-native journals first and refuses access while
+a launch reservation or game owns the kernel lease. Do not replace this with an
+`isRunning` check. Capture `identity(context)` when opening a picker or confirmation,
+then call `assertIdentity` under the acquired lease before applying its result.
+Changing the selected account or physical save root invalidates the pending action.
+
+Ordinary leases are thread-reentrant blocking scopes: finish file work and release
+them before suspending for UI updates. Startup nests ordinary access under the
+application's initialization lease. `acquireDetached` is for SAF descriptors; it
+has no thread-local reentry and can be closed on another thread.
+Save/profile SAF descriptors retain detached leases through a mediated AppFuse
+proxy; the canonical file descriptor is never exported. Client duplicates cannot
+continue file access after the provider process dies. The backend serializes
+offset reads/writes, append, truncate, fsync, cancellation, and release; after
+release it rejects further I/O before releasing save ownership.
+Read-only game-source access outside canonical save/profile/config trees uses a
+lock-free protected-tree snapshot, so native metadata resolution and emulation
+can read original dumps through this provider without reentering a held session.
+Save ancestors, save backups, all writes, and unknown/deferred snapshots remain
+guarded. Live config/root replacement invalidates the snapshot before mutation
+and refreshes it under the maintenance lease after reload.
+Existing unleased sources revalidate their pathname/inode and current boundary on
+each callback, refusing renamed/replaced sources or newly protected paths. A short
+independent read/write gate covers only each callback or metadata operation, never
+the descriptor lifetime. Contention visibly refuses instead of waiting on a source
+reader: no root invalidation or SAF path mutation proceeds concurrently with that
+reader. Proxy callbacks report `EBUSY`, and the gate never takes the session monitor.
+The default-process `SaveSyncJob` retries guarded `YuzuApplication.initializeHost`
+off-main when startup is deferred, so recovery/upload resumes after native exits
+without opening an Activity; busy/recovery failures reschedule.
+Warm-up backups record their account/root identity and refuse restoration into a
+different selection; stopped emulation restores under the emulation owner's lease.
+
+Native install/start/run failures persist a fallback phase, wait for actual kernel
+lease release and explicit journal recovery, then enter normal emulation preflight
+with the failure reason. Save/Sync admission or recovery errors visibly refuse
+instead of auto-looping. Compile **Cancel** remains the user's preparation-page
+choice. Kernel-lifetime regression sources do not establish Android lifecycle
+behavior; the corresponding device proof remains pending.
+
+An existing legacy Switch peer without recorded ownership remains blocked until
+the user opens **Save sync** and explicitly confirms its original account. The
+confirmation shows the selected account, physical account root, and account-only
+`switch/<save-owner ID>` scope. Its callback revalidates that selection under the
+lease before persisting ownership; a pinned peer cannot be repointed. Disconnect
+or a profile switch never clears unknown ownership implicitly. Confirmation alone
+does not copy, seed, restore, or merge saves; reconciliation remains a later
+normal launch/exit sync or explicit **Sync now** action.
+
+Source regression command, from `src/android` (not device acceptance):
+
+```sh
+./gradlew :app:testMainlineDebugUnitTest --tests org.yuzu.yuzu_emu.features.DocumentProviderPathsTest --tests org.yuzu.yuzu_emu.features.DocumentProxyFileTest
+```
+
+After integration, use disposable profiles/saves only to check: reserve or run a
+native/emulated game and attempt import/export/delete, profile changes, data
+replacement, save transfer, and a save/profile SAF open; each must visibly refuse without a
+success message. Open a chooser/overwrite confirmation, change account or save
+root before accepting it, and verify no old selection is applied. Keep a save SAF
+descriptor open and verify a game cannot reserve saves until it closes. Duplicate
+that proxy descriptor, kill the provider, and confirm the surviving client cannot
+read/write canonical saves after a new session starts. Confirm ordinary read-only
+game dumps outside protected trees still load through this provider during native
+metadata resolution and emulation. These Binder/FUSE/provider-death checks require
+Android; host backend tests do not establish them. With no
+session active, repeat normal operations, including transfer browsing after an
+account change and warm-up backup/restore. Crash an isolated native test session
+with a pending journal and verify the next maintenance access recovers before
+reading; these are pending manual checks, not automated-test coverage.
 
 
 ## Adding new settings

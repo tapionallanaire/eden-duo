@@ -10,6 +10,7 @@
 #include <map>
 #include <random>
 #include <span>
+#include <string_view>
 #include <unordered_map>
 
 #include <format>
@@ -777,6 +778,69 @@ VirtualDir NupContainer::GetPackageDir(std::size_t package_index) {
         return nullptr;
     }
     return BuildPackageDir(packages[package_index].root_dir);
+}
+
+bool NupContainer::HasIndexedProgramLayout(std::size_t package_index) const {
+    if (status != Loader::ResultStatus::Success || package_index >= packages.size()) {
+        return false;
+    }
+    const auto& package = packages[package_index];
+    if (package.kind == PackageKind::Addon || (package.title_id & 0xFFF) != 1) {
+        return false;
+    }
+    const auto directory = [&](u32 parent, std::string_view name) {
+        if (parent < dirs.size()) {
+            const auto& node = dirs[parent];
+            for (u64 i = node.first_child; i < u64{node.first_child} + node.child_count; ++i) {
+                const auto child = children[i];
+                if (child < dirs.size() && dirs[child].name == name) {
+                    return child;
+                }
+            }
+        }
+        return NoDir;
+    };
+    const auto program = directory(package.root_dir, "program");
+    const auto original = directory(program, "0");
+    const auto selected = directory(program, "1");
+    if (program == NoDir || original == NoDir || selected == NoDir ||
+        dirs[program].child_count != 2 || dirs[original].child_count != 1 ||
+        dirs[selected].child_count != 2 || directory(original, "romfs") == NoDir) {
+        return false;
+    }
+    std::vector<std::pair<u32, u32>> pending{
+        {package.exefs_dir, directory(selected, "exefs")},
+        {package.romfs_dir, directory(selected, "romfs")}};
+    while (!pending.empty()) {
+        const auto [left, right] = pending.back();
+        pending.pop_back();
+        if (left >= dirs.size() || right >= dirs.size() ||
+            dirs[left].child_count != dirs[right].child_count) {
+            return false;
+        }
+        for (u32 i = 0; i < dirs[left].child_count; ++i) {
+            const auto a = children[u64{dirs[left].first_child} + i];
+            const auto b = children[u64{dirs[right].first_child} + i];
+            if ((a < dirs.size()) != (b < dirs.size())) {
+                return false;
+            }
+            if (a < dirs.size()) {
+                if (dirs[a].name != dirs[b].name) {
+                    return false;
+                }
+                pending.emplace_back(a, b);
+            } else {
+                const auto& first = files[a - dirs.size()];
+                const auto& second = files[b - dirs.size()];
+                if (first.name != second.name || first.size != second.size ||
+                    first.sha256 != second.sha256 || first.extent_offset != second.extent_offset ||
+                    first.extent_size != second.extent_size || first.codec != second.codec) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 VirtualDir NupContainer::MergeShadowDirs(const VirtualDir& base, const VirtualDir& overlay) {

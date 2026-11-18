@@ -187,12 +187,12 @@ public:
             FileType type = FileType::BinaryFile,
             FileShareFlag flag = FileShareFlag::ShareReadOnly);
 
-    /// Closes the file if it is opened.
-    void Close();
+    /// Closes the file if opened. Returns false on fclose failure; the stream is still closed.
+    bool Close();
 
     /**
     * Checks whether the file is open.
-    * Use this to check whether the calls to Open() or Close() succeeded.
+    * Use this to check whether Open() succeeded; Close() reports errors directly.
     *
     * @returns True if the file is open, false otherwise.
     */

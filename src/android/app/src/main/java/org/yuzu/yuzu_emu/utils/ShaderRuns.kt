@@ -127,10 +127,9 @@ object ShaderRuns {
 
     /**
      * Asks once per title whether to compile its shaders before it starts, then calls [launch].
-     * Every way of starting a game goes through here, so the question does not depend on which
-     * button was used.
+     * Dismissing the question calls [cancel] instead, so its owner can leave a pending launch.
      */
-    fun askThenLaunch(context: android.content.Context, game: Game?, launch: () -> Unit) {
+    fun askThenLaunch(context: android.content.Context, game: Game?, cancel: () -> Unit, launch: () -> Unit) {
         val preferences = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
         val declinedKey = "shader_precache_declined_" + (game?.programIdHex ?: "")
         if (game == null || !canPrecache(context, game) || precacheDone(game) ||
@@ -151,6 +150,8 @@ object ShaderRuns {
                 preferences.edit().putBoolean(declinedKey, true).apply()
                 launch()
             }
+            .setNeutralButton(android.R.string.cancel) { _, _ -> cancel() }
+            .setOnCancelListener { cancel() }
             .show()
     }
 

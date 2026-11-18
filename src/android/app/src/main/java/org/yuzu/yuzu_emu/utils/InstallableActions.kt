@@ -11,6 +11,7 @@ import androidx.fragment.app.FragmentManager
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.duo.SaveZipImport
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.fragments.MessageDialogFragment
 import org.yuzu.yuzu_emu.fragments.ProgressDialogFragment
 import org.yuzu.yuzu_emu.model.AddonViewModel
@@ -297,7 +298,8 @@ object InstallableActions {
     fun exportUserData(
         activity: FragmentActivity,
         fragmentManager: FragmentManager,
-        result: Uri
+        result: Uri,
+        expectedIdentity: String?
     ) {
         val userDirectory = DirectoryInitialization.userDirectory
         if (userDirectory == null) {
@@ -314,6 +316,10 @@ object InstallableActions {
             R.string.exporting_user_data,
             true
         ) { progressCallback, _ ->
+            NativeSaveSession.acquire(activity).use {
+                NativeSaveSession.assertIdentity(
+                    activity, checkNotNull(expectedIdentity) { "The save/profile selection expired; choose the destination again." }
+                )
             val zipResult = FileUtil.zipFromInternalStorage(
                 File(userDirectory),
                 userDirectory,
@@ -326,6 +332,7 @@ object InstallableActions {
                 TaskState.Failed -> R.string.export_failed
                 TaskState.Cancelled -> R.string.user_data_export_cancelled
             }
+            }
         }.show(fragmentManager, ProgressDialogFragment.TAG)
     }
 
@@ -334,7 +341,8 @@ object InstallableActions {
         fragmentManager: FragmentManager,
         gamesViewModel: GamesViewModel,
         driverViewModel: DriverViewModel,
-        result: Uri
+        result: Uri,
+        expectedIdentity: String?
     ) {
         val userDirectory = DirectoryInitialization.userDirectory
         if (userDirectory == null) {
@@ -350,6 +358,10 @@ object InstallableActions {
             activity,
             R.string.importing_user_data
         ) { progressCallback, _ ->
+            NativeSaveSession.acquire(activity).use {
+                NativeSaveSession.assertIdentity(
+                    activity, checkNotNull(expectedIdentity) { "The save/profile selection expired; choose the file again." }
+                )
             // Eden Duo: check and unpack the zip next to the user folder first; the user folder
             // and the global config are only touched once that worked, so a bad zip changes
             // nothing (the task used to delete the user folder before unpacking).
@@ -396,6 +408,7 @@ object InstallableActions {
                     )
                 }
 
+                NativeSaveSession.invalidateSourceReadBoundaries()
                 NativeConfig.unloadGlobalConfig()
                 val replaced = try {
                     SaveZipImport.replaceDirectory(stagingDir, userDir)
@@ -403,6 +416,7 @@ object InstallableActions {
                     // The config is reloaded whatever happened, so the app never runs without it.
                     NativeLibrary.initializeSystem(true)
                     NativeConfig.initializeGlobalConfig()
+                    NativeSaveSession.refreshSourceReadBoundaries(activity)
                 }
                 if (!replaced) {
                     return@newInstance MessageDialogFragment.newInstance(
@@ -418,6 +432,7 @@ object InstallableActions {
             driverViewModel.reloadDriverData()
 
             return@newInstance activity.getString(R.string.user_data_import_success)
+            }
         }.show(fragmentManager, ProgressDialogFragment.TAG)
     }
 }

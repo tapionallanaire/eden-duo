@@ -3,8 +3,6 @@
 
 package org.yuzu.yuzu_emu.adapters
 
-import android.content.DialogInterface
-import android.text.Html
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.widget.ImageView
@@ -35,13 +33,7 @@ import org.yuzu.yuzu_emu.utils.ViewUtils.marquee
 import org.yuzu.yuzu_emu.viewholder.AbstractViewHolder
 import androidx.core.net.toUri
 import androidx.core.content.edit
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import org.yuzu.yuzu_emu.BuildConfig
-import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.databinding.CardGameGridCompactBinding
-import org.yuzu.yuzu_emu.duo.nativeplay.PreparedNativeGame
-import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
-import org.yuzu.yuzu_emu.features.settings.model.Settings
 
 class GameAdapter(private val activity: AppCompatActivity) :
     AbstractDiffAdapter<Game, GameAdapter.GameViewHolder>(exact = false) {
@@ -52,7 +44,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
         const val VIEW_TYPE_LIST = 2
         const val VIEW_TYPE_CAROUSEL = 3
 
-        internal fun launchEmulated(
+        private fun launchGame(
             activity: AppCompatActivity,
             game: Game,
             navController: NavController
@@ -79,33 +71,12 @@ class GameAdapter(private val activity: AppCompatActivity) :
                     }
                 }
 
-                val action = HomeNavigationDirections.actionGlobalEmulationActivity(game, true)
-                // Duet Plus: pull newer Switch saves from the PC first (save sync, like Steam Cloud).
-                org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(activity)
-                    .beforeLaunch(activity, org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH) {
-                        org.yuzu.yuzu_emu.utils.ShaderRuns.askThenLaunch(activity, game) {
-                            navController.navigate(action)
-                        }
-                    }
+                navController.navigate(
+                    HomeNavigationDirections.actionGlobalEmulationActivity(game, true)
+                )
             }
 
-            if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle(R.string.loader_requires_firmware)
-                    .setMessage(
-                        Html.fromHtml(
-                            activity.getString(R.string.loader_requires_firmware_description),
-                            Html.FROM_HTML_MODE_LEGACY
-                        )
-                    )
-                    .setPositiveButton(android.R.string.ok) { _: DialogInterface?, _: Int ->
-                        launch()
-                    }
-                    .setNegativeButton(android.R.string.cancel) { _, _ -> }
-                    .show()
-            } else {
-                launch()
-            }
+            launch()
         }
     }
 
@@ -311,38 +282,7 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 return
             }
 
-            val emulate = {
-                launchEmulated(activity, game, binding.root.findNavController())
-            }
-
-            if (!BuildConfig.DEBUG || game.programIdHex != "0100F7E00C70E000") {
-                emulate()
-                return
-            }
-            activity.lifecycleScope.launch {
-                val prepared = withContext(Dispatchers.IO) {
-                    try {
-                        PreparedNativeGame.prepare(activity, game.path, 0)
-                    } catch (e: java.io.IOException) {
-                        org.yuzu.yuzu_emu.utils.Log.warning("Native pack validation: " + e.message)
-                        null
-                    }
-                }
-                val choice = MaterialAlertDialogBuilder(activity)
-                    .setTitle(R.string.native_test_launch_title)
-                    .setMessage(
-                        if (prepared == null) R.string.native_test_launch_unavailable
-                        else R.string.native_test_launch_message
-                    )
-                    .setNegativeButton(R.string.native_launch_emulate) { _, _ -> emulate() }
-                    .setNeutralButton(android.R.string.cancel, null)
-                if (prepared != null) {
-                    choice.setPositiveButton(R.string.native_test_play) { _, _ ->
-                        activity.startActivity(prepared)
-                    }
-                }
-                choice.show()
-            }
+            launchGame(activity, game, binding.root.findNavController())
         }
 
         fun onLongClick(game: Game): Boolean {
