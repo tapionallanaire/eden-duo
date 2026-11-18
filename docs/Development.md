@@ -24,6 +24,38 @@ If the work is licensed/vendored from other people or projects, you may omit the
 
 For more information on the license header script, run `.ci/license-header.sh -h`.
 
+## Embedded native test launch
+
+Debug Android builds can offer the already-prepared Peanuts Hogwarts pack on Android 13+
+when the optional engine is included. Native test play still uses `native-test-saves`;
+it does not share the emulated game's saves.
+
+`PreparedNativeGame` accesses `dev.nxnative.android.EmbeddedGame` through reflection so
+stock builds have no engine dependency. `MainActivity` registers `watchExits(Activity,
+BiConsumer<String, String>)` on resume and calls `stopWatchingExits()` on pause. The
+engine consumes unexpected exits after the child has gone and supplies the original
+Duet game path and a readable reason; normal stop/Back must not report a failure.
+
+The parent offers **Run emulated** or **Cancel**, without retrying native launch or
+remembering a launch mode. Recovery resolves the original path from the library, or
+through `GameHelper.getGame` if the library is still loading, then calls the same
+`GameAdapter.launchEmulated` used by a library tap: firmware confirmation, last-played
+time and shortcuts, Save Sync, shader preparation, and navigation with optimal
+settings and the existing default program index.
+
+Recovery smoke check (use only test saves):
+
+1. Launch a prepared native test game and stop with Android Back: no recovery dialog.
+2. Trigger a native startup validation failure or unexpected child exit: one parent
+   dialog shows its reason. Resume the parent again: no duplicate failure prompt.
+3. Choose **Cancel**: remain in Duet. Repeat with **Run emulated**: the original game
+   follows the normal firmware/Save Sync/shader flow, never the native chooser.
+4. Recreate the parent while that dialog is open, including with the game library
+   still loading, and confirm recovery still resolves the original game.
+5. Open and background/resume a stock APK without the optional engine: no watcher
+   registration failure or native dialog.
+
+
 ## Adding new settings
 
 When adding new settings, use `tr("Setting:")` if the setting is meant to be a field, otherwise use `tr("Setting")` if the setting is meant to be a Yes/No or checkmark type of setting, see [this short style guide](https://learn.microsoft.com/en-us/style-guide/punctuation/colons#in-ui).

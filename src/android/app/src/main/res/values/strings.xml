@@ -2025,4 +2025,6 @@ SOFTWARE.
     <string name="native_test_launch_unavailable">Native test play is unavailable for this game file.</string>
     <string name="native_test_play">Play natively</string>
     <string name="native_launch_emulate">Emulate</string>
+    <string name="native_launch_failed">Native play stopped</string>
+    <string name="native_run_emulated">Run emulated</string>
 </resources>

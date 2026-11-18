@@ -16,6 +16,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.findNavController
+import androidx.navigation.NavController
 import androidx.preference.PreferenceManager
 import androidx.viewbinding.ViewBinding
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,62 @@ class GameAdapter(private val activity: AppCompatActivity) :
         const val VIEW_TYPE_GRID_COMPACT = 1
         const val VIEW_TYPE_LIST = 2
         const val VIEW_TYPE_CAROUSEL = 3
+
+        internal fun launchEmulated(
+            activity: AppCompatActivity,
+            game: Game,
+            navController: NavController
+        ) {
+            val launch: () -> Unit = {
+                val preferences =
+                    PreferenceManager.getDefaultSharedPreferences(YuzuApplication.appContext)
+                preferences.edit {
+                    putLong(game.keyLastPlayedTime, System.currentTimeMillis())
+                }
+
+                activity.lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        val shortcut =
+                            ShortcutInfoCompat.Builder(YuzuApplication.appContext, game.path)
+                                .setShortLabel(game.title)
+                                .setIcon(GameIconUtils.getShortcutIcon(activity, game))
+                                .setIntent(game.launchIntent)
+                                .build()
+                        ShortcutManagerCompat.pushDynamicShortcut(
+                            YuzuApplication.appContext,
+                            shortcut
+                        )
+                    }
+                }
+
+                val action = HomeNavigationDirections.actionGlobalEmulationActivity(game, true)
+                // Duet Plus: pull newer Switch saves from the PC first (save sync, like Steam Cloud).
+                org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(activity)
+                    .beforeLaunch(activity, org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH) {
+                        org.yuzu.yuzu_emu.utils.ShaderRuns.askThenLaunch(activity, game) {
+                            navController.navigate(action)
+                        }
+                    }
+            }
+
+            if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {
+                MaterialAlertDialogBuilder(activity)
+                    .setTitle(R.string.loader_requires_firmware)
+                    .setMessage(
+                        Html.fromHtml(
+                            activity.getString(R.string.loader_requires_firmware_description),
+                            Html.FROM_HTML_MODE_LEGACY
+                        )
+                    )
+                    .setPositiveButton(android.R.string.ok) { _: DialogInterface?, _: Int ->
+                        launch()
+                    }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> }
+                    .show()
+            } else {
+                launch()
+            }
+        }
     }
 
     private var viewType = 0
@@ -254,61 +311,8 @@ class GameAdapter(private val activity: AppCompatActivity) :
                 return
             }
 
-            val launch: () -> Unit = {
-                val preferences =
-                    PreferenceManager.getDefaultSharedPreferences(YuzuApplication.appContext)
-                preferences.edit {
-                    putLong(
-                        game.keyLastPlayedTime,
-                        System.currentTimeMillis()
-                    )
-                }
-
-                activity.lifecycleScope.launch {
-                    withContext(Dispatchers.IO) {
-                        val shortcut =
-                            ShortcutInfoCompat.Builder(YuzuApplication.appContext, game.path)
-                                .setShortLabel(game.title)
-                                .setIcon(GameIconUtils.getShortcutIcon(activity, game))
-                                .setIntent(game.launchIntent)
-                                .build()
-                        ShortcutManagerCompat.pushDynamicShortcut(
-                            YuzuApplication.appContext,
-                            shortcut
-                        )
-                    }
-                }
-
-                val action = HomeNavigationDirections.actionGlobalEmulationActivity(game, true)
-                val navController = binding.root.findNavController()
-                // Duet Plus: pull newer Switch saves from the PC first (save sync, like Steam Cloud).
-                org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(activity)
-                    .beforeLaunch(activity, org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.SWITCH) {
-                        // Eden Duo: ask once per title whether to compile its shaders first.
-                        org.yuzu.yuzu_emu.utils.ShaderRuns.askThenLaunch(activity, game) {
-                            navController.navigate(action)
-                        }
-                    }
-            }
-
             val emulate = {
-                if (NativeLibrary.gameRequiresFirmware(game.programId) && !NativeLibrary.isFirmwareAvailable()) {
-                    MaterialAlertDialogBuilder(activity)
-                        .setTitle(R.string.loader_requires_firmware)
-                        .setMessage(
-                            Html.fromHtml(
-                                activity.getString(R.string.loader_requires_firmware_description),
-                                Html.FROM_HTML_MODE_LEGACY
-                            )
-                        )
-                        .setPositiveButton(android.R.string.ok) { _: DialogInterface?, _: Int ->
-                            launch()
-                        }
-                        .setNegativeButton(android.R.string.cancel) { _, _ -> }
-                        .show()
-                } else {
-                    launch()
-                }
+                launchEmulated(activity, game, binding.root.findNavController())
             }
 
             if (!BuildConfig.DEBUG || game.programIdHex != "0100F7E00C70E000") {
