@@ -356,6 +356,7 @@ static void PlatformUnmap(IOFile& io) {
 
 void IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, FileShareFlag flag) {
     Close();
+    mmap_offset = 0;
     file_path = path;
     file_access_mode = mode;
     file_type = type;

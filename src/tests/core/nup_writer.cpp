@@ -1379,3 +1379,40 @@ TEST_CASE("NUP native identity rejects RomFS from a different executable version
         REQUIRE(program_id == TitleId);
     }
 }
+
+TEST_CASE("Sequential file reads advance and stop at EOF", "[nup][fs]") {
+    TempDir t;
+    const auto path = t.path / "sequential";
+    Put(path, "abcdefghi");
+    for (const auto mode : {Common::FS::FileAccessMode::Read,
+                            Common::FS::FileAccessMode::ReadWrite}) {
+        Common::FS::IOFile file{path, mode};
+        REQUIRE(file.IsOpen());
+#if !defined(__ANDROID__) && (defined(__linux__) || defined(_WIN32))
+        REQUIRE(file.IsMappedFile() == (mode == Common::FS::FileAccessMode::Read));
+#endif
+        std::array<char, 4> head{};
+        REQUIRE(file.ReadSpan(std::span<char>{head}) == head.size());
+        REQUIRE(std::string_view(head.data(), head.size()) == "abcd");
+        REQUIRE(file.Tell() == 4);
+        std::array<char, 8> tail;
+        tail.fill('?');
+        REQUIRE(file.ReadSpan(std::span<char>{tail}) == 5);
+        REQUIRE(std::string_view(tail.data(), 5) == "efghi");
+        REQUIRE(tail[5] == '?');
+        REQUIRE(file.Tell() == 9);
+        REQUIRE(file.ReadSpan(std::span<char>{tail}) == 0);
+        REQUIRE(file.ReadSpan(std::span<char>{}) == 0);
+        REQUIRE(file.Seek(0));
+        REQUIRE(file.ReadObject(head));
+        REQUIRE(std::string_view(head.data(), head.size()) == "abcd");
+        REQUIRE(file.ReadObject(head));
+        REQUIRE(std::string_view(head.data(), head.size()) == "efgh");
+        REQUIRE_FALSE(file.ReadObject(head));
+        REQUIRE(file.Tell() == 9);
+        file.Open(path, mode);
+        REQUIRE(file.ReadObject(head));
+        REQUIRE(std::string_view(head.data(), head.size()) == "abcd");
+        REQUIRE(file.Tell() == 4);
+    }
+}

@@ -269,8 +269,16 @@ public:
         requires std::is_trivially_copyable_v<T>
     [[nodiscard]] size_t ReadSpan(std::span<T> data) const {
         if (IsMappedFile()) {
-            std::memcpy(data.data(), mmap_base + mmap_offset, sizeof(T) * data.size());
-            return data.size();
+            if (mmap_offset < 0 || static_cast<u64>(mmap_offset) >= mmap_size || data.empty()) {
+                return 0;
+            }
+            const auto remaining = mmap_size - static_cast<size_t>(mmap_offset);
+            const auto bytes = data.size() > remaining / sizeof(T)
+                                   ? remaining
+                                   : data.size() * sizeof(T);
+            std::memcpy(data.data(), mmap_base + mmap_offset, bytes);
+            mmap_offset += static_cast<s64>(bytes);
+            return bytes / sizeof(T);
         }
         return IsOpen() ? std::fread(data.data(), sizeof(T), data.size(), file) : 0;
     }
@@ -320,15 +328,7 @@ public:
     [[nodiscard]] bool ReadObject(T& object) const {
         static_assert(std::is_trivially_copyable_v<T>, "Data type must be trivially copyable.");
         static_assert(!std::is_pointer_v<T>, "T must not be a pointer to an object.");
-        if (IsMappedFile()) {
-            std::memcpy(&object, mmap_base + mmap_offset, sizeof(T));
-#ifdef _WIN32
-            return bool(sizeof(T));
-#else
-            return sizeof(T);
-#endif
-        }
-        return IsOpen() ? std::fread(&object, sizeof(T), 1, file) == 1 : false;
+        return ReadSpan(std::span{&object, size_t{1}}) == 1;
     }
 
     /**

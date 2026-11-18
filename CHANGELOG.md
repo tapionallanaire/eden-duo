@@ -9,6 +9,7 @@
 - Native and emulated play share the selected Duet account's canonical save, with distinct device-save parts and one Duet Sync client. Process-lifetime exclusion and journal recovery guard launch, Sync, import/export, profile changes and external document access.
 - Per-game Native play settings remember the preferred mode, recompile a fresh generation and delete owned compiled data without touching original games or saves. Cancelled pre-job exports are accounted for and can be removed.
 - Optional embedded Switch 1 and Switch 2 backends use exact effective content/build matching; indexed editions preserve both original and selected program resources.
+- Bound memory-mapped sequential reads at EOF and advance their cursor, preventing native packing from reading outside small files. Object reads share the same behavior, and reopening resets the cursor.
 - Preserve all touched GPU buffer-read units across unaligned and page-crossing ranges so overlapping CPU uploads cannot be reordered ahead of those reads.
 - Preserve shadow-RAM tracking and replay in accelerated shader-binding and constant-buffer setup macros.
 - Keep busy Vulkan upload-ring regions reserved after a wrap fallback instead of overwriting in-flight geometry or shader data.
