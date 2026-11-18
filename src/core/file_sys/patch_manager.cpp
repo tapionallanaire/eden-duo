@@ -240,20 +240,20 @@ VirtualDir PatchManager::GetModificationLoadRoot(bool sdmc) const {
 }
 
 std::vector<std::string> PatchManager::GetDisabledAddons() const {
-    auto disabled = Settings::values.disabled_addons[title_id];
+    const auto& configured = Settings::values.disabled_addons;
+    std::vector<std::string> disabled;
+    if (const auto it = configured.find(title_id); it != configured.end()) {
+        disabled = it->second;
+    }
     if (parent_title_id) {
-        const auto& shared = Settings::values.disabled_addons[*parent_title_id];
-        disabled.insert(disabled.end(), shared.begin(), shared.end());
+        if (const auto it = configured.find(*parent_title_id); it != configured.end()) {
+            disabled.insert(disabled.end(), it->second.begin(), it->second.end());
+        }
     }
     return disabled;
 }
 
-VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
-    LOG_INFO(Loader, "Patching ExeFS for title_id={:016X}", title_id);
-
-    if (exefs == nullptr)
-        return exefs;
-
+std::pair<VirtualDir, std::optional<u32>> PatchManager::ReadExeFSUpdate() const {
     const auto disabled = GetDisabledAddons();
 
     bool update_disabled = true;
@@ -346,6 +346,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
 
     // Game Updates
     std::unique_ptr<NCA> update = nullptr;
+    std::optional<u32> resolved_version;
 
     // If we have a specific enabled version from external provider, use it
     if (enabled_version.has_value() && content_union) {
@@ -354,6 +355,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
             auto file = external_provider->GetEntryForVersion(update_tid, ContentRecordType::Program, *enabled_version);
             if (file != nullptr) {
                 update = std::make_unique<NCA>(file);
+                resolved_version = enabled_version;
             }
         }
 
@@ -365,6 +367,7 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
                 auto file = manual_provider->GetEntryForVersion(update_tid, ContentRecordType::Program, *enabled_version);
                 if (file != nullptr) {
                     update = std::make_unique<NCA>(file);
+                    resolved_version = enabled_version;
                 }
             }
         }
@@ -373,12 +376,29 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     // Fallback to regular content provider if no external update was loaded
     if (update == nullptr && !update_disabled) {
         update = content_provider.GetEntry(update_tid, ContentRecordType::Program);
+        if (const auto slot = content_union->GetSlotForEntry(update_tid, ContentRecordType::Program)) {
+            resolved_version = content_union->GetSlotProvider(*slot)->GetEntryVersion(update_tid);
+        }
     }
 
-    if (!update_disabled && update != nullptr && update->GetExeFS() != nullptr) {
+    if (update_disabled || update == nullptr) {
+        return {};
+    }
+    return {update->GetExeFS(), resolved_version};
+}
+
+VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
+    LOG_INFO(Loader, "Patching ExeFS for title_id={:016X}", title_id);
+
+    if (exefs == nullptr)
+        return exefs;
+
+    const auto disabled = GetDisabledAddons();
+
+    if (auto [update_exefs, version] = ReadExeFSUpdate(); update_exefs != nullptr) {
         LOG_INFO(Loader, "    ExeFS: Update ({}) applied successfully",
-                 FormatTitleVersion(content_provider.GetEntryVersion(update_tid).value_or(0)));
-        exefs = update->GetExeFS();
+                 FormatTitleVersion(version.value_or(0)));
+        exefs = std::move(update_exefs);
     }
 
     // LayeredExeFS

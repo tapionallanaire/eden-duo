@@ -146,7 +146,7 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
     }
     secondary_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true);
     packaged_exefs = exefs_index;
-    packaged_version = nup->GetPackages()[update_index.value_or(*program_index)].version;
+    packaged_version = nup->GetPackages()[*exefs_index].version;
 
     if (update_index) {
         const auto& update = nup->GetPackages()[*update_index];

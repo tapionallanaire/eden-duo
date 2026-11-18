@@ -68,6 +68,10 @@ public:
     // - Game Updates
     [[nodiscard]] VirtualDir PatchExeFS(VirtualDir exefs) const;
 
+    // Selects the update executable without applying mods or dumping files. A missing directory
+    // means the base ExeFS stays active. A missing version means the selected update is unverified.
+    [[nodiscard]] std::pair<VirtualDir, std::optional<u32>> ReadExeFSUpdate() const;
+
     // Currently tracked NSO patches:
     // - IPS
     // - IPSwitch

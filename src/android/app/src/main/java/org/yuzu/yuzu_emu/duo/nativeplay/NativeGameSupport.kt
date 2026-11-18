@@ -6,9 +6,14 @@ package org.yuzu.yuzu_emu.duo.nativeplay
 import android.content.Context
 
 internal object NativeGameSupport {
-    /** Reads the program packaged in a NUP. The launch coordinator must resolve add-ons separately. */
-    fun findPackagedBuild(context: Context, path: String, programIndex: Int): NativeGameProfile? {
-        val fields = readNupBuild(path, programIndex) ?: return null
+    data class Match(
+        val profile: NativeGameProfile,
+        val supportedVersions: List<NativeGameProfile>
+    )
+
+    /** Checks the selected executable and update. Native launch must also validate mods and DLC. */
+    fun findBuildCandidate(context: Context, path: String, programIndex: Int): Match? {
+        val fields = readGameBuild(path, programIndex) ?: return null
         val version = fields[1].toLong()
         val modules = fields.drop(2).associate { field ->
             val pair = field.split('=', limit = 2)
@@ -16,8 +21,9 @@ internal object NativeGameSupport {
         }
         val catalog = context.assets.open(NativeGameCatalog.ASSET).reader()
             .use(NativeGameCatalog::read)
-        return catalog.match(NativeGameBuild(fields[0], version, modules))
+        val profile = catalog.match(NativeGameBuild(fields[0], version, modules)) ?: return null
+        return Match(profile, catalog.versions(profile.programId))
     }
 
-    private external fun readNupBuild(path: String, programIndex: Int): Array<String>?
+    private external fun readGameBuild(path: String, programIndex: Int): Array<String>?
 }
