@@ -4,12 +4,18 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <format>
 #include "common/android/android_common.h"
+#include "common/common_funcs.h"
+#include "common/hex_util.h"
 #include "core/core.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/loader/loader.h"
 #include "core/loader/nro.h"
+#include "core/loader/nso.h"
+#include "core/loader/nup.h"
 #include "native.h"
 
 struct RomMetadata {
@@ -119,3 +125,44 @@ void Java_org_yuzu_yuzu_1emu_utils_GameMetadata_resetMetadata(JNIEnv* env, jobje
 }
 
 } // extern "C"
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readNupBuild(JNIEnv* env, jobject,
+                                                                    jstring jpath,
+                                                                    jint program_index) {
+    if (program_index != 0) {
+        return nullptr;
+    }
+    auto& system = EmulationSession::GetInstance().System();
+    const auto path = Common::Android::GetJString(env, jpath);
+    const auto file = Core::GetGameFileFromPath(system.GetFilesystem(), path);
+    if (!file || !FileSys::NupContainer::IsNupFile(file)) {
+        return nullptr;
+    }
+
+    Loader::AppLoader_NUP loader{file};
+    const auto packaged = loader.ReadPackagedExeFS();
+    if (!packaged) {
+        return nullptr;
+    }
+    const auto& [version, exefs] = *packaged;
+    FileSys::ProgramMetadata metadata;
+    if (metadata.Load(exefs->GetFile("main.npdm")) != Loader::ResultStatus::Success) {
+        return nullptr;
+    }
+
+    std::vector<std::string> fields{
+        std::format("{:016X}", metadata.GetTitleID()), std::to_string(version)};
+    for (const auto& module : exefs->GetFiles()) {
+        const auto name = module->GetName();
+        if (name != "main" && name != "sdk" && name != "rtld" && !name.starts_with("subsdk")) {
+            continue;
+        }
+        Loader::NSOHeader header{};
+        if (module->ReadObject(&header) == sizeof(header) &&
+            header.magic == Common::MakeMagic('N', 'S', 'O', '0')) {
+            fields.emplace_back(name + "=" + Common::HexToString(header.build_id, false));
+        }
+    }
+    return Common::Android::ToJStringArray(env, fields);
+}
