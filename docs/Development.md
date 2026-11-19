@@ -27,10 +27,12 @@ For more information on the license header script, run `.ci/license-header.sh -h
 ## Embedded native play
 
 Android 13+ builds can include the Peanuts Switch 1 and Banana Switch 2 modules.
-`NativeGameSupport` matches the effective installed update, program index and full
-module build IDs against the bundled Android catalogs. Unsupported builds use
-ordinary emulation without a native prompt. Switch 2 editions retain the original
-program 0 RomFS and the selected program 1, rather than relabelling a base dump.
+`NativeGameSupport` recognizes supported titles before checking the effective
+installed update, program index and full module build IDs. Recognized titles reach
+the full-screen Emulated / Native play page unless a per-game mode overrides it;
+exact build and readiness checks gate native Prepare/play. Unknown titles use
+ordinary emulation. Switch 2 editions retain the original program 0 RomFS and the
+selected program 1, rather than relabelling a base dump.
 
 `PreparedNativeGame` calls each engine's `EmbeddedGame` facade through reflection;
 stock builds need no engine dependency. Duet owns the full-screen launch, export,
@@ -57,6 +59,19 @@ rebuild. Recompile creates a fresh generation while retaining the last valid pac
 until verified promotion. Delete compiled data is source/title-owned and excludes
 original games, saves and drivers. Private input-export ownership is recorded
 before bytes are written, so cancelled pre-job exports remain maintainable.
+
+Refresh routing after reviewing native source updates:
+
+```sh
+python tools/duo/native-support-catalog.py --peanuts <private-worktree> --banana <private-worktree> --write
+python tools/duo/native-support-catalog.py --peanuts <private-worktree> --banana <private-worktree>
+python tools/duo/test_native_support_catalog.py
+```
+
+The Peanuts roster includes its published Android list, private Z-A/Hogwarts
+profiles and Switch 1 entries explicitly declared in Android `nxGames`, including
+Trails in the Sky 2nd Chapter 1.0.3. Build the embedded modules/assets from those
+same reviewed sources; regenerating this catalog alone does not update an APK.
 
 Device acceptance still requires backed-up disposable progress, clean native
 exit, startup-failure fallback, compiler cancel/retry, effective-driver checks and
