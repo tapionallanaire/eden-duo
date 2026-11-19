@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Duet Plus 1.3.1
 
 - Native play no longer asks you to disable emulator mods or dual-screen companions. It prepares clean game content and leaves emulation settings unchanged.
 - Resolve updates and DLC inside Android storage folders before querying their size and modification time for native preparation.
