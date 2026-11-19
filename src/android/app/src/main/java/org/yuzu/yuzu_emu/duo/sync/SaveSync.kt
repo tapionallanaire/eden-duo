@@ -63,7 +63,7 @@ class SyncConsole(
     /** Null only when the selected profile/root has a real peer mapping. */
     val unpairedReason: () -> String? = { null },
     val scopeDescription: String? = null,
-    /** Explicit human confirmation for an existing legacy slot whose original owner was not recorded. */
+    /** Explicit approval before attaching the selected profile to an existing shared save slot. */
     val ownerConfirmation: () -> SyncOwnerConfirmation? = { null }
 )
 
@@ -367,6 +367,12 @@ class SaveSync(
             if (keepLocal) rescan().getOrThrow()
             forget(c)
         }
+    /** A newly approved legacy profile must choose conflicts, not inherit another account's hash baseline. */
+    internal fun resetSyncHistory(consoleId: String) {
+        db.writableDatabase.delete("saves", "console=?", arrayOf(consoleId))
+        synchronized(pending) { pending.entries.removeAll { it.value.console.id == consoleId } }
+    }
+
 
     private fun rescan() = runCatching { api("POST", "/rest/db/scan?folder=$FOLDER") }
 
@@ -573,7 +579,7 @@ class SaveSync(
         MaterialAlertDialogBuilder(activity)
             .setTitle("Which save do you want to keep?$left")
             .setMessage(
-                "$game changed on this device and on $hubName since they last matched.\n\n" +
+                "$game has different saves on this device and on $hubName.\n\n" +
                     side("This device", c.snapshot.localSummary, here > there) + "\n\n" +
                     side("Synced save", c.snapshot.remoteSummary, there > here) + "\n\n" +
                     "The save you replace is kept as a backup."
@@ -654,25 +660,25 @@ class SaveSync(
 
     private fun confirmLegacyOwner(activity: Activity, confirmation: SyncOwnerConfirmation) {
         MaterialAlertDialogBuilder(activity)
-            .setTitle("Verify the original Switch account")
+            .setTitle("Use this profile for Save sync?")
             .setMessage(confirmation.description)
-            .setPositiveButton("This is the original account") { _, _ ->
+            .setPositiveButton("Use this profile") { _, _ ->
                 worker.execute {
                     val error = runCatching {
                         NativeSaveSession.acquire(context).use { confirmation.confirm() }
                     }.exceptionOrNull()
                     main.post {
                         if (activity.isFinishing || activity.isDestroyed) return@post
-                        if (error != null) note(activity, "Ownership was not changed: ${error.message}")
+                        if (error != null) note(activity, "Sync profile was not changed: ${error.message}")
                         else {
-                            note(activity, "Original account recorded. No saves were copied. Use Sync now when ready.")
+                            note(activity, "Profile connected. No saves copied yet. Sync now to compare saves.")
                             if (hub == null) askConnect(activity) else showStatus(activity)
                         }
                     }
                 }
             }
-            .setNegativeButton("Not this account") { _, _ ->
-                note(activity, "Select the original paired account, then open Save sync again. Saves stay local.")
+            .setNegativeButton("Keep saves local") { _, _ ->
+                note(activity, "Saves stay local and shared between native and emulated play.")
             }
             .show()
     }

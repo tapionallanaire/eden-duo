@@ -14,7 +14,7 @@ import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.GameHelper
 import org.yuzu.yuzu_emu.utils.PathUtil
 
-/** Old SQLite hash stamps contain no local path: an unknown old owner cannot safely be inferred. */
+/** Old SQLite hash stamps contain no local path: attaching a profile requires explicit approval. */
 internal fun approvedLegacySyncRoot(
     approvedIdentity: String?,
     approvedRoot: String?,
@@ -23,7 +23,7 @@ internal fun approvedLegacySyncRoot(
     legacyPaired: Boolean
 ): File? {
     if (legacyPaired && (approvedIdentity == null || approvedRoot == null)) throw UnpairedSyncException(
-        "Legacy Switch sync has no recorded original profile. Open Save sync settings to explicitly verify its original account; saves stay local until then."
+        "Choose a profile for the existing Switch sync connection in Save sync settings. Saves stay local until you approve."
     )
     return root.canonicalFile.takeIf { approvedIdentity == identity && approvedRoot == it.path }
 }
@@ -93,7 +93,7 @@ object DuetSaveSync {
 
     private fun preparePairing(context: Context) {
         val prefs = preferences(context)
-        // Never let Disconnect/restart turn an unverifiable old slot into approval for the current user.
+        // Disconnect/restart must not attach an unapproved profile to an existing shared save slot.
         approvedRoot(context)
         if (prefs.contains("switch_owner_identity")) {
             check(approvedRoot(context) != null) { "This Switch peer belongs to another profile/root. The selected profile stays local-only." }
@@ -113,26 +113,25 @@ object DuetSaveSync {
         val identity = NativeSaveSession.identity(context)
         val root = selectedRoot()
         val hub = prefs.getString("hub", null)
-        val user = checkNotNull(NativeLibrary.getCurrentUser()) { "Select a real account before verifying legacy sync." }
-        check(user.isNotEmpty()) { "Select a real account before verifying legacy sync." }
+        val user = checkNotNull(NativeLibrary.getCurrentUser()) { "Select an account before connecting save sync." }
+        check(user.isNotEmpty()) { "Select an account before connecting save sync." }
         val name = NativeLibrary.getUserUsername(user).orEmpty().ifBlank { user }
         return SyncOwnerConfirmation(
-            "This legacy peer uses title-only Switch slots and did not record its original account.\n\n" +
-                "Selected account: $name\nAccount ID: $user\nAccount save root: ${root.path}\n" +
-                "Hub: ${hub ?: "previously paired peer (currently disconnected)"}\n" +
-                "Peer scope: switch/<save-owner ID>, account saves only.\n\n" +
-                "Confirm only if this is the ORIGINAL account previously paired with this hub. " +
-                "Do not use this action to switch the peer to another profile. Other profiles and device saves stay local-only.\n\n" +
-                "Confirmation records ownership only. It does not copy, seed, restore or merge any saves."
+            "Use $name ($user) for this PC's shared Switch saves?\n\n" +
+                "The old connection did not record its account. Where this device and the PC have different saves, " +
+                "you can choose which copy to keep. Saves present on only one side copy automatically.\n\n" +
+                "Native and emulated play already share this profile's local saves. Other profiles and device saves stay local. " +
+                "Continuing connects this profile; it does not copy any saves until you sync."
         ) {
             NativeSaveSession.assertIdentity(context, identity)
             check(prefs.getString("hub", null) == hub) { "The paired hub changed. Open Save sync again before confirming." }
             confirmLegacySyncOwner(prefs.getString("switch_owner_identity", null),
                 prefs.getString("switch_owner_root", null), identity, root,
                 NativeSaveSession.identity(context), selectedRoot())
+            get(context).resetSyncHistory(SWITCH)
             check(prefs.edit().putString("switch_owner_identity", identity)
                 .putString("switch_owner_root", root.path).remove("switch_legacy_owner_unknown").commit()) {
-                "Cannot persist the explicitly confirmed original Switch account."
+                "Cannot persist the approved Switch sync profile."
             }
         }
     }
@@ -197,7 +196,7 @@ object DuetSaveSync {
                                 "This profile/root has no Switch peer mapping. Its account and device saves remain local-only."
                             else null
                         },
-                        scopeDescription = "Switch sync shares only the originally paired account. Other profiles and device save parts remain local-only.",
+                        scopeDescription = "Switch sync shares only your approved profile. Other profiles and device save parts remain local-only.",
                         ownerConfirmation = { ownerConfirmation(context.applicationContext) }
                     )
                 ),

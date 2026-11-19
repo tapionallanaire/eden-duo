@@ -171,6 +171,7 @@ fun reconcileUnits(
 /** The user's answer to a conflict: keep this device's save (push it) or take the synced one (pull it). */
 fun resolveConflict(unit: String, local: File, remote: File, backups: File, keepLocal: Boolean, state: SyncState) {
     if (keepLocal) {
+        backupSave(remote, File(backups, unit))
         replaceSave(local, remote)
         state.synced(unit, hash(local)!!, "pushed")
     } else {
