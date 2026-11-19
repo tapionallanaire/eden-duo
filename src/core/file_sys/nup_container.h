@@ -123,6 +123,9 @@ public:
         std::vector<u8> icon;
         std::vector<std::pair<std::string, std::vector<u8>>> localized_icons;
         std::string display_version;
+
+        /// Match an executable program, allowing an update's separate title ID.
+        bool MatchesProgramId(u64 program_id) const;
     };
 
     /// Quick magic check without a full parse.

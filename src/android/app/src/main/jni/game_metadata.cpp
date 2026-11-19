@@ -613,7 +613,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         const auto base_index = nup->FindBasePackage();
         const auto update_index = nup->FindBestUpdatePackage();
         for (const auto index : {base_index, update_index}) {
-            RequirePrepare(!index || nup->GetPackages()[*index].title_id == input.program_id,
+            RequirePrepare(!index || nup->GetPackages()[*index].MatchesProgramId(input.program_id),
                            "NUP executable and package program identities disagree");
         }
         romfs = FileSys::NupContainer::MergeShadowDirs(

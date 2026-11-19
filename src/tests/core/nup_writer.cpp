@@ -300,6 +300,27 @@ bool WithDirectoryFailure(int syscall_number, const std::function<bool()>& scena
 
 } // namespace
 
+TEST_CASE("NUP native admission accepts update title IDs only for their own program", "[nup]") {
+    constexpr u64 program_id = 0x0400486024DEC000ULL;
+    NupContainer::PackageInfo package{.title_id = program_id,
+                                      .kind = NupContainer::PackageKind::Base};
+    REQUIRE(package.MatchesProgramId(program_id));
+    package.kind = NupContainer::PackageKind::Update;
+    REQUIRE(package.MatchesProgramId(program_id)); // Program IDs used by older NUP packers.
+    package.title_id = 0x0400486024DEC800ULL;
+    REQUIRE(package.MatchesProgramId(program_id)); // Actual Ocarina update container.
+    package.kind = NupContainer::PackageKind::Base;
+    REQUIRE_FALSE(package.MatchesProgramId(program_id));
+    package.kind = NupContainer::PackageKind::Update;
+    package.title_id = 0x040074A01BF12800ULL;
+    REQUIRE_FALSE(package.MatchesProgramId(program_id));
+    package.title_id = 0x0400486024DEC001ULL;
+    REQUIRE_FALSE(package.MatchesProgramId(program_id));
+    package.kind = NupContainer::PackageKind::Addon;
+    package.title_id = program_id;
+    REQUIRE_FALSE(package.MatchesProgramId(program_id));
+}
+
 TEST_CASE("NUP packs base, updates and add-ons and reads back through NupContainer", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";

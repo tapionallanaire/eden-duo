@@ -20,6 +20,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/swap.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 
 namespace FileSys {
@@ -342,6 +343,12 @@ private:
 };
 
 } // namespace
+
+bool NupContainer::PackageInfo::MatchesProgramId(u64 program_id) const {
+    return (kind == PackageKind::Base || kind == PackageKind::Update) &&
+           (title_id == program_id ||
+            (kind == PackageKind::Update && title_id == GetUpdateTitleID(program_id)));
+}
 
 NupSpillFile::~NupSpillFile() {
     file.Close();
