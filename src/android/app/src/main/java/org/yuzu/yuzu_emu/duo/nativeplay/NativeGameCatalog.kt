@@ -32,6 +32,13 @@ internal class NativeGameCatalog private constructor(profiles: List<NativeGamePr
     fun versions(programId: String): List<NativeGameProfile> =
         byProgram[programId.uppercase()].orEmpty()
 
+    fun recognizesTitle(programId: String): Boolean {
+        val id = programId.uppercase()
+        // A library application can contain a supported indexed program, such as Wonder's ...001.
+        return byProgram.containsKey(id) || (id.length == 16 && id.endsWith("000") &&
+            byProgram.keys.any { it.regionMatches(0, id, 0, 13) })
+    }
+
     fun match(build: NativeGameBuild): NativeGameProfile? =
         versions(build.programId).singleOrNull { entry ->
             entry.version == build.version &&

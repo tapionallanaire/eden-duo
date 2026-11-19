@@ -35,6 +35,34 @@ class NativeGameCatalogTest {
     }
 
     @Test
+    fun recognizesPrivateZaWithoutAcceptingUnmatchedCode() {
+        val build = NativeGameBuild(
+            "0100F43008C44000",
+            393216,
+            mapOf(
+                "main" to nsoId("b1f12fd919eae86ab8a978317677e64b"),
+                "sdk" to nsoId("df7a3960c74c3a4803f826c587153252")
+            )
+        )
+        assertEquals(NativeEngine.PEANUTS, catalog.match(build)?.engine)
+        assertNull(catalog.match(build.copy(moduleBuildIds = build.moduleBuildIds - "sdk")))
+        assertNull(catalog.match(build.copy(version = 0)))
+    }
+
+    @Test
+    fun recognizesZa200CodeProfileBeforePreparationChecksItsShaders() {
+        val build = NativeGameBuild(
+            "0100F43008C44000",
+            262144,
+            mapOf(
+                "main" to nsoId("8a1c86c437394b698397a85f45cc7761"),
+                "sdk" to nsoId("df7a3960c74c3a4803f826c587153252")
+            )
+        )
+        assertEquals(NativeEngine.PEANUTS, catalog.match(build)?.engine)
+    }
+
+    @Test
     fun acceptsBananaBuildForDonkeyKongBananza() {
         val build = NativeGameBuild(
             "040074A01BF12000",
@@ -64,6 +92,13 @@ class NativeGameCatalogTest {
         )
         assertEquals(edition, catalog.match(editionBuild))
         assertNull(catalog.match(editionBuild.copy(programId = base.programId, version = base.version)))
+    }
+
+    @Test
+    fun recognizesIndexedEditionFromItsLibraryApplicationId() {
+        assertTrue(catalog.recognizesTitle("040015100B514000"))
+        assertTrue(!catalog.recognizesTitle("040015100B514002"))
+        assertTrue(catalog.versions("040015100B514000").isEmpty())
     }
 
     @Test

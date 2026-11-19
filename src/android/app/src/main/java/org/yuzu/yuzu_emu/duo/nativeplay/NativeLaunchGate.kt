@@ -170,7 +170,17 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
         fragment.lifecycleScope.launch {
             val match: NativeGameSupport.Match?
             val nativeReady: Boolean
+            val supportedTitle: Boolean
             try {
+                supportedTitle = withContext(Dispatchers.IO) {
+                    appContext.assets.open(NativeGameCatalog.ASSET).reader()
+                        .use(NativeGameCatalog::read).recognizesTitle(selected.programIdHex)
+                }
+                if (supportedTitle && mode == NativePlayPreferences.Mode.ASK) {
+                    busy = false
+                    showChoice(selected)
+                    return@launch
+                }
                 val result = withContext(Dispatchers.IO) {
                     val candidate = NativeGameSupport.findGameCandidate(appContext, selected.path)
                         ?.takeIf { PreparedNativeGame.available(it.profile.engine) }
@@ -193,20 +203,25 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
             busy = false
             if (match == null) {
                 if (failure.isNotEmpty()) { showAdmissionFailure(); return@launch }
-                // Unsupported builds and unavailable engines never show a native-choice screen.
+                if (supportedTitle) { showChoice(selected); return@launch }
+                // Unknown titles and unmatched indexed programs retain the emulated launch path.
                 phase = "preflight"
                 preflight()
             } else if (nativeReady) {
                 contentKey = match.contentKey
                 launchNative()
             } else {
-                phase = "surface"
-                try { choice.launch(NativeLaunchActivity.intent(appContext, selected, failure)) }
-                catch (_: Exception) {
-                    phase = "cancelled"
-                    fragment.requireActivity().finish()
-                }
+                showChoice(selected)
             }
+        }
+    }
+
+    private fun showChoice(selected: Game) {
+        phase = "surface"
+        try { choice.launch(NativeLaunchActivity.intent(appContext, selected, failure)) }
+        catch (_: Exception) {
+            phase = "cancelled"
+            fragment.requireActivity().finish()
         }
     }
 

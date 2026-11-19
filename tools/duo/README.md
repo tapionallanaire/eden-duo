@@ -66,3 +66,23 @@ upstream files; reflowed upstream code conflicts on every sync.
 Not a sync tool: the pixel check from PR #12 for Trails through Daybreak II rendering
 (stale or missing textures). It needs your own 1920x1080 captures of the scenes named in
 its header and Pillow (plus ffmpeg for the video modes); it is not run by any test suite.
+
+## `native-support-catalog.py`
+
+Check Duet's native routing catalog against the private Peanuts and Banana source
+worktrees; add `--write` only after reviewing the proposed diff:
+
+```sh
+python tools/duo/native-support-catalog.py --peanuts /path/to/peanuts --banana /path/to/banana
+```
+
+Peanuts uses its published Switch 1 Android list plus the private Z-A and Hogwarts
+profiles. Banana uses its declared Android-ready Switch 2 profiles. Preserve every
+registered code/module build allowed by `android_builds`; `shader_versions` is
+capture provenance, not a supported-code allowlist. Prepare independently verifies
+shader coverage. This does not make desktop-only profiles Android-ready.
+
+Title recognition opens the native/emulated choice independently of exact-build
+readiness. A mismatching version remains visible there but cannot run incompatible
+native code. Updating this catalog also updates Gradle's embedded profile selection;
+build with the same reviewed source worktrees.

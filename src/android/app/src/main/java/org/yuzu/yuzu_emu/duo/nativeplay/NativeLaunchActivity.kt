@@ -126,7 +126,8 @@ class NativeLaunchActivity : AppCompatActivity() {
                 if (candidate == null || !PreparedNativeGame.available(candidate.profile.engine)) {
                     binding.availability.setText(R.string.native_not_available)
                     binding.summary.setText(R.string.native_not_available_message)
-                    binding.primary.isVisible = false
+                    binding.primary.setText(R.string.native_play)
+                    binding.primary.isVisible = true
                     binding.detailsToggle.isVisible = false
                     binding.saveWarning.isVisible = false
                 } else {
