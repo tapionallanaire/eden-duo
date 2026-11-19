@@ -21,6 +21,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/filesystem/filesystem.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/nso.h"
 
 namespace {
@@ -96,6 +97,11 @@ public:
     FileSys::PatchManager Manager(u64 title_id = OcarinaTitleId) {
         return FileSys::PatchManager{title_id, system.GetFileSystemController(),
                                      system.GetContentProvider()};
+    }
+
+    FileSys::PatchManager Manager(const FileSys::ContentProvider& provider,
+                                 u64 title_id = OcarinaTitleId) {
+        return FileSys::PatchManager{title_id, system.GetFileSystemController(), provider};
     }
 
 private:
@@ -265,4 +271,150 @@ TEST_CASE("Built-in Max Resolution patch is listed and loaded for Ocarina's main
 
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
     REQUIRE_FALSE(builtin_enabled());
+}
+
+TEST_CASE("Selected update retains exact source and never falls back from missing content",
+          "[patch_manager]") {
+    PatchManagerTestContext context;
+    FileSys::ContentProviderUnion providers{};
+    FileSys::ManualContentProvider manual;
+    FileSys::ManualContentProvider nand;
+    providers.SetSlot(FileSys::ContentProviderUnionSlot::FrontendManual, &manual);
+    providers.SetSlot(FileSys::ContentProviderUnionSlot::UserNAND, &nand);
+    constexpr u64 UpdateTitleId = OcarinaTitleId | 0x800;
+    const auto newest = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{1});
+    const auto older = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{2});
+    const auto installed = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{3});
+    const auto newest_meta = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{4});
+    const auto older_meta = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{5});
+    const auto installed_meta = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{6});
+    manual.AddEntryWithVersion(FileSys::TitleType::Update, FileSys::ContentRecordType::Program,
+                               UpdateTitleId, 131072, "", newest);
+    manual.AddEntryWithVersion(FileSys::TitleType::Update, FileSys::ContentRecordType::Program,
+                               UpdateTitleId, 65536, "", older);
+    nand.AddEntry(FileSys::TitleType::Update, FileSys::ContentRecordType::Program, UpdateTitleId,
+                  installed);
+    manual.AddEntryWithVersion(FileSys::TitleType::Update, FileSys::ContentRecordType::Meta,
+                               UpdateTitleId, 131072, "", newest_meta);
+    manual.AddEntryWithVersion(FileSys::TitleType::Update, FileSys::ContentRecordType::Meta,
+                               UpdateTitleId, 65536, "", older_meta);
+    nand.AddEntry(FileSys::TitleType::Update, FileSys::ContentRecordType::Meta, UpdateTitleId,
+                  installed_meta);
+    const auto manager = context.Manager(providers);
+
+    SECTION("Newest manual version wins over NAND") {
+        const auto update = manager.ResolveUpdate();
+        REQUIRE(update.selected);
+        REQUIRE(update.raw == newest);
+        REQUIRE(update.metadata_raw == newest_meta);
+        REQUIRE(update.version == 131072);
+        REQUIRE(update.source == FileSys::ContentProviderUnionSlot::FrontendManual);
+    }
+    SECTION("Disabling one version selects the next enabled version") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {"Update@131072"};
+        const auto update = manager.ResolveUpdate();
+        REQUIRE(update.raw == older);
+        REQUIRE(update.metadata_raw == older_meta);
+        REQUIRE(update.version == 65536);
+    }
+    SECTION("Missing selected record stays selected instead of using another source") {
+        nand.AddEntry(FileSys::TitleType::Update, FileSys::ContentRecordType::Data, UpdateTitleId,
+                      installed);
+        const auto update = manager.ResolveUpdate(FileSys::ContentRecordType::Data);
+        REQUIRE(update.selected);
+        REQUIRE(update.raw == nullptr);
+        REQUIRE(update.metadata_raw == newest_meta);
+        REQUIRE(update.version == 131072);
+        REQUIRE(update.source == FileSys::ContentProviderUnionSlot::FrontendManual);
+    }
+    SECTION("All manual versions disabled select the allowed NAND slot, not disabled SDMC") {
+        FileSys::ManualContentProvider sdmc;
+        providers.SetSlot(FileSys::ContentProviderUnionSlot::SDMC, &sdmc);
+        sdmc.AddEntry(FileSys::TitleType::Update, FileSys::ContentRecordType::Program, UpdateTitleId,
+                      older);
+        Settings::values.disabled_addons[OcarinaTitleId] = {
+            "Update@131072", "Update@65536", "Update (SDMC)"};
+        const auto update = manager.ResolveUpdate();
+        REQUIRE(update.selected);
+        REQUIRE(update.raw == installed);
+        REQUIRE(update.metadata_raw == installed_meta);
+        REQUIRE_FALSE(update.version.has_value());
+        REQUIRE(update.source == FileSys::ContentProviderUnionSlot::UserNAND);
+    }
+    SECTION("Installed fallback reads allowed SDMC rather than the disabled NAND winner") {
+        FileSys::ManualContentProvider sdmc;
+        providers.SetSlot(FileSys::ContentProviderUnionSlot::SDMC, &sdmc);
+        sdmc.AddEntry(FileSys::TitleType::Update, FileSys::ContentRecordType::Program, UpdateTitleId,
+                      older);
+        Settings::values.disabled_addons[OcarinaTitleId] = {
+            "Update@131072", "Update@65536", "Update (NAND)"};
+        const auto update = manager.ResolveUpdate();
+        REQUIRE(update.selected);
+        REQUIRE(update.raw == older);
+        REQUIRE(update.metadata_raw == nullptr);
+        REQUIRE(update.source == FileSys::ContentProviderUnionSlot::SDMC);
+    }
+    SECTION("Disabling every source yields no update") {
+        Settings::values.disabled_addons[OcarinaTitleId] = {
+            "Update@131072", "Update@65536", "Update (NAND)", "Update (SDMC)"};
+        REQUIRE_FALSE(manager.ResolveUpdate().selected);
+    }
+    SECTION("Unusable NCA does not materialize an executable or erase provenance") {
+        const auto [directory, version] = manager.ReadExeFSUpdate();
+        REQUIRE(directory == nullptr);
+        REQUIRE(version == 131072);
+        REQUIRE(manager.ResolveUpdate().raw == newest);
+    }
+    SECTION("Missing selected metadata never borrows another version or provider") {
+        manual.AddEntryWithVersion(FileSys::TitleType::Update, FileSys::ContentRecordType::Meta,
+                                   UpdateTitleId, 131072, "", nullptr);
+        const auto update = manager.ResolveUpdate();
+        REQUIRE(update.selected);
+        REQUIRE(update.raw == newest);
+        REQUIRE(update.version == 131072);
+        REQUIRE(update.metadata_raw == nullptr);
+    }
+}
+
+TEST_CASE("Packed updates obey the same update disable setting", "[patch_manager]") {
+    PatchManagerTestContext context;
+    FileSys::ContentProviderUnion providers{};
+    const auto packed = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{1});
+    const auto manager = context.Manager(providers);
+    REQUIRE_FALSE(manager.ResolveUpdate().selected);
+    const auto update = manager.ResolveUpdate(FileSys::ContentRecordType::Program, packed);
+    REQUIRE(update.selected);
+    REQUIRE(update.raw == packed);
+    REQUIRE(update.metadata_raw == nullptr);
+    REQUIRE_FALSE(update.version.has_value());
+    REQUIRE_FALSE(update.source.has_value());
+    Settings::values.disabled_addons[OcarinaTitleId] = {"Update"};
+    REQUIRE_FALSE(manager.ResolveUpdate(FileSys::ContentRecordType::Program, packed).selected);
+}
+
+TEST_CASE("Strict export can refuse enabled built-in and user mods", "[patch_manager]") {
+    PatchManagerTestContext context{NopInstruction};
+    const auto manager = context.Manager();
+    REQUIRE(manager.HasEnabledMods());
+    Settings::values.disabled_addons[OcarinaTitleId] = {
+        std::string{MaxResolution}, "Real-time speed (built-in)"};
+    REQUIRE(manager.HasEnabledMods());
+    Settings::values.disabled_addons[OcarinaTitleId].push_back("UserMod");
+    REQUIRE_FALSE(manager.HasEnabledMods());
+}
+
+TEST_CASE("Strict mod refusal honors inherited roots and disabled settings", "[patch_manager]") {
+    PatchManagerTestContext context{NopInstruction};
+    FileSys::ContentProviderUnion providers{};
+    FileSys::ManualContentProvider manual;
+    providers.SetSlot(FileSys::ContentProviderUnionSlot::FrontendManual, &manual);
+    const auto file = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{1});
+    manual.AddEntry(FileSys::TitleType::Application, FileSys::ContentRecordType::Meta,
+                    OcarinaTitleId, file);
+    manual.AddEntry(FileSys::TitleType::Application, FileSys::ContentRecordType::Program,
+                    OcarinaTitleId + 1, file);
+    const auto manager = context.Manager(providers, OcarinaTitleId + 1);
+    REQUIRE(manager.HasEnabledMods());
+    Settings::values.disabled_addons[OcarinaTitleId] = {"UserMod"};
+    REQUIRE_FALSE(manager.HasEnabledMods());
 }

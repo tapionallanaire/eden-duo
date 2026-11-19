@@ -45,6 +45,7 @@ add_executable(tests
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
+    core/file_sys/vfs_source_paths.cpp
     core/ldn.cpp
     core/internal_network/socket_proxy.cpp
     core/nup_writer.cpp

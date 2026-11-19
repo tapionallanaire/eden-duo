@@ -14,6 +14,7 @@ import android.view.Surface
 import android.view.View
 import android.widget.TextView
 import androidx.annotation.Keep
+import androidx.annotation.WorkerThread
 import androidx.core.net.toUri
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.libsdl.app.SDL
@@ -672,6 +673,14 @@ object NativeLibrary {
     external fun getSavePath(programId: String): String
 
     /**
+     * Resolves format-1 native save binding JSON from the original effective game and selected user.
+     * Read-only, preboot, worker-thread only; throws if authoritative control/profile metadata or
+     * physical SaveDir backing is unavailable. Does not create directories or inspect save contents.
+     */
+    @WorkerThread
+    external fun getNativeSaveBinding(path: String, programIndex: Int): String
+
+    /**
      * Gets the root save directory for the default profile as either
      * /user/save/account/<user id raw string> or /user/save/000...000/<user id>
      *
@@ -684,14 +693,16 @@ object NativeLibrary {
      * Adds a file to the manual filesystem provider in our EmulationSession instance
      * @param path Path to the file we're adding. Can be a string representation of a [Uri] or
      * a normal path
+     * @return False if opening or registering failed. Emulation may ignore this; Prepare must not.
      */
-    external fun addFileToFilesystemProvider(path: String)
+    external fun addFileToFilesystemProvider(path: String): Boolean
 
     /**
      * Adds a game-folder file to the manual filesystem provider, respecting the internal gate for
      * game-folder external-content mounting.
+     * Returns true without opening the file when that gate is disabled.
      */
-    external fun addGameFolderFileToFilesystemProvider(path: String)
+    external fun addGameFolderFileToFilesystemProvider(path: String): Boolean
 
     /**
      * Clears all files added to the manual filesystem provider in our EmulationSession instance
@@ -808,8 +819,12 @@ object NativeLibrary {
     external fun getModLoadDirectory(programId: String): String
 
     /**
-     * Eden Duo: base title ids of the content (update, DLC) inside an NSP/XCI container.
-     * Empty when the file can't be opened or parsed.
+     * Container content as triples (base title id, kind, version). Kind 0 = application,
+     * 1 = update, 2 = DLC; version is meaningful only for updates. Empty on open/parse failure.
+     * Uses the same container registration parser as the manual filesystem provider.
      */
-    external fun getContainerBaseTitleIds(path: String): LongArray
+    external fun getContainerContentRecords(path: String): LongArray
+
+    /** Disabled add-ons for the selected program and its authoritative provider parent, if any. */
+    external fun getDisabledContentAddons(programId: String): Array<String>
 }

@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "core/file_sys/nup_container.h"
 #include "core/loader/loader.h"
@@ -51,9 +52,15 @@ public:
     ResultStatus ReadControlData(FileSys::NACP& control) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
 
+    // Native snapshot identity before frontend overrides; absent when the selected RomFS update
+    // and packaged executable have different versions. Emulation's overlay policy is unchanged.
+    [[nodiscard]] std::optional<std::pair<u32, FileSys::VirtualDir>> ReadPackagedExeFS() const;
+
 private:
     std::unique_ptr<FileSys::NupContainer> nup;
     std::unique_ptr<AppLoader> secondary_loader;
+    std::optional<std::size_t> packaged_exefs;
+    u32 packaged_version{};
 
     std::unique_ptr<FileSys::NACP> nacp_file;
     FileSys::VirtualFile icon_file;

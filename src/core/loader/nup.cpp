@@ -145,6 +145,8 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
         return;
     }
     secondary_loader = std::make_unique<AppLoader_DeconstructedRomDirectory>(exefs, true);
+    packaged_exefs = exefs_index;
+    packaged_version = nup->GetPackages()[*exefs_index].version;
 
     if (update_index) {
         const auto& update = nup->GetPackages()[*update_index];
@@ -243,6 +245,19 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
 bool AppLoader_NUP::IsRomFSUpdatable() const {
     // The update is already merged into the exposed RomFS.
     return false;
+}
+
+std::optional<std::pair<u32, FileSys::VirtualDir>> AppLoader_NUP::ReadPackagedExeFS() const {
+    if (!packaged_exefs) {
+        return std::nullopt;
+    }
+    const auto update = nup->FindBestUpdatePackage();
+    if (update && nup->GetPackages()[*update].version != packaged_version) {
+        // The emulation view can overlay a RomFS-only update, but it is not an exact
+        // executable/data snapshot and must never acquire a native build identity.
+        return std::nullopt;
+    }
+    return std::pair{packaged_version, nup->GetExeFSDir(*packaged_exefs)};
 }
 
 ResultStatus AppLoader_NUP::ReadProgramId(u64& out_program_id) {

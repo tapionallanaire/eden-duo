@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 #include "common/assert.h"
@@ -123,6 +124,17 @@ VirtualDir ConcatenatedVfsFile::GetContainingDirectory() const {
         return nullptr;
     }
     return concatenation_map.front().file->GetContainingDirectory();
+}
+
+std::vector<std::string> ConcatenatedVfsFile::GetSourcePaths() const {
+    std::vector<std::string> paths;
+    paths.reserve(concatenation_map.size());
+    for (const auto& entry : concatenation_map) {
+        auto sources = entry.file->GetSourcePaths();
+        paths.insert(paths.end(), std::make_move_iterator(sources.begin()),
+                     std::make_move_iterator(sources.end()));
+    }
+    return paths;
 }
 
 bool ConcatenatedVfsFile::IsWritable() const {

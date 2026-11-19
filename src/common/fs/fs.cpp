@@ -4,6 +4,13 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cerrno>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #ifdef __ANDROID__
@@ -15,6 +22,26 @@
 namespace Common::FS {
 
 namespace fs = std::filesystem;
+
+std::error_code SyncDirectory(const fs::path& path) {
+#if defined(__unix__) || defined(__APPLE__)
+    const int fd = open(path.empty() ? "." : path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return {errno, std::generic_category()};
+    }
+    std::error_code error;
+    if (fsync(fd) != 0) {
+        error = {errno, std::generic_category()};
+    }
+    // Never retry close after EINTR: the descriptor may already have been released.
+    if (close(fd) != 0 && !error) {
+        error = {errno, std::generic_category()};
+    }
+    return error;
+#else
+    return std::make_error_code(std::errc::operation_not_supported);
+#endif
+}
 
 // File Operations
 

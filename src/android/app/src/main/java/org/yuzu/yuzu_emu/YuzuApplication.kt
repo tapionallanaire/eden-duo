@@ -26,6 +26,7 @@ import org.yuzu.yuzu_emu.utils.Log
 import org.yuzu.yuzu_emu.utils.PowerStateUpdater
 import org.yuzu.yuzu_emu.utils.ControllerNavigationGlobalHook
 import java.util.Locale
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 
 fun Context.getPublicFilesDir(): File = getExternalFilesDir(null) ?: filesDir
 
@@ -60,33 +61,54 @@ class YuzuApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         application = this
+        nativeProcess = android.os.Build.VERSION.SDK_INT >= 28 &&
+            Application.getProcessName().substringAfter(':', "") in setOf(
+                "peanuts_game", "peanuts_pack", "banana_game", "banana_pack")
+        if (nativeProcess) return
         documentsTree = DocumentsTree()
-
-        // Eden Duo: a device with one screen gets no Duo anything (see DuoCapability). Decided
-        // before DirectoryInitialization, which skips the dual-screen code cache on one screen.
-        val duoAvailable = org.yuzu.yuzu_emu.duo.DuoCapability.init(this)
-        NativeLibrary.setDuoAvailable(duoAvailable)
-        android.util.Log.i("Duo", if (duoAvailable) "second screen available" else "single screen, Duo disabled")
-        DirectoryInitialization.start()
-
-        // Initialize Freedreno config BEFORE loading native library
-        // This ensures GPU driver environment variables are set before adrenotools initializes
-        GpuDriverHelper.initializeFreedrenoConfigEarly()
-
-        NativeLibrary.playTimeManagerInit()
-        GpuDriverHelper.initializeDriverParameters()
-        NativeInput.reloadInputDevices()
-        NativeLibrary.logDeviceInfo()
-        PowerStateUpdater.start()
-        Log.logDeviceInfo()
-        ControllerNavigationGlobalHook.install(this)
-
         createNotificationChannels()
+        try { initializeHost() }
+        catch (_: NativeSaveSession.BusyException) { /* A live child owns the saves; the wait activity retries. */ }
+        catch (e: Exception) {
+            startupFailure = e.message ?: e.javaClass.simpleName
+            android.util.Log.e("NativeSaveSession", "Host initialization deferred", e)
+        }
+    }
+
+    /** Blocking initialization attempt, never waits for a live writer. May be retried off-main. */
+    @Synchronized
+    fun initializeHost() {
+        if (!startupDeferred || nativeProcess) return
+        NativeSaveSession.acquire(this).use {
+            val duoAvailable = org.yuzu.yuzu_emu.duo.DuoCapability.init(this)
+            NativeLibrary.setDuoAvailable(duoAvailable)
+            android.util.Log.i("Duo", if (duoAvailable) "second screen available" else "single screen, Duo disabled")
+            DirectoryInitialization.start()
+            NativeSaveSession.refreshSourceReadBoundaries(this)
+
+            // Driver environment must be initialized before the renderer is used.
+            GpuDriverHelper.initializeFreedrenoConfigEarly()
+            NativeLibrary.playTimeManagerInit()
+            GpuDriverHelper.initializeDriverParameters()
+            NativeInput.reloadInputDevices()
+            NativeLibrary.logDeviceInfo()
+            PowerStateUpdater.start()
+            Log.logDeviceInfo()
+            ControllerNavigationGlobalHook.install(this)
+            startupFailure = ""
+            startupDeferred = false
+        }
     }
 
     companion object {
         var documentsTree: DocumentsTree? = null
         lateinit var application: YuzuApplication
+        @Volatile var startupDeferred = true
+            private set
+        @Volatile var nativeProcess = false
+            private set
+        @Volatile var startupFailure = ""
+            private set
 
         val appContext: Context
             get() = application.applicationContext
@@ -97,6 +119,7 @@ class YuzuApplication : Application() {
         )
 
         fun applyLanguage(context: Context): Context {
+            if (startupDeferred || nativeProcess) return context
             val languageIndex = IntSetting.APP_LANGUAGE.getInt()
             val langCode = if (languageIndex in LANGUAGE_CODES.indices) {
                 LANGUAGE_CODES[languageIndex]

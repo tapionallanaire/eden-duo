@@ -123,6 +123,9 @@ public:
         std::vector<u8> icon;
         std::vector<std::pair<std::string, std::vector<u8>>> localized_icons;
         std::string display_version;
+
+        /// Match an executable program, allowing an update's separate title ID.
+        bool MatchesProgramId(u64 program_id) const;
     };
 
     /// Quick magic check without a full parse.
@@ -160,6 +163,10 @@ public:
     VirtualDir GetExeFSDir(std::size_t package_index);
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
+
+    /// Narrow indexed snapshot contract: program/0/romfs exists, and program/1 trees
+    /// reference exactly the root executable/RomFS extents (without reading ROM bytes).
+    bool HasIndexedProgramLayout(std::size_t package_index) const;
 
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(

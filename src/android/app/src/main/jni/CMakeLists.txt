@@ -4,6 +4,9 @@
 # SPDX-FileCopyrightText: 2023 yuzu Emulator Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# A child process must acquire its save lease without loading the emulator core.
+add_library(duet_session SHARED duet_session.cpp)
+
 add_library(yuzu-android SHARED
     emu_window/emu_window.cpp
     emu_window/emu_window.h

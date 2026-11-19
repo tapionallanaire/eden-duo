@@ -231,6 +231,10 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private var isCustomSettingsIntent = false
     private var isStoppingForRomSwap = false
     private var deferGameSetupUntilStopCompletes = false
+    private val nativeLaunchGate = org.yuzu.yuzu_emu.duo.nativeplay.NativeLaunchGate(this) {
+        resumeEmulatedGameSetup()
+    }
+    private var viewSetupComplete = false
 
     // Eden Duo: resolves an intent-launched Game off the UI thread (see resolveIntentGameAsync).
     private var intentGameResolveJob: Job? = null
@@ -316,6 +320,15 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         updateOrientation()
+        nativeLaunchGate.restore(savedInstanceState)
+        @Suppress("DEPRECATION")
+        val restoredIntentGame = savedInstanceState?.getParcelable<Game>("ResolvedIntentGame")
+        if (restoredIntentGame != null) {
+            intentGame = restoredIntentGame
+            isCustomSettingsIntent = savedInstanceState?.getBoolean("CustomSettingsIntent") == true
+            continueGameSetupAfterIntentResolved()
+            return
+        }
 
         if (args.overlayGamelessEditMode) {
             return
@@ -343,6 +356,13 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
 
         continueGameSetupAfterIntentResolved()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        nativeLaunchGate.save(outState)
+        outState.putParcelable("ResolvedIntentGame", intentGame)
+        outState.putBoolean("CustomSettingsIntent", isCustomSettingsIntent)
     }
 
     /**
@@ -394,8 +414,39 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             }
             return
         }
+        if (requireActivity().intent.action == CustomSettingsHandler.CUSTOM_CONFIG_ACTION) {
+            // The importer loads its config; release it only after the previous core has stopped.
+            synchronized(NativeConfig) {
+                NativeConfig.unloadPerGameConfig()
+                NativeConfig.reloadGlobalConfig()
+            }
+        }
 
+        val selected = args.game ?: intentGame
+        if (selected == null) {
+            resumeEmulatedGameSetup()
+            return
+        }
+        val custom = if (intentGame != null) SettingsFile.getCustomSettingsFile(selected).exists()
+            else args.custom
+        val launch = requireActivity().intent
+        val ordinary = IntentGameSetupRules.ordinaryLaunch(
+            selected.programIdHex,
+            launch.getIntExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, 0),
+            launch.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_RECORD, false),
+            launch.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_COMPILE, false),
+            launch.getBooleanExtra(org.yuzu.yuzu_emu.utils.ShaderRuns.EXTRA_MAX, false)
+        )
+        nativeLaunchGate.decide(selected, custom, ordinary)
+    }
+
+    private fun resumeEmulatedGameSetup() {
+        if (this::emulationState.isInitialized) return
         finishGameSetup()
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            dualScreen.onStart()
+            if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) dualScreen.onResume()
+        }
 
         // Eden Duo: an intent launch's `game` was unknown while onStart may already have shown
         // the second-screen window on the second-panel default; close it now if No Companion
@@ -537,7 +588,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             game!!.path,
             game!!.programId,
             {
-                driverViewModel.isInteractionAllowed.value && !isStoppingForRomSwap
+                nativeLaunchGate.emulating && driverViewModel.isInteractionAllowed.value && !isStoppingForRomSwap
             },
             {
                 finishWarmUpIfAny()
@@ -550,7 +601,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 org.yuzu.yuzu_emu.utils.ShaderRuns.precacheBoot =
                     org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext
                 org.yuzu.yuzu_emu.utils.ShaderRuns.precacheNext = false
-            }
+            },
+            { work -> nativeLaunchGate.runEmulated(work) }
         )
     }
 
@@ -673,30 +725,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                     if (intentGame != null) {
                         withContext(Dispatchers.Main) {
                             try {
-                                finishGameSetup()
-                                // Same late resolution as the plain intent path above.
-                                dualScreen.onGameResolved()
-                                Log.info(
-                                    "[EmulationFragment] Game setup complete for intent launch"
-                                )
-
-                                if (_binding != null) {
-                                    // Hide loading indicator immediately for intent launches
-                                    binding.loadingIndicator.visibility = View.GONE
-                                    binding.surfaceEmulation.visibility = View.VISIBLE
-
-                                    completeViewSetup()
-
-                                    // For intent launches, check if surface is ready and start emulation
-                                    binding.root.post {
-                                        if (binding.surfaceEmulation.holder.surface?.isValid == true && !emulationStarted) {
-                                            emulationStarted = true
-                                            emulationState.newSurface(
-                                                binding.surfaceEmulation.holder.surface
-                                            )
-                                        }
-                                    }
-                                }
+                                continueGameSetupAfterIntentResolved()
                             } catch (e: Exception) {
                                 Log.error(
                                     "[EmulationFragment] Error in finishGameSetup: ${e.message}"
@@ -810,6 +839,12 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
         // Eden Duo: a warm-up launch carries its length, save backup and shader count.
         readWarmUpRequest()
+        emulationViewModel.isEmulationStopping.collect(viewLifecycleOwner) { stopping ->
+            if (!stopping && deferGameSetupUntilStopCompletes) {
+                deferGameSetupUntilStopCompletes = false
+                continueGameSetupAfterIntentResolved()
+            }
+        }
 
         if (args.overlayGamelessEditMode) {
             setupOverlayGamelessEditMode()
@@ -860,8 +895,14 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     private fun completeViewSetup() {
-        if (_binding == null || game == null) {
+        if (_binding == null || game == null || !nativeLaunchGate.emulating ||
+            !this::emulationState.isInitialized || viewSetupComplete) {
             return
+        }
+        viewSetupComplete = true
+        // Install with the view, including when launch decisions finish after onResume.
+        if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
+            binding.surfaceInputOverlay.touchscreenFilter = dualScreen.gameTouch::filter
         }
         Log.info("[EmulationFragment] Starting view setup for game: ${game?.title}")
 
@@ -1220,15 +1261,6 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 ViewUtils.showView(binding.loadingIndicator)
                 ViewUtils.hideView(binding.inputContainer)
                 ViewUtils.hideView(binding.showStatsOverlayText)
-            } else if (deferGameSetupUntilStopCompletes) {
-                if (!isAdded) {
-                    return@collect
-                }
-                deferGameSetupUntilStopCompletes = false
-                finishGameSetup()
-                if (intentGame != null) {
-                    dualScreen.onGameResolved()
-                }
             }
         }
         emulationViewModel.drawerOpen.collect(viewLifecycleOwner) {
@@ -1267,6 +1299,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         driverViewModel.isInteractionAllowed.collect(viewLifecycleOwner) {
             if (it &&
+                nativeLaunchGate.emulating &&
                 !isStoppingForRomSwap &&
                 !NativeLibrary.isRunning() &&
                 !NativeLibrary.isPaused()
@@ -1733,7 +1766,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
     override fun onStart() {
         super.onStart()
-        dualScreen.onStart()
+        if (nativeLaunchGate.emulating) dualScreen.onStart()
     }
 
     override fun onStop() {
@@ -1742,6 +1775,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     override fun onPause() {
+        nativeLaunchGate.pause()
         if (this::emulationState.isInitialized) {
             if (emulationState.isRunning && emulationActivity?.isInPictureInPictureMode != true) {
                 pauseEmulationAndCaptureFrame()
@@ -1753,6 +1787,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     override fun onDestroyView() {
+        viewSetupComplete = false
         super.onDestroyView()
         dualScreen.onDestroyView()
         amiiboLoadJob?.cancel()
@@ -1767,6 +1802,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        nativeLaunchGate.destroy()
         // Eden Duo: belt-and-suspenders alongside lifecycleScope's own cancellation - make sure
         // an in-flight intent game resolution (resolveIntentGameAsync) never touches this
         // fragment again once it's torn down.
@@ -1784,6 +1820,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
     override fun onResume() {
         super.onResume()
+        nativeLaunchGate.resume()
+        if (!nativeLaunchGate.emulating) return
         NativeLibrary.refreshThreadPolicies()
         val b = _binding ?: return
         updateStatsPosition(IntSetting.PERF_OVERLAY_POSITION.getInt())
@@ -1803,10 +1841,6 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
         addQuickSettings()
         dualScreen.onResume()
-        // Eden Duo: the companion toggle gesture only exists where a companion window can.
-        if (org.yuzu.yuzu_emu.duo.DuoCapability.isAvailable(requireContext())) {
-            b.surfaceInputOverlay.touchscreenFilter = dualScreen.gameTouch::filter
-        }
     }
 
     // Eden Duo: the in-game menu's companion toggle names what it will do.
@@ -2228,6 +2262,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (!nativeLaunchGate.emulating || !this::emulationState.isInitialized) return
         Log.debug("[EmulationFragment] Surface changed. Resolution: " + width + "x" + height)
         if (!emulationStarted) {
             startEmulationForNewlyValidSurface(holder.surface)
@@ -2248,6 +2283,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
      * calls this directly instead of waiting for a callback that will now never fire.
      */
     private fun startEmulationForNewlyValidSurface(surface: Surface) {
+        if (!nativeLaunchGate.emulating || !this::emulationState.isInitialized) return
         emulationStarted = true
 
         // For intent launches, wait for driver initialization to complete
@@ -2257,7 +2293,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
                 // Driver is still initializing, wait for it
                 lifecycleScope.launch {
                     driverViewModel.isInteractionAllowed.collect { allowed ->
-                        if (allowed && surface.isValid) {
+                        if (allowed && surface.isValid && nativeLaunchGate.emulating &&
+                            this@EmulationFragment::emulationState.isInitialized) {
                             emulationState.newSurface(surface)
                         }
                     }
@@ -2747,7 +2784,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         // restore and a record/compile run's report; harmless when neither asked for it.
         private val onGameFinished: () -> Unit = {},
         // Eden Duo: hands this launch's record/compile modes to the native side before it runs.
-        private val prepareShaderRun: () -> Unit = {}
+        private val prepareShaderRun: () -> Unit = {},
+        private val withSaveSession: (() -> Unit) -> Unit
     ) {
         private var state: State
         private var surface: Surface? = null
@@ -2892,13 +2930,15 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
         }
 
         private fun runEmulation(programIndex: Int, frontendInitiated: Boolean) {
-            GameHelper.onEmulationStarting(gamePath, programId)
-            try {
-                prepareShaderRun()
-                NativeLibrary.run(gamePath, programIndex, frontendInitiated)
-            } finally {
-                GameHelper.onEmulationStopped()
-                onGameFinished()
+            withSaveSession {
+                GameHelper.onEmulationStarting(gamePath, programId)
+                try {
+                    prepareShaderRun()
+                    NativeLibrary.run(gamePath, programIndex, frontendInitiated)
+                } finally {
+                    GameHelper.onEmulationStopped()
+                    onGameFinished()
+                }
             }
         }
 

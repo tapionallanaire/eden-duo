@@ -19,4 +19,14 @@ object IntentGameSetupRules {
      */
     fun <T> deferredGame(currentGame: T?, argsGame: T?, intentGame: T?): T? =
         currentGame ?: argsGame ?: intentGame
+
+    /** Explicit emulation tools and system applets never enter the native launch chooser. */
+    fun ordinaryLaunch(
+        titleIdHex: String,
+        warmUpMinutes: Int,
+        recordShaders: Boolean,
+        compileShaders: Boolean,
+        compileMax: Boolean
+    ): Boolean = !titleIdHex.startsWith("010000000000") && warmUpMinutes == 0 &&
+        !recordShaders && !compileShaders && !compileMax
 }

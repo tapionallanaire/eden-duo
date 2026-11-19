@@ -14,9 +14,9 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <android/native_window_jni.h>
@@ -27,11 +27,11 @@
 #include "common/dynamic_library.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include "frontend_common/content_manager.h"
 #include "core/core.h"
-#include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
-#include "core/file_sys/submission_package.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "core/mods/mod_module.h"
@@ -360,31 +360,64 @@ jboolean Java_org_yuzu_yuzu_1emu_NativeLibrary_areKeysLoaded(JNIEnv* env, jobjec
     return static_cast<jboolean>(ContentManager::AreKeysPresent());
 }
 
-// Eden Duo: the base title ids a content container (an update/DLC NSP or XCI) carries content
-// for, so the library scan can remember which containers a game needs registered at boot.
-jlongArray Java_org_yuzu_yuzu_1emu_NativeLibrary_getContainerBaseTitleIds(JNIEnv* env,
-                                                                         jobject jobj,
-                                                                         jstring jpath) {
-    std::set<u64> base_title_ids;
+// Registration metadata survives missing files: Kotlin persists these records before a scan can
+// lose a path. Do not guess update versions or DLC kinds from a cached base title id.
+jlongArray Java_org_yuzu_yuzu_1emu_NativeLibrary_getContainerContentRecords(
+    JNIEnv* env, jobject jobj, jstring jpath) {
+    std::vector<jlong> records;
     const auto file = SessionSystem().GetFilesystem()->OpenFile(
         Common::Android::GetJString(env, jpath), FileSys::OpenMode::Read);
-    if (file) {
-        auto nsp = std::make_shared<FileSys::NSP>(file);
-        if (nsp->GetStatus() != Loader::ResultStatus::Success) {
-            FileSys::XCI xci{file};
-            nsp = xci.GetStatus() == Loader::ResultStatus::Success ? xci.GetSecurePartitionNSP()
-                                                                   : nullptr;
-        }
-        if (nsp) {
-            for (const auto& [title_id, ncas] : nsp->GetNCAs()) {
-                base_title_ids.insert(FileSys::GetBaseTitleID(title_id));
+    FileSys::ManualContentProvider provider;
+    if (file && provider.AddEntriesFromContainer(file)) {
+        for (const auto& [type, kind] :
+             {std::pair{FileSys::TitleType::Application, 0},
+              std::pair{FileSys::TitleType::Update, 1},
+              std::pair{FileSys::TitleType::AOC, 2}}) {
+            std::vector<u64> seen;
+            for (const auto& entry : provider.ListEntriesFilter(type, std::nullopt, std::nullopt)) {
+                if (std::ranges::find(seen, entry.title_id) != seen.end()) {
+                    continue;
+                }
+                seen.push_back(entry.title_id);
+                if (type == FileSys::TitleType::Update) {
+                    for (const auto& update : provider.ListUpdateVersions(entry.title_id)) {
+                        records.insert(records.end(),
+                                       {static_cast<jlong>(FileSys::GetBaseTitleID(entry.title_id)),
+                                        kind, static_cast<jlong>(update.version)});
+                    }
+                } else {
+                    records.insert(records.end(),
+                                   {static_cast<jlong>(FileSys::GetBaseTitleID(entry.title_id)),
+                                    kind, 0});
+                }
             }
         }
     }
+    jlongArray result = env->NewLongArray(static_cast<jsize>(records.size()));
+    env->SetLongArrayRegion(result, 0, static_cast<jsize>(records.size()), records.data());
+    return result;
+}
 
-    const std::vector<jlong> ids(base_title_ids.begin(), base_title_ids.end());
-    jlongArray result = env->NewLongArray(static_cast<jsize>(ids.size()));
-    env->SetLongArrayRegion(result, 0, static_cast<jsize>(ids.size()), ids.data());
+jobjectArray Java_org_yuzu_yuzu_1emu_NativeLibrary_getDisabledContentAddons(
+    JNIEnv* env, jobject jobj, jstring jprogram_id) {
+    const auto program_id = EmulationSession::GetProgramId(env, jprogram_id);
+    std::vector<std::string> disabled;
+    const auto append = [&](u64 id) {
+        if (const auto it = Settings::values.disabled_addons.find(id);
+            it != Settings::values.disabled_addons.end()) {
+            disabled.insert(disabled.end(), it->second.begin(), it->second.end());
+        }
+    };
+    append(program_id);
+    if (const auto parent = SessionSystem().GetContentProvider().GetParentApplicationId(program_id)) {
+        append(*parent);
+    }
+    jobjectArray result = env->NewObjectArray(static_cast<jsize>(disabled.size()),
+                                              Common::Android::GetStringClass(), nullptr);
+    for (size_t i = 0; i < disabled.size(); ++i) {
+        env->SetObjectArrayElement(result, static_cast<jsize>(i),
+                                   Common::Android::ToJString(env, disabled[i]));
+    }
     return result;
 }
 

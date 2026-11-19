@@ -66,3 +66,44 @@ upstream files; reflowed upstream code conflicts on every sync.
 Not a sync tool: the pixel check from PR #12 for Trails through Daybreak II rendering
 (stale or missing textures). It needs your own 1920x1080 captures of the scenes named in
 its header and Pillow (plus ffmpeg for the video modes); it is not run by any test suite.
+
+## `native-support-catalog.py`
+
+Check Duet's native routing catalog against the private Peanuts and Banana source
+worktrees; add `--write` only after reviewing the proposed diff:
+
+```sh
+python tools/duo/native-support-catalog.py --peanuts /path/to/peanuts --banana /path/to/banana
+```
+
+Peanuts uses its published Switch 1 Android list plus the private Z-A and Hogwarts
+profiles. Banana uses its declared Android-ready Switch 2 profiles. Preserve every
+registered code/module build allowed by `android_builds`; `shader_versions` is
+capture provenance, not a supported-code allowlist. Prepare independently verifies
+shader coverage. This does not make desktop-only profiles Android-ready.
+
+Title recognition opens the native/emulated choice independently of exact-build
+readiness. A mismatching version remains visible there but cannot run incompatible
+native code. Updating this catalog also updates Gradle's embedded profile selection;
+build with the same reviewed source worktrees.
+
+Readiness keeps the first identified program's actual admission failure on the
+fullscreen choice page. Enabled emulator mods block native preparation; they are
+not silently ignored or disabled, and the reason points to the game's settings.
+For Switch Save Sync, local units are sixteen-hex title directories only.
+Native `.lock`, `.work`, `.new`, `.re` and `.restore` siblings are not Sync units
+and must not be removed to make enumeration succeed. Remote units still pass the
+existing strict name and canonical-parent checks.
+
+Native save-lease replies cross Binder with an app-defined receiver. Set the
+received Bundle's app class loader before reading any field, including the
+token: older Android versions may eagerly unpack every Parcelable.
+
+Native game processes also need separate tasks: the embedded manifests use
+`${applicationId}.native`, and the caller explicitly supplies `FLAG_ACTIVITY_NEW_TASK`.
+Affinity and `singleTask` alone can leave a result launch in the caller's task;
+Android's native-crash cleanup then finishes both activities. An immediate canceled
+result is expected with the explicit flag: wait for save-lease release and the
+native exit record rather than treating that result as a completed game.
+Keep startup failures first in the fallback toast; Android's two-line limit can
+otherwise hide the cause behind the generic emulation message.

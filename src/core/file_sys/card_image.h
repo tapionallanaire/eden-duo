@@ -77,7 +77,8 @@ enum class XCIPartition : u8 { Update, Normal, Secure, Logo };
 
 class XCI : public ReadOnlyVfsDirectory {
 public:
-    explicit XCI(VirtualFile file, u64 program_id = 0, size_t program_index = 0);
+    explicit XCI(VirtualFile file, u64 program_id = 0, size_t program_index = 0,
+                 bool import_tickets = true);
     ~XCI() override;
 
     Loader::ResultStatus GetStatus() const;

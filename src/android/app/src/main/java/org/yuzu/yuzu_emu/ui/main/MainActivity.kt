@@ -372,6 +372,7 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         org.yuzu.yuzu_emu.duo.sync.DuetSaveSync.get(this).syncAllInBackground(this) // Duet Plus: save sync
     }
 
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
@@ -523,30 +524,4 @@ class MainActivity : AppCompatActivity(), ThemeProvider {
         )
     }
 
-    val exportUserData = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/zip")
-    ) { result ->
-        if (result == null) {
-            return@registerForActivityResult
-        }
-        InstallableActions.exportUserData(
-            activity = this,
-            fragmentManager = supportFragmentManager,
-            result = result
-        )
-    }
-
-    val importUserData =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { result ->
-            if (result == null) {
-                return@registerForActivityResult
-            }
-            InstallableActions.importUserData(
-                activity = this,
-                fragmentManager = supportFragmentManager,
-                gamesViewModel = gamesViewModel,
-                driverViewModel = driverViewModel,
-                result = result
-            )
-        }
 }

@@ -169,12 +169,18 @@ class CompanionTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        if (YuzuApplication.startupDeferred) return
         CompanionToggle.toggle(this)
         update()
     }
 
     private fun update() {
         val tile = qsTile ?: return
+        if (YuzuApplication.startupDeferred) {
+            tile.state = Tile.STATE_UNAVAILABLE
+            tile.updateTile()
+            return
+        }
         if (DuoCapability.isSingleScreen(this)) {
             tile.state = Tile.STATE_UNAVAILABLE
             tile.updateTile()

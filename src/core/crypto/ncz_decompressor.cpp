@@ -148,6 +148,10 @@ public:
     BlockReader(const BlockReader&) = delete;
     BlockReader& operator=(const BlockReader&) = delete;
 
+    std::vector<std::string> GetSourcePaths() const {
+        return source->GetSourcePaths();
+    }
+
     std::size_t ReadAt(u64 position, std::span<u8> out) {
         std::size_t done = 0;
         while (done < out.size() && position < decompressed_size) {
@@ -236,6 +240,9 @@ public:
     std::size_t GetSize() const override { return static_cast<std::size_t>(nca_size); }
     bool Resize(std::size_t) override { return false; }
     FileSys::VirtualDir GetContainingDirectory() const override { return nullptr; }
+    std::vector<std::string> GetSourcePaths() const override {
+        return body->GetSourcePaths();
+    }
     bool IsWritable() const override { return false; }
     bool IsReadable() const override { return true; }
 
@@ -320,6 +327,9 @@ public:
     }
     bool Resize(std::size_t) override { return false; }
     FileSys::VirtualDir GetContainingDirectory() const override { return nullptr; }
+    std::vector<std::string> GetSourcePaths() const override {
+        return source->GetSourcePaths();
+    }
     bool IsWritable() const override { return false; }
     bool IsReadable() const override { return true; }
 

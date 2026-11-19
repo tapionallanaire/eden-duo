@@ -34,7 +34,9 @@ import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.GamePropertiesAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentGamePropertiesBinding
 import org.yuzu.yuzu_emu.duo.SaveZipImport
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.features.DocumentProvider
+import org.yuzu.yuzu_emu.features.DocumentProviderPaths
 import org.yuzu.yuzu_emu.features.settings.model.Settings
 import org.yuzu.yuzu_emu.features.settings.model.StringSetting
 import org.yuzu.yuzu_emu.features.settings.ui.SettingsSubscreen
@@ -73,9 +75,13 @@ class GamePropertiesFragment : Fragment() {
     private val driverViewModel: DriverViewModel by activityViewModels()
 
     private val args by navArgs<GamePropertiesFragmentArgs>()
+    private var importSaveIdentity: String? = null
+    private var exportSaveIdentity: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        importSaveIdentity = savedInstanceState?.getString("importSaveIdentity")
+        exportSaveIdentity = savedInstanceState?.getString("exportSaveIdentity")
         enterTransition = MaterialSharedAxis(MaterialSharedAxis.Y, true)
         returnTransition = MaterialSharedAxis(MaterialSharedAxis.Y, false)
         reenterTransition = MaterialSharedAxis(MaterialSharedAxis.X, false)
@@ -304,8 +310,8 @@ class GamePropertiesFragment : Fragment() {
         }
     }
 
-    private fun reloadList() {
-        _binding ?: return
+    private fun reloadList() = withSaveAccess {
+        _binding ?: return@withSaveAccess
 
         driverViewModel.updateDriverNameForGame(args.game)
         val properties = mutableListOf<GameProperty>().apply {
@@ -320,6 +326,17 @@ class GamePropertiesFragment : Fragment() {
                             args.game
                         )
                         binding.root.findNavController().navigate(action)
+                    }
+                )
+            )
+            add(
+                SubmenuProperty(
+                    R.string.native_settings,
+                    R.string.native_mode_explanation,
+                    R.drawable.ic_settings,
+                    action = {
+                        startActivity(org.yuzu.yuzu_emu.duo.nativeplay.NativeSettingsActivity.intent(
+                            requireContext(), args.game))
                     }
                 )
             )
@@ -484,7 +501,8 @@ class GamePropertiesFragment : Fragment() {
                         R.string.save_data,
                         R.string.save_data_description,
                         R.drawable.ic_save,
-                        {
+                        { withSaveAccess {
+                            importSaveIdentity = NativeSaveSession.identity(requireContext())
                             MessageDialogFragment.newInstance(
                                 requireActivity(),
                                 titleId = R.string.import_save_warning,
@@ -497,9 +515,12 @@ class GamePropertiesFragment : Fragment() {
                                     ),
                                 positiveAction = { homeViewModel.setOpenImportSaves(true) }
                             ).show(parentFragmentManager, MessageDialogFragment.TAG)
-                        },
+                        } },
                         if (File(args.game.saveDir).exists()) {
-                            { exportSaves.launch(args.game.saveZipName) }
+                            { withSaveAccess {
+                                exportSaveIdentity = NativeSaveSession.identity(requireContext())
+                                exportSaves.launch(args.game.saveZipName)
+                            } }
                         } else {
                             null
                         }
@@ -513,24 +534,26 @@ class GamePropertiesFragment : Fragment() {
                             R.string.delete_save_data,
                             R.string.delete_save_data_description,
                             R.drawable.ic_delete,
-                            action = {
+                            action = { withSaveAccess {
+                                val identity = NativeSaveSession.identity(requireContext())
                                 MessageDialogFragment.newInstance(
                                     requireActivity(),
                                     titleId = R.string.delete_save_data,
                                     descriptionId = R.string.delete_save_data_warning_description,
                                     positiveButtonTitleId = android.R.string.cancel,
                                     negativeButtonTitleId = android.R.string.ok,
-                                    negativeAction = {
-                                        File(args.game.saveDir).deleteRecursively()
+                                    negativeAction = { withSaveAccess {
+                                        NativeSaveSession.assertIdentity(requireContext(), identity)
+                                        check(File(args.game.saveDir).deleteRecursively()) { "Could not delete the save data." }
                                         Toast.makeText(
                                             YuzuApplication.appContext,
                                             R.string.save_data_deleted_successfully,
                                             Toast.LENGTH_SHORT
                                         ).show()
                                         homeViewModel.reloadPropertiesList(true)
-                                    }
+                                    } }
                                 ).show(parentFragmentManager, MessageDialogFragment.TAG)
-                            }
+                            } }
                         )
                     )
                 }
@@ -666,6 +689,20 @@ class GamePropertiesFragment : Fragment() {
         }
     }
 
+    private fun withSaveAccess(action: () -> Unit) {
+        try {
+            NativeSaveSession.acquire(requireContext()).use { action() }
+        } catch (e: IllegalStateException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("importSaveIdentity", importSaveIdentity)
+        outState.putString("exportSaveIdentity", exportSaveIdentity)
+    }
+
     override fun onResume() {
         super.onResume()
         driverViewModel.updateDriverNameForGame(args.game)
@@ -725,7 +762,7 @@ class GamePropertiesFragment : Fragment() {
             // every outcome is the task result, shown on the main thread.
             val activity = requireActivity()
             val game = args.game
-            val savesFolder = File(game.saveDir)
+            val identity = importSaveIdentity
             val stagingDir = File(activity.cacheDir, "duo_save_import")
 
             ProgressDialogFragment.newInstance(
@@ -733,15 +770,30 @@ class GamePropertiesFragment : Fragment() {
                 R.string.save_files_importing,
                 false
             ) { _, _ ->
-                try {
-                    val staged = SaveZipImport.stage(
-                        { FileUtil.getInputStream(result.toString()) },
-                        game.programIdHex,
-                        stagingDir
+                lateinit var savesFolder: File
+                var replaced = false
+                val staged = NativeSaveSession.acquire(activity).use {
+                    NativeSaveSession.assertIdentity(
+                        activity, checkNotNull(identity) { "The save/profile selection expired; choose the file again." }
                     )
-                    when (staged) {
+                    savesFolder = File(game.saveDir)
+                    try {
+                        SaveZipImport.stage(
+                            { FileUtil.getInputStream(result.toString()) },
+                            game.programIdHex,
+                            stagingDir
+                        ).also {
+                            if (it is SaveZipImport.Result.Staged) {
+                                replaced = SaveZipImport.replaceDirectory(stagingDir, savesFolder)
+                            }
+                        }
+                    } finally {
+                        stagingDir.deleteRecursively()
+                    }
+                }
+                when (staged) {
                         is SaveZipImport.Result.Staged -> {
-                            if (!SaveZipImport.replaceDirectory(stagingDir, savesFolder)) {
+                            if (!replaced) {
                                 return@newInstance withContext(Dispatchers.Main) {
                                     MessageDialogFragment.newInstance(
                                         activity,
@@ -789,9 +841,6 @@ class GamePropertiesFragment : Fragment() {
                             )
                         }
                     }
-                } finally {
-                    stagingDir.deleteRecursively()
-                }
             }.show(parentFragmentManager, ProgressDialogFragment.TAG)
         }
 
@@ -811,6 +860,11 @@ class GamePropertiesFragment : Fragment() {
             R.string.save_files_exporting,
             false
         ) { _, _ ->
+            NativeSaveSession.acquire(requireContext()).use {
+                NativeSaveSession.assertIdentity(
+                    requireContext(),
+                    checkNotNull(exportSaveIdentity) { "The save/profile selection expired; choose the destination again." }
+                )
             val saveLocation = args.game.saveDir
             val zipResult = FileUtil.zipFromInternalStorage(
                 File(saveLocation),
@@ -821,6 +875,7 @@ class GamePropertiesFragment : Fragment() {
             return@newInstance when (zipResult) {
                 TaskState.Completed -> getString(R.string.export_success)
                 TaskState.Cancelled, TaskState.Failed -> getString(R.string.export_failed)
+            }
             }
         }.show(parentFragmentManager, ProgressDialogFragment.TAG)
     }
@@ -891,7 +946,7 @@ class GamePropertiesFragment : Fragment() {
             requireContext(),
             DocumentsContract.buildDocumentUri(
                 DocumentProvider.AUTHORITY,
-                "${DocumentProvider.ROOT_ID}/${configFile}"
+                DocumentProviderPaths.documentId(File(requireNotNull(DirectoryInitialization.userDirectory)), configFile)
             )
         )!!
 
@@ -911,22 +966,36 @@ class GamePropertiesFragment : Fragment() {
     }
     /** Eden Duo: asks how long the warm-up runs, then starts it with the saves backed up. */
     private fun showWarmUpPicker() {
+        val identity = try {
+            NativeSaveSession.acquire(requireContext()).use { NativeSaveSession.identity(requireContext()) }
+        } catch (e: IllegalStateException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+            return
+        }
         val labels = org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS
             .map { getString(R.string.warm_up_minutes, it) }
             .toTypedArray()
         com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.warm_up_duration_title)
             .setMessage(R.string.warm_up_confirmation)
-            .setItems(labels) { _, which -> startWarmUp(org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS[which]) }
+            .setItems(labels) { _, which -> startWarmUp(org.yuzu.yuzu_emu.utils.WarmUp.DURATIONS[which], identity) }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
-    private fun startWarmUp(minutes: Int) {
+    private fun startWarmUp(minutes: Int, identity: String) {
         val game = args.game
         viewLifecycleOwner.lifecycleScope.launch {
-            val backup = withContext(Dispatchers.IO) {
-                org.yuzu.yuzu_emu.utils.WarmUp.backupSaves(requireContext(), game)
+            val backup = try {
+                withContext(Dispatchers.IO) {
+                    NativeSaveSession.acquire(requireContext()).use {
+                        NativeSaveSession.assertIdentity(requireContext(), identity)
+                        org.yuzu.yuzu_emu.utils.WarmUp.backupSaves(requireContext(), game)
+                    }
+                }
+            } catch (e: IllegalStateException) {
+                Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+                return@launch
             }
             val before = org.yuzu.yuzu_emu.utils.WarmUp.shaderCount(game)
             startActivity(
@@ -934,6 +1003,7 @@ class GamePropertiesFragment : Fragment() {
                     putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_MINUTES, minutes)
                     putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_BACKUP, backup?.absolutePath)
                     putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SHADERS_BEFORE, before)
+                    putExtra(org.yuzu.yuzu_emu.utils.WarmUp.EXTRA_SAVE_IDENTITY, identity)
                 }
             )
         }

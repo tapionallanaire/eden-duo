@@ -29,6 +29,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.databinding.FragmentEmulatorImportBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.features.settings.ui.SettingsSubscreenActivity
 import org.yuzu.yuzu_emu.model.EmulatorImportViewModel
 import org.yuzu.yuzu_emu.utils.EmulatorImportConfig
@@ -73,6 +74,7 @@ class EmulatorImportFragment : Fragment() {
             }
         )
         binding.source.setOnClickListener {
+            if (!model.captureIdentity(reset = true)) return@setOnClickListener
             val sources = EmulatorImportSources.installed(requireContext())
             val group = RadioGroup(requireContext()).apply {
                 orientation = RadioGroup.VERTICAL
@@ -110,6 +112,7 @@ class EmulatorImportFragment : Fragment() {
                 .show()
         }
         binding.backup.setOnClickListener {
+            if (!model.captureIdentity(reset = true)) return@setOnClickListener
             model.pendingUseExisting = false
             zipPicker.launch(
                 arrayOf("application/zip", "application/octet-stream")
@@ -250,6 +253,9 @@ class EmulatorImportFragment : Fragment() {
 
     /** After an import with several profiles: saves are per profile, so let the player pick. */
     private fun chooseProfile() {
+        try {
+            NativeSaveSession.acquire(requireContext()).use {
+                val identity = NativeSaveSession.identity(requireContext())
         val users = runCatching { NativeLibrary.getAllUsers()?.toList() }.getOrNull().orEmpty()
         if (users.size < 2) return
         val names = users.map { NativeLibrary.getUserUsername(it)?.takeIf { n -> n.isNotBlank() } ?: it }
@@ -260,15 +266,35 @@ class EmulatorImportFragment : Fragment() {
             .setMessage(getString(R.string.emulator_import_profile_description, names[current]))
             .setSingleChoiceItems(names.toTypedArray(), current) { _, which -> selected = which }
             .setPositiveButton(android.R.string.ok) { _, _ ->
-                if (selected != current) NativeLibrary.setCurrentUser(users[selected])
+                try {
+                    NativeSaveSession.acquire(requireContext()).use {
+                        NativeSaveSession.assertIdentity(requireContext(), identity)
+                        if (selected != current) NativeLibrary.setCurrentUser(users[selected])
+                    }
+                } catch (e: IllegalStateException) {
+                    showSaveAccessError(e)
+                }
             }
             .setNegativeButton(android.R.string.cancel, null)
+            .show()
+            }
+        } catch (e: IllegalStateException) {
+            showSaveAccessError(e)
+        }
+    }
+
+    private fun showSaveAccessError(error: IllegalStateException) {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.error)
+            .setMessage(error.message)
+            .setPositiveButton(android.R.string.ok, null)
             .show()
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private fun chooseFolderMode(kind: EmulatorImportConfig.Kind, initial: Uri?) {
+        if (!model.captureIdentity()) return
         val initialDocument = initial?.let { uri ->
             runCatching {
                 if (DocumentsContract.isTreeUri(uri)) {
@@ -323,6 +349,7 @@ class EmulatorImportFragment : Fragment() {
     }
 
     private fun confirmImport(restore: Boolean) {
+        if (!model.captureIdentity(reset = restore)) return
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(
                 if (restore) R.string.emulator_import_restore else R.string.emulator_import_apply

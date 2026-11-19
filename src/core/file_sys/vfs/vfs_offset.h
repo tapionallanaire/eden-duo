@@ -26,6 +26,7 @@ public:
     std::size_t GetSize() const override;
     bool Resize(std::size_t new_size) override;
     VirtualDir GetContainingDirectory() const override;
+    std::vector<std::string> GetSourcePaths() const override;
     bool IsWritable() const override;
     bool IsReadable() const override;
     std::size_t Read(u8* data, std::size_t length, std::size_t offset) const override;

@@ -23,6 +23,7 @@ import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.InstallableAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentInstallablesBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.model.AddonViewModel
 import org.yuzu.yuzu_emu.model.DriverViewModel
 import org.yuzu.yuzu_emu.model.GamesViewModel
@@ -48,9 +49,24 @@ class InstallableFragment : Fragment() {
     private val gamesViewModel: GamesViewModel by activityViewModels()
     private val addonViewModel: AddonViewModel by activityViewModels()
     private val driverViewModel: DriverViewModel by activityViewModels()
+    private var saveIdentity: String? = null
+
+    private fun withSaveAccess(action: () -> Unit) {
+        try {
+            NativeSaveSession.acquire(requireContext()).use { action() }
+        } catch (e: IllegalStateException) {
+            Toast.makeText(requireContext(), e.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("saveIdentity", saveIdentity)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        saveIdentity = savedInstanceState?.getString("saveIdentity")
         enterTransition = MaterialSharedAxis(MaterialSharedAxis.X, true)
         returnTransition = MaterialSharedAxis(MaterialSharedAxis.X, false)
         reenterTransition = MaterialSharedAxis(MaterialSharedAxis.X, false)
@@ -86,21 +102,29 @@ class InstallableFragment : Fragment() {
             Installable(
                 R.string.user_data,
                 R.string.user_data_description,
-                install = { importUserDataLauncher.launch(arrayOf("application/zip")) },
-                export = { exportUserDataLauncher.launch("export.zip") }
+                install = { withSaveAccess {
+                    saveIdentity = NativeSaveSession.identity(requireContext())
+                    importUserDataLauncher.launch(arrayOf("application/zip"))
+                } },
+                export = { withSaveAccess {
+                    saveIdentity = NativeSaveSession.identity(requireContext())
+                    exportUserDataLauncher.launch("export.zip")
+                } }
             ),
             Installable(
                 R.string.manage_save_data,
                 R.string.manage_save_data_description,
-                install = {
+                install = { withSaveAccess {
+                    saveIdentity = NativeSaveSession.identity(requireContext())
                     MessageDialogFragment.newInstance(
                         requireActivity(),
                         titleId = R.string.import_save_warning,
                         descriptionId = R.string.import_save_warning_description,
                         positiveAction = { homeViewModel.setOpenImportSaves(true) }
                     ).show(parentFragmentManager, MessageDialogFragment.TAG)
-                },
-                export = {
+                } },
+                export = { withSaveAccess {
+                    saveIdentity = NativeSaveSession.identity(requireContext())
                     val oldSaveDataFolder = File(
                         PathUtil.saveDir() +
                             NativeLibrary.getDefaultProfileSaveDataRoot(false)
@@ -115,7 +139,7 @@ class InstallableFragment : Fragment() {
                             R.string.no_save_data_found,
                             Toast.LENGTH_SHORT
                         ).show()
-                        return@Installable
+                        return@withSaveAccess
                     } else {
                         exportSaves.launch(
                             "${getString(R.string.save_data)} " +
@@ -124,7 +148,7 @@ class InstallableFragment : Fragment() {
                                 )
                         )
                     }
-                }
+                } }
             ),
             Installable(
                 R.string.install_game_content,
@@ -246,7 +270,8 @@ class InstallableFragment : Fragment() {
                     fragmentManager = parentFragmentManager,
                     gamesViewModel = gamesViewModel,
                     driverViewModel = driverViewModel,
-                    result = result
+                    result = result,
+                    expectedIdentity = saveIdentity
                 )
             }
         }
@@ -257,7 +282,8 @@ class InstallableFragment : Fragment() {
                 InstallableActions.exportUserData(
                     activity = requireActivity(),
                     fragmentManager = parentFragmentManager,
-                    result = result
+                    result = result,
+                    expectedIdentity = saveIdentity
                 )
             }
         }
@@ -276,15 +302,20 @@ class InstallableFragment : Fragment() {
                 R.string.save_files_importing,
                 false
             ) { progressCallback, _ ->
+                var successfulImports = 0
+                var failedImports = 0
                 try {
+                    NativeSaveSession.acquire(requireContext()).use {
+                        NativeSaveSession.assertIdentity(
+                            requireContext(),
+                            checkNotNull(saveIdentity) { "The save/profile selection expired; choose the file again." }
+                        )
                     FileUtil.unzipToInternalStorage(
                         result.toString(),
                         cacheSaveDir,
                         progressCallback
                     )
                     val files = cacheSaveDir.listFiles()
-                    var successfulImports = 0
-                    var failedImports = 0
                     if (files != null) {
                         for (file in files) {
                             if (file.isDirectory) {
@@ -304,6 +335,8 @@ class InstallableFragment : Fragment() {
                                 successfulImports++
                             }
                         }
+                    }
+                        cacheSaveDir.deleteRecursively()
                     }
 
                     withContext(Dispatchers.Main) {
@@ -346,13 +379,14 @@ class InstallableFragment : Fragment() {
                         ).show(parentFragmentManager, MessageDialogFragment.TAG)
                     }
 
-                    cacheSaveDir.deleteRecursively()
                 } catch (e: Exception) {
-                    Toast.makeText(
-                        YuzuApplication.appContext,
-                        getString(R.string.fatal_error),
-                        Toast.LENGTH_LONG
-                    ).show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            YuzuApplication.appContext,
+                            e.message ?: getString(R.string.fatal_error),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }.show(parentFragmentManager, ProgressDialogFragment.TAG)
         }
@@ -369,6 +403,11 @@ class InstallableFragment : Fragment() {
             R.string.save_files_exporting,
             false
         ) { _, _ ->
+            NativeSaveSession.acquire(requireContext()).use {
+                NativeSaveSession.assertIdentity(
+                    requireContext(),
+                    checkNotNull(saveIdentity) { "The save/profile selection expired; choose the destination again." }
+                )
             val cacheSaveDir = File("${requireContext().cacheDir.path}/saves/")
             cacheSaveDir.mkdir()
 
@@ -404,6 +443,7 @@ class InstallableFragment : Fragment() {
             return@newInstance when (zipResult) {
                 TaskState.Completed -> getString(R.string.export_success)
                 TaskState.Cancelled, TaskState.Failed -> getString(R.string.export_failed)
+            }
             }
         }.show(parentFragmentManager, ProgressDialogFragment.TAG)
     }

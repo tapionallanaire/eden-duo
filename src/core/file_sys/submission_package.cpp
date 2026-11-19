@@ -23,7 +23,7 @@
 
 namespace FileSys {
 
-NSP::NSP(VirtualFile file_, u64 title_id_, std::size_t program_index_)
+NSP::NSP(VirtualFile file_, u64 title_id_, std::size_t program_index_, bool import_tickets)
     : file(std::move(file_)), expected_program_id(title_id_),
       program_index(program_index_), status{Loader::ResultStatus::Success},
       pfs(std::make_shared<PartitionFilesystem>(file)), keys{Core::Crypto::KeyManager::Instance()} {
@@ -40,7 +40,9 @@ NSP::NSP(VirtualFile file_, u64 title_id_, std::size_t program_index_)
         return;
     }
 
-    SetTicketKeys(files);
+    if (import_tickets) {
+        SetTicketKeys(files);
+    }
     ReadNCAs(files);
 }
 

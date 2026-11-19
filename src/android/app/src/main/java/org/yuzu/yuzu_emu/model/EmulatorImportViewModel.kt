@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.utils.DirectoryInitialization
 import org.yuzu.yuzu_emu.utils.EmulatorDataImporter
 import org.yuzu.yuzu_emu.utils.EmulatorImportConfig
@@ -67,6 +68,18 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
     var pendingSource: EmulatorImportSources.Source? = null
     var pendingFolder: EmulatorImportConfig.Folder? = null
     var pendingAdditionalKind: EmulatorImportConfig.Kind? = null
+    private var saveIdentity: String? = null
+
+    fun captureIdentity(reset: Boolean = false): Boolean = try {
+        NativeSaveSession.acquire(context).use {
+            if (reset || saveIdentity == null) saveIdentity = NativeSaveSession.identity(context)
+            else NativeSaveSession.assertIdentity(context, requireNotNull(saveIdentity))
+        }
+        true
+    } catch (e: IllegalStateException) {
+        _state.update { it.copy(message = e.message.orEmpty()) }
+        false
+    }
 
     init {
         viewModelScope.launch(Dispatchers.IO) { refreshBackupAvailable() }
@@ -74,6 +87,8 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
 
     /** Disk I/O: call off the main thread. */
     private fun refreshBackupAvailable() {
+        try {
+            NativeSaveSession.acquire(context).use {
         val backup = runCatching { EmulatorDataImporter.latestBackup(userDirectory) }.getOrNull()
         val time = backup?.let { File(it.directory, "state").lastModified() } ?: 0L
         val bytes = backup?.let { session ->
@@ -81,6 +96,10 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
                 .getOrDefault(0L)
         } ?: 0L
         _state.update { it.copy(backupAvailable = backup != null, backupTime = time, backupBytes = bytes) }
+            }
+        } catch (e: IllegalStateException) {
+            _state.update { it.copy(backupAvailable = false, message = e.message.orEmpty()) }
+        }
     }
 
     /** Fails before a long copy instead of after it: the replacement needs no running game. */
@@ -250,6 +269,7 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
                         throw IOException(context.getString(R.string.emulator_import_game_running))
                     }
                     NativeConfig.saveGlobalConfig()
+                    NativeSaveSession.invalidateSourceReadBoundaries()
                     NativeConfig.unloadGlobalConfig()
                     try {
                         if (restore) {
@@ -300,6 +320,7 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
         NativeLibrary.initializeSystem(true)
         NativeLibrary.reloadKeys()
         NativeLibrary.reloadProfiles()
+        NativeSaveSession.refreshSourceReadBoundaries(context)
     }
 
     private fun runOperation(reset: Boolean = false, applying: Boolean = false, action: () -> Unit) {
@@ -314,11 +335,17 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
         )
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                action()
+                NativeSaveSession.acquire(context).use {
+                    NativeSaveSession.assertIdentity(
+                        context,
+                        checkNotNull(saveIdentity) { "The save/profile selection expired; choose the source again." }
+                    )
+                    action()
+                }
             } catch (e: Throwable) {
                 // Also an Error (out of memory during a large copy): busy must clear either way.
                 if (reset) {
-                    session?.discard()
+                    discardSession()
                     session = null
                 }
                 _state.value = _state.value.copy(
@@ -333,9 +360,18 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
                     }
                 )
             } finally {
-                if (cleared.get()) session?.discard()
+                if (cleared.get()) discardSession()
                 refreshBackupAvailable()
             }
+        }
+    }
+
+    private fun discardSession() {
+        try {
+            NativeSaveSession.acquire(context).use { session?.discard() }
+        } catch (e: IllegalStateException) {
+            // Keep staged data when another writer owns saves; a later import can prune it.
+            _state.update { it.copy(message = e.message.orEmpty()) }
         }
     }
 
@@ -355,7 +391,7 @@ class EmulatorImportViewModel(application: Application) : AndroidViewModel(appli
     override fun onCleared() {
         cleared.set(true)
         cancelled.set(true)
-        if (!_state.value.busy) session?.discard()
+        if (!_state.value.busy) discardSession()
         super.onCleared()
     }
 

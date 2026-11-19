@@ -191,6 +191,10 @@ public:
 
     // Returns the full path of this file as a string, recursively
     virtual std::string GetFullPath() const;
+
+    // Returns backing source paths for freshness checks, not logical wrapper names.
+    // Wrappers forward recursively; concatenations preserve constituent order.
+    virtual std::vector<std::string> GetSourcePaths() const;
 };
 
 // A class representing a directory in an abstract filesystem.

@@ -18,6 +18,9 @@ public:
 
     std::string GetName() const override;
     std::size_t GetSize() const override;
+    std::vector<std::string> GetSourcePaths() const override {
+        return base->GetSourcePaths();
+    }
     bool Resize(std::size_t new_size) override;
     std::shared_ptr<FileSys::VfsDirectory> GetContainingDirectory() const override;
     bool IsWritable() const override;

@@ -262,6 +262,8 @@ private:
 
 class ManualContentProvider : public ContentProvider {
 public:
+    ManualContentProvider() = default;
+    ManualContentProvider(const ManualContentProvider& other);
     ~ManualContentProvider() override;
 
     void AddEntry(TitleType title_type, ContentRecordType content_type, u64 title_id,
@@ -269,6 +271,8 @@ public:
     void AddEntryWithVersion(TitleType title_type, ContentRecordType content_type, u64 title_id,
                              u32 version, const std::string& version_string, VirtualFile file);
     bool AddEntriesFromContainer(VirtualFile file, bool only_content = false,
+                                 std::optional<u64> base_program_id = std::nullopt);
+    bool AddEntriesFromContainer(const std::shared_ptr<NSP>& nsp, bool only_content = false,
                                  std::optional<u64> base_program_id = std::nullopt);
     void ClearAllEntries();
 

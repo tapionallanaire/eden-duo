@@ -8,6 +8,7 @@ import java.io.IOException
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.features.settings.model.BooleanSetting
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.features.settings.model.IntSetting
 import org.yuzu.yuzu_emu.features.settings.model.Settings
 import org.yuzu.yuzu_emu.overlay.model.OverlayControlData
@@ -22,12 +23,14 @@ object DirectoryInitialization {
 
     fun start() {
         if (!areDirectoriesReady) {
-            initializeInternalStorage()
-            NativeConfig.initializeGlobalConfig()
-            NativeLibrary.initializeSystem(false)
-            NativeLibrary.reloadProfiles()
-            migrateSettings()
-            areDirectoriesReady = true
+            NativeSaveSession.acquire(YuzuApplication.appContext).use {
+                initializeInternalStorage()
+                NativeConfig.initializeGlobalConfig()
+                NativeLibrary.initializeSystem(false)
+                NativeLibrary.reloadProfiles()
+                migrateSettings()
+                areDirectoriesReady = true
+            }
         }
     }
 

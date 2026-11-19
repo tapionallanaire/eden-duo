@@ -201,6 +201,10 @@ std::string VfsFile::GetFullPath() const {
     return GetContainingDirectory()->GetFullPath() + '/' + GetName();
 }
 
+std::vector<std::string> VfsFile::GetSourcePaths() const {
+    return {GetFullPath()};
+}
+
 VirtualFile VfsDirectory::GetFileRelative(std::string_view path) const {
     auto vec = Common::FS::SplitPathComponents(path);
     if (vec.empty()) {

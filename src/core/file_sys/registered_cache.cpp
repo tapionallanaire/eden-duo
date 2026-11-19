@@ -1244,6 +1244,12 @@ const ExternalContentProvider* ContentProviderUnion::GetExternalProvider() const
     return static_cast<const ExternalContentProvider*>(providers[size_t(ContentProviderUnionSlot::External)]);
 }
 
+ManualContentProvider::ManualContentProvider(const ManualContentProvider& other) {
+    std::scoped_lock lock{other.mutex};
+    entries = other.entries;
+    multi_version_entries = other.multi_version_entries;
+}
+
 ManualContentProvider::~ManualContentProvider() = default;
 
 void ManualContentProvider::AddEntry(TitleType title_type, ContentRecordType content_type, u64 title_id, VirtualFile file) {
@@ -1295,14 +1301,20 @@ void ManualContentProvider::AddEntryWithVersion(TitleType title_type, ContentRec
 
 bool ManualContentProvider::AddEntriesFromContainer(VirtualFile file, bool only_content,
                                                     std::optional<u64> base_program_id) {
-    const auto nsp = OpenContainerAsNsp(file, Loader::FileType::Unknown);
+    return AddEntriesFromContainer(OpenContainerAsNsp(file, Loader::FileType::Unknown),
+                                   only_content, base_program_id);
+}
+
+bool ManualContentProvider::AddEntriesFromContainer(const std::shared_ptr<NSP>& nsp,
+                                                    bool only_content,
+                                                    std::optional<u64> base_program_id) {
     if (!nsp) {
         return false;
     }
 
     // Reject solid NCZ (.nsz without -B): only block-compressed NCZ is supported.
     if (!ContainerIsFullyBlockCompressed(nsp)) {
-        LOG_DEBUG(Service_FS, "Skipping solid-compressed container: {}", file->GetName());
+        LOG_DEBUG(Service_FS, "Skipping solid-compressed container: {}", nsp->GetName());
         return false;
     }
 

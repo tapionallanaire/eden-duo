@@ -6,6 +6,7 @@ package org.yuzu.yuzu_emu.utils
 import android.content.Context
 import java.io.File
 import org.yuzu.yuzu_emu.model.Game
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 
 /**
  * Eden Duo: warm-up runs.
@@ -22,6 +23,7 @@ object WarmUp {
     const val EXTRA_MINUTES = "org.yuzu.yuzu_emu.WARMUP_MINUTES"
     const val EXTRA_BACKUP = "org.yuzu.yuzu_emu.WARMUP_BACKUP"
     const val EXTRA_SHADERS_BEFORE = "org.yuzu.yuzu_emu.WARMUP_SHADERS_BEFORE"
+    const val EXTRA_SAVE_IDENTITY = "org.yuzu.yuzu_emu.WARMUP_SAVE_IDENTITY"
 
     /** Offered lengths, in minutes. Long enough to reach gameplay from a title screen. */
     val DURATIONS = intArrayOf(5, 10, 15)
@@ -40,22 +42,27 @@ object WarmUp {
      * Zips the title's save folder before a warm-up run. Returns null when the game has no save
      * yet, which is the same as nothing to protect.
      */
-    fun backupSaves(context: Context, game: Game): File? {
+    fun backupSaves(context: Context, game: Game): File? = NativeSaveSession.acquire(context).use {
         val saveDir = File(game.saveDir)
-        if (!SaveArchive.hasData(saveDir)) return null
+        if (!SaveArchive.hasData(saveDir)) return@use null
         val file = File(backups(context), "${game.programId.uppercase()}-${System.currentTimeMillis()}.zip")
         file.parentFile?.mkdirs()
         file.writeBytes(SaveArchive.zip(saveDir))
+        File(file.path + ".identity").writeText(NativeSaveSession.identity(context))
         Log.info("[WarmUp] saved ${game.programId} to ${file.path}")
-        return file
+        file
     }
 
     /** Puts the backed-up save back. Returns true when something was restored. */
-    fun restoreSaves(context: Context, game: Game, backup: File?): Boolean {
-        if (backup == null || !backup.isFile) return false
+    fun restoreSaves(context: Context, game: Game, backup: File?): Boolean = NativeSaveSession.acquire(context).use {
+        if (backup == null || !backup.isFile) return@use false
+        val identityFile = File(backup.path + ".identity")
+        check(identityFile.isFile) { "The warm-up save/profile identity is unavailable; the backup was preserved." }
+        NativeSaveSession.assertIdentity(context, identityFile.readText())
         SaveArchive.extract(backup.readBytes(), File(game.saveDir))
         backup.delete()
+        identityFile.delete()
         Log.info("[WarmUp] restored ${game.programId} from ${backup.path}")
-        return true
+        true
     }
 }
