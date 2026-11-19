@@ -24,6 +24,18 @@ class NativeSaveBindingRulesTest {
         rejects { NativeSaveBindingRules.requireUserWords("FFEEDDCCBBAA99887766554433221100", words.reversed()) }
     }
 
+    @Test fun onDemandSavesNeedPathsButDoNotInventRetailQuotas() {
+        val zero = 0.toBigInteger()
+        val one = 1.toBigInteger()
+        NativeSaveBindingRules.requirePart(true, zero, zero, "/save")
+        NativeSaveBindingRules.requirePart(false, zero, zero, null)
+        NativeSaveBindingRules.requirePart(false, zero, one, "/save")
+        rejects { NativeSaveBindingRules.requirePart(true, zero, zero, null) }
+        rejects { NativeSaveBindingRules.requirePart(false, zero, zero, "/save") }
+        rejects { NativeSaveBindingRules.requirePart(false, one, zero, null) }
+        rejects { NativeSaveBindingRules.requirePart(true, -one, zero, "/save") }
+    }
+
     @Test fun physicalPartsRejectEscapesAliasesAndAncestorMappings() {
         val temp = Files.createTempDirectory("native-save-binding").toFile().canonicalFile
         try {

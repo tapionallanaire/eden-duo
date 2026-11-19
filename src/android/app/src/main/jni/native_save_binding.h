@@ -11,8 +11,19 @@
 #include <string_view>
 
 #include "common/uuid.h"
+#include "core/loader/nup.h"
 
 namespace NativeSaveBinding {
+
+inline u64 NupSaveOwner(Loader::AppLoader_NUP& loader, u64 program_id) {
+    u64 owner{};
+    if (!loader.ReadPackagedExeFS() ||
+        loader.ReadProgramId(owner) != Loader::ResultStatus::Success ||
+        owner == 0 || owner != program_id) {
+        throw std::runtime_error("NUP emulated save owner does not match the selected program");
+    }
+    return owner;
+}
 
 inline std::array<std::string, 2> UserUidWords(const Common::UUID& user) {
     const auto words = user.AsU128();

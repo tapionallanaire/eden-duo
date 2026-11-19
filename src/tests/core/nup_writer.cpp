@@ -38,6 +38,7 @@
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 #include "core/loader/nup.h"
+#include "android/app/src/main/jni/native_save_binding.h"
 
 namespace {
 
@@ -995,6 +996,23 @@ TEST_CASE("NUP loader exposes title and publisher through control data", "[nup]"
             FileSys::Nup::EditResult::Success);
     INFO(error);
     check("Edited", "Edited Inc");
+}
+
+TEST_CASE("NUP native saves use the emulator owner without retail control content", "[nup]") {
+    TempDir t;
+    const auto root = t.path / "Game";
+    MakeDump(root);
+    const auto archive = t.path / "game.nup";
+    REQUIRE(FileSys::Nup::PackDump(root, archive) == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem real;
+    Loader::AppLoader_NUP loader{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    FileSys::NACP control;
+    REQUIRE(loader.ReadControlData(control) == Loader::ResultStatus::Success);
+    const auto owner = NativeSaveBinding::NupSaveOwner(loader, TitleId);
+    REQUIRE(owner == TitleId);
+    REQUIRE(owner == static_cast<u64>(control.raw.save_data_owner_id));
+    REQUIRE_THROWS(NativeSaveBinding::NupSaveOwner(loader, TitleId ^ 0x100000));
+    REQUIRE_THROWS(NativeSaveBinding::NupSaveOwner(loader, 0));
 }
 
 TEST_CASE("NUP edit applies name/icon/version to a metadata-less dump", "[nup]") {

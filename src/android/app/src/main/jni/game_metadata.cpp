@@ -616,6 +616,19 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
             RequirePrepare(!index || nup->GetPackages()[*index].MatchesProgramId(input.program_id),
                            "NUP executable and package program identities disagree");
         }
+        if (save_control) {
+            // NUP emulation synthesizes the owner and auto-creates account/device saves.
+            // It has no retail save declarations; do not invent NACP quotas for native play.
+            const auto owner = NativeSaveBinding::NupSaveOwner(loader, input.program_id);
+            *save_control = Json{
+                {"save_owner_id", std::format("{:016X}", owner)},
+                {"auto_create", true},
+                {"account_size", "0"}, {"account_journal_size", "0"},
+                {"device_size", "0"}, {"device_journal_size", "0"},
+                {"control_source", Json{{"kind", "nup_emulated"},
+                                        {"source", input.context.at("source")}}.dump()},
+                {"supported", true}, {"unsupported_save_kinds", Json::array()}};
+        }
         romfs = FileSys::NupContainer::MergeShadowDirs(
             base_index ? nup->GetRomFSDir(*base_index) : nullptr,
             update_index ? nup->GetRomFSDir(*update_index) : nullptr);
@@ -705,7 +718,9 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         // executable/RomFS snapshot. Avoid mod factory queries that can create directories.
         RequirePrepare(!nup || !update.selected,
                        "NUP premerged RomFS cannot be combined with an external executable update");
-        *save_control = ResolveSaveControl(input, identity, provider);
+        if (!nup) {
+            *save_control = ResolveSaveControl(input, identity, provider);
+        }
         return input;
     }
     if (nup) {
@@ -1055,10 +1070,12 @@ Java_org_yuzu_yuzu_1emu_NativeLibrary_getNativeSaveBinding(
         binding["save_root"] = Common::FS::PathToUTF8String(root);
         binding["account_path"] = nullptr;
         binding["device_path"] = nullptr;
-        if (binding.at("account_size") != "0" || binding.at("account_journal_size") != "0") {
+        if (binding.value("auto_create", false) ||
+            binding.at("account_size") != "0" || binding.at("account_journal_size") != "0") {
             binding["account_path"] = path(FileSys::SaveDataType::Account, user->AsU128());
         }
-        if (binding.at("device_size") != "0" || binding.at("device_journal_size") != "0") {
+        if (binding.value("auto_create", false) ||
+            binding.at("device_size") != "0" || binding.at("device_journal_size") != "0") {
             binding["device_path"] = path(FileSys::SaveDataType::Device, {});
         }
         RequirePrepare(Settings::values.current_user.GetValue() == selected &&

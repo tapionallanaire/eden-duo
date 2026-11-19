@@ -2,6 +2,7 @@
 package org.yuzu.yuzu_emu.duo.nativeplay
 
 import java.io.File
+import java.math.BigInteger
 
 /** Pure trust-boundary rules, shared by parent admission, child admission and durable recovery. */
 internal object NativeSaveBindingRules {
@@ -12,6 +13,13 @@ internal object NativeSaveBindingRules {
     fun requireUserWords(folderId: String, words: List<String>) {
         require(words.size == 2 && words.all { Regex("[0-9a-f]{16}").matches(it) } &&
             folderId == (words[1] + words[0]).uppercase()) { "Selected save account UID does not match its folder identity" }
+    }
+
+    fun requirePart(autoCreate: Boolean, size: BigInteger, journal: BigInteger, path: String?) {
+        require(size.signum() >= 0 && journal.signum() >= 0)
+        require((path != null) == (autoCreate || size.signum() > 0 || journal.signum() > 0)) {
+            "Save path does not match its declaration or on-demand creation policy"
+        }
     }
 
     fun requirePhysicalParts(rootPath: String, paths: List<String>) {

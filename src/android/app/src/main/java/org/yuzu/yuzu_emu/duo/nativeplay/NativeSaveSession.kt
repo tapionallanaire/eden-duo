@@ -423,12 +423,15 @@ object NativeSaveSession {
         val words = binding.getJSONArray("user_uid_words")
         NativeSaveBindingRules.requireUserWords(binding.getString("user_id"),
             (0 until words.length()).map { words.getString(it) })
+        val autoCreate = binding.optBoolean("auto_create", false)
+        require(!autoCreate || binding.getString("save_owner_id") == binding.getString("program_id")) {
+            "NUP on-demand saves must belong to the selected program"
+        }
         val parts = listOf("account", "device").mapNotNull { kind ->
             val size = binding.getString("${kind}_size").toBigInteger()
             val journal = binding.getString("${kind}_journal_size").toBigInteger()
-            require(size.signum() >= 0 && journal.signum() >= 0)
             val path = binding.optionalPath("${kind}_path")
-            require((path == null) == (size.signum() == 0 && journal.signum() == 0))
+            NativeSaveBindingRules.requirePart(autoCreate, size, journal, path)
             path
         }
         NativeSaveBindingRules.requirePhysicalParts(binding.getString("save_root"), parts)
