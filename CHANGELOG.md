@@ -13,6 +13,7 @@
 - Optional embedded Switch 1 and Switch 2 backends use exact effective content/build matching; indexed editions preserve both original and selected program resources.
 - Refresh supported native builds from the reviewed engine sources, including Trails in the Sky 2nd Chapter 1.0.3 and declared private Android profiles that are not yet in the published game table.
 - Recognize NUP updates with their separate update title ID during native admission, including Ocarina of Time, while still rejecting packages from another program and preserving enabled-mod checks.
+- Preserve both embedded runtimes' reflection entry points in optimized release builds, including preparation, driver handoff, save recovery and compiled-data controls.
 - Bound memory-mapped sequential reads at EOF and advance their cursor, preventing native packing from reading outside small files. Object reads share the same behavior, and reopening resets the cursor.
 - Preserve all touched GPU buffer-read units across unaligned and page-crossing ranges so overlapping CPU uploads cannot be reordered ahead of those reads.
 - Preserve shadow-RAM tracking and replay in accelerated shader-binding and constant-buffer setup macros.
