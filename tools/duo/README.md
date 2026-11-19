@@ -94,3 +94,7 @@ For Switch Save Sync, local units are sixteen-hex title directories only.
 Native `.lock`, `.work`, `.new`, `.re` and `.restore` siblings are not Sync units
 and must not be removed to make enumeration succeed. Remote units still pass the
 existing strict name and canonical-parent checks.
+
+Native save-lease replies cross Binder with an app-defined receiver. Set the
+received Bundle's app class loader before reading any field, including the
+token: older Android versions may eagerly unpack every Parcelable.

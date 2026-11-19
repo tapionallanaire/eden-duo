@@ -277,6 +277,8 @@ object NativeSaveSession {
         intent.putExtra("duet_launch_token", token)
         intent.putExtra("duet_save_receiver", object : ResultReceiver(main) {
             override fun onReceiveResult(code: Int, data: Bundle?) {
+                // Binder result bundles default to the boot loader; the reply receiver belongs to this app.
+                data?.classLoader = NativeSaveSession::class.java.classLoader
                 synchronized(reservations) {
                     val active = reservations[token] ?: return
                     if (data?.getString("token") != token) return
