@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Duet Plus 1.3.0
 
 - Native launch and preparation use full-screen Duet pages with game artwork, time/storage estimates, fixed actions and collapsible technical details instead of an oversized launch dialog.
 - Native play inherits the game's effective Duet GPU driver, including its per-game override; there is no separate native driver picker or preference.
