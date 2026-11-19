@@ -28,11 +28,19 @@ internal fun approvedLegacySyncRoot(
     return root.canonicalFile.takeIf { approvedIdentity == identity && approvedRoot == it.path }
 }
 
+private val legacySaveUnitId = Regex("[0-9A-Fa-f]{16}")
+
 internal fun legacySyncUnit(root: File, unit: String): File {
-    check(unit.matches(Regex("[0-9A-Fa-f]{16}"))) { "Invalid Switch save unit: $unit" }
+    check(unit.matches(legacySaveUnitId)) { "Invalid Switch save unit: $unit" }
     val file = File(root, unit).canonicalFile
     check(file.parentFile == root.canonicalFile) { "Switch save unit leaves its approved profile root." }
     return file
+}
+
+internal fun legacySyncUnits(root: File, remote: List<String>): MutableMap<String, File> {
+    val local = root.listFiles().orEmpty()
+        .filter { it.isDirectory && it.name.matches(legacySaveUnitId) }.map { it.name }
+    return (local + remote).distinct().associateWith { legacySyncUnit(root, it) }.toMutableMap()
 }
 
 internal fun confirmLegacySyncOwner(
@@ -132,7 +140,7 @@ object DuetSaveSync {
     private fun units(context: Context, remote: List<String>): Map<String, File> {
         val root = approvedRoot(context) ?: return emptyMap()
         val identity = NativeSaveSession.identity(context)
-        val result = (listUnits(root, 1) + remote).distinct().associateWith { legacySyncUnit(root, it) }.toMutableMap()
+        val result = legacySyncUnits(root, remote)
         // The existing wire unit is the save owner directory, not a new program/profile/device protocol.
         // Resolve retail metadata when present; never use a generated NUP as authority for save ownership.
         for (game in games(context).filter { it.programIdHex in result.keys && !it.isHomebrew }) {

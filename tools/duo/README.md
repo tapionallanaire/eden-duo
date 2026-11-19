@@ -86,3 +86,11 @@ Title recognition opens the native/emulated choice independently of exact-build
 readiness. A mismatching version remains visible there but cannot run incompatible
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
+
+Readiness keeps the first identified program's actual admission failure on the
+fullscreen choice page. Enabled emulator mods block native preparation; they are
+not silently ignored or disabled, and the reason points to the game's settings.
+For Switch Save Sync, local units are sixteen-hex title directories only.
+Native `.lock`, `.work`, `.new`, `.re` and `.restore` siblings are not Sync units
+and must not be removed to make enumeration succeed. Remote units still pass the
+existing strict name and canonical-parent checks.

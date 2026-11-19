@@ -83,6 +83,35 @@ class SaveSyncBoundaryTest {
     }
 
     @Test
+    fun nativeJournalsAndPersistentLocksNeverBecomeSwitchSyncUnits() {
+        val root = temporary.newFolder("native-profile")
+        val owner = "0100F7E00C70E000"
+        val current = File(root, owner).apply { mkdir() }
+        File(current, "progress").writeText("current native progress")
+        val lock = File(root, "$owner.lock").apply { writeText("stable lease") }
+        val journals = listOf(".work", ".new", ".re", ".restore").map { suffix ->
+            File(root, owner + suffix).apply {
+                mkdir()
+                File(this, "progress").writeText("uncommitted journal")
+            }
+        }
+        File(root, "$owner.pend1").writeText("pending recovery")
+        File(root, "010000000000DEAD").writeText("not a save directory")
+        val remoteOnly = "01007EF00011E000"
+
+        assertEquals(
+            mapOf(owner to current.canonicalFile, remoteOnly to File(root, remoteOnly).canonicalFile),
+            legacySyncUnits(root, listOf(remoteOnly))
+        )
+        assertEquals("current native progress", File(current, "progress").readText())
+        assertEquals("stable lease", lock.readText())
+        journals.forEach { assertEquals("uncommitted journal", File(it, "progress").readText()) }
+        assertThrows(IllegalStateException::class.java) {
+            legacySyncUnits(root, listOf("$owner.lock"))
+        }
+    }
+
+    @Test
     fun aLegacySlotNeverAdoptsTheSelectedProfileWithoutOriginalOwnerEvidence() {
         val root = temporary.newFolder("profile-a")
         assertThrows(IllegalStateException::class.java) { approvedLegacySyncRoot(null, null, "a", root, true) }

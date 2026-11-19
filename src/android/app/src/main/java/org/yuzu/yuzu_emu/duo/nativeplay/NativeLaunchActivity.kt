@@ -117,15 +117,18 @@ class NativeLaunchActivity : AppCompatActivity() {
         binding.secondary.isEnabled = true
         lifecycleScope.launch {
             try {
+                var unavailableReason = ""
                 val candidate = withContext(Dispatchers.IO) {
-                    NativeGameSupport.findGameCandidate(this@NativeLaunchActivity, game.path)
+                    NativeGameSupport.findGameCandidate(this@NativeLaunchActivity, game.path) {
+                        if (unavailableReason.isEmpty()) unavailableReason = it.message.orEmpty()
+                    }
                         ?.takeIf { PreparedNativeGame.available(it.profile.engine) }
                 }
                 match = candidate
                 contentKey = candidate?.contentKey.orEmpty()
                 if (candidate == null || !PreparedNativeGame.available(candidate.profile.engine)) {
                     binding.availability.setText(R.string.native_not_available)
-                    binding.summary.setText(R.string.native_not_available_message)
+                    binding.summary.text = unavailableReason.ifEmpty { getString(R.string.native_not_available_message) }
                     binding.primary.setText(R.string.native_play)
                     binding.primary.isVisible = true
                     binding.detailsToggle.isVisible = false

@@ -33,16 +33,26 @@ internal object NativeGameSupport {
     data class Identity(val build: NativeGameBuild, val contentKey: String, val inputBytes: Long)
 
     /** Resolve only program indices represented by shipped profiles; never relabel program zero. */
-    fun findGameCandidate(context: Context, path: String): Match? = runCatching {
+    fun findGameCandidate(
+        context: Context,
+        path: String,
+        onFailure: ((Throwable) -> Unit)? = null
+    ): Match? = runCatching {
         val catalog = context.assets.open(NativeGameCatalog.ASSET).reader().use(NativeGameCatalog::read)
-        catalog.programIndices.firstNotNullOfOrNull { findBuildCandidate(context, path, it) }
-    }.getOrNull()
+        catalog.programIndices.firstNotNullOfOrNull { findBuildCandidate(context, path, it, onFailure) }
+    }.onFailure { onFailure?.invoke(it) }.getOrNull()
 
     /** Registers and resolves the same content as boot, without starting emulation. */
-    fun findBuildCandidate(context: Context, path: String, programIndex: Int): Match? =
-        runCatching {
+    fun findBuildCandidate(
+        context: Context,
+        path: String,
+        programIndex: Int,
+        onFailure: ((Throwable) -> Unit)? = null
+    ): Match? {
+        var identified = false
+        return runCatching {
             GameHelper.withPrepareContent(path, {
-                readPrepareProgramId(path, programIndex)
+                readPrepareProgramId(path, programIndex)?.also { identified = true }
                     ?: error("Cannot identify selected program")
             }) {
                 val identity = readGameBuild(path, programIndex)?.let(::parseIdentity)
@@ -53,7 +63,8 @@ internal object NativeGameSupport {
                 Match(profile, catalog.versions(profile.programId), identity.build,
                     identity.contentKey, identity.inputBytes)
             }
-        }.getOrNull()
+        }.onFailure { if (identified) onFailure?.invoke(it) }.getOrNull()
+    }
 
     /** Reuse only a fully validated snapshot; interrupted generations are never overwritten. */
     @WorkerThread

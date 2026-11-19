@@ -682,7 +682,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         input.program_id, system.GetFileSystemController(), provider};
     if (!save_control) {
         RequirePrepare(!patches.HasEnabledMods(),
-                       "Prepare does not support enabled code, RomFS, cheat or built-in mods");
+                       "Native preparation cannot use enabled game mods. Turn them off in this game's settings; emulation settings have not been changed.");
     }
     auto update = patches.ResolveUpdate();
     FileSys::PatchManager::SelectedUpdate original_update;
@@ -1124,9 +1124,14 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readGameBuild(
         const auto input = ResolveEffectiveInput(
             env, support, Common::Android::GetJString(env, jpath), program_index);
         return Common::Android::ToJStringArray(env, input.Fields());
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
         if (env->ExceptionCheck()) {
-            env->ExceptionClear();
+            return nullptr;
+        }
+        const auto exception = env->FindClass("java/lang/IllegalStateException");
+        if (exception) {
+            env->ThrowNew(exception, error.what());
+            env->DeleteLocalRef(exception);
         }
         return nullptr;
     }
