@@ -90,9 +90,6 @@ public:
     // its base ExeFS when the selected update cannot supply one.
     [[nodiscard]] std::pair<VirtualDir, std::optional<u32>> ReadExeFSUpdate() const;
 
-    // Includes inherited mods, cheats, LayeredFS and built-in code patches.
-    [[nodiscard]] bool HasEnabledMods() const;
-
     // Currently tracked NSO patches:
     // - IPS
     // - IPSwitch

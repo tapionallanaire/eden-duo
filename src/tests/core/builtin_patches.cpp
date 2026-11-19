@@ -391,30 +391,3 @@ TEST_CASE("Packed updates obey the same update disable setting", "[patch_manager
     Settings::values.disabled_addons[OcarinaTitleId] = {"Update"};
     REQUIRE_FALSE(manager.ResolveUpdate(FileSys::ContentRecordType::Program, packed).selected);
 }
-
-TEST_CASE("Strict export can refuse enabled built-in and user mods", "[patch_manager]") {
-    PatchManagerTestContext context{NopInstruction};
-    const auto manager = context.Manager();
-    REQUIRE(manager.HasEnabledMods());
-    Settings::values.disabled_addons[OcarinaTitleId] = {
-        std::string{MaxResolution}, "Real-time speed (built-in)"};
-    REQUIRE(manager.HasEnabledMods());
-    Settings::values.disabled_addons[OcarinaTitleId].push_back("UserMod");
-    REQUIRE_FALSE(manager.HasEnabledMods());
-}
-
-TEST_CASE("Strict mod refusal honors inherited roots and disabled settings", "[patch_manager]") {
-    PatchManagerTestContext context{NopInstruction};
-    FileSys::ContentProviderUnion providers{};
-    FileSys::ManualContentProvider manual;
-    providers.SetSlot(FileSys::ContentProviderUnionSlot::FrontendManual, &manual);
-    const auto file = std::make_shared<FileSys::VectorVfsFile>(std::vector<u8>{1});
-    manual.AddEntry(FileSys::TitleType::Application, FileSys::ContentRecordType::Meta,
-                    OcarinaTitleId, file);
-    manual.AddEntry(FileSys::TitleType::Application, FileSys::ContentRecordType::Program,
-                    OcarinaTitleId + 1, file);
-    const auto manager = context.Manager(providers, OcarinaTitleId + 1);
-    REQUIRE(manager.HasEnabledMods());
-    Settings::values.disabled_addons[OcarinaTitleId] = {"UserMod"};
-    REQUIRE_FALSE(manager.HasEnabledMods());
-}

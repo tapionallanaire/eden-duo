@@ -340,49 +340,6 @@ std::pair<VirtualDir, std::optional<u32>> PatchManager::ReadExeFSUpdate() const 
     return {NCA{update.raw}.GetExeFS(), update.version};
 }
 
-bool PatchManager::HasEnabledMods() const {
-    const auto disabled = GetDisabledAddons();
-    const auto is_disabled = [&](std::string_view name) {
-        return std::find(disabled.cbegin(), disabled.cend(), name) != disabled.cend();
-    };
-    for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id == title_id && !is_disabled(patch.name)) {
-            return true;
-        }
-    }
-    const auto has_mod_content = [](const VirtualDir& dir) {
-        for (const auto name : {"exefs", "romfs", "romfslite", "romfs_ext", "cheats",
-                                "manual_html", "dualscreen"}) {
-            if (IsDirValidAndNonEmpty(FindSubdirectoryCaseless(dir, name))) {
-                return true;
-            }
-        }
-        return false;
-    };
-    if (const auto root = GetModificationLoadRoot()) {
-        for (const auto& file : root->GetFiles()) {
-            const auto name = file->GetName();
-            if (name.starts_with("cheat_") && !is_disabled(name)) {
-                return true;
-            }
-        }
-        for (const auto& dir : root->GetSubdirectories()) {
-            if (!is_disabled(dir->GetName()) && has_mod_content(dir)) {
-                return true;
-            }
-        }
-    }
-    if (const auto sdmc = GetModificationLoadRoot(true)) {
-        // ExeFS loading also checks the directory name, while LayeredFS uses the SDMC key.
-        if ((!is_disabled(sdmc->GetName()) &&
-             IsDirValidAndNonEmpty(FindSubdirectoryCaseless(sdmc, "exefs"))) ||
-            (!is_disabled("SDMC") && has_mod_content(sdmc))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
     LOG_INFO(Loader, "Patching ExeFS for title_id={:016X}", title_id);
 

@@ -4,13 +4,12 @@
 package org.yuzu.yuzu_emu.duo.nativeplay
 
 import android.content.Context
-import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.annotation.Keep
 import androidx.annotation.WorkerThread
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import org.yuzu.yuzu_emu.utils.DocumentFileAccess
 import org.yuzu.yuzu_emu.utils.GameHelper
 
 @Keep
@@ -188,18 +187,7 @@ internal object NativeGameSupport {
     @JvmStatic
     private fun sourceStamp(path: String): String? = try {
         if (path.startsWith("content://")) {
-            val columns = arrayOf(DocumentsContract.Document.COLUMN_SIZE,
-                DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-            org.yuzu.yuzu_emu.YuzuApplication.appContext.contentResolver.query(
-                Uri.parse(path), columns, null, null, null
-            )?.use { cursor ->
-                if (!cursor.moveToFirst() || cursor.isNull(0) || cursor.isNull(1)) null
-                else {
-                    val size = cursor.getLong(0)
-                    val modified = cursor.getLong(1)
-                    if (size > 0 && modified > 0) "$size:$modified" else null
-                }
-            }
+            DocumentFileAccess.sourceStamp(path)
         } else {
             val file = File(path)
             if (file.isFile && file.length() > 0 && file.lastModified() > 0)

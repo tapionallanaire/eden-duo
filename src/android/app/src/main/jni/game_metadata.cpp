@@ -693,19 +693,13 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
 
     const FileSys::PatchManager patches{
         input.program_id, system.GetFileSystemController(), provider};
-    if (!save_control) {
-        RequirePrepare(!patches.HasEnabledMods(),
-                       "Native preparation cannot use enabled game mods. Turn them off in this game's settings; emulation settings have not been changed.");
-    }
+    // Native packs use the selected game content directly, never emulator mod overlays.
     auto update = patches.ResolveUpdate();
     FileSys::PatchManager::SelectedUpdate original_update;
     const bool indexed = program_index == 1 && IndexedApplication(input.program_id).has_value();
     if (indexed) {
         const FileSys::PatchManager original_patches{
             input.application_id, system.GetFileSystemController(), provider};
-        if (!save_control) {
-            RequirePrepare(!original_patches.HasEnabledMods(), "Original application mods are unsupported");
-        }
         original_update = original_patches.ResolveUpdate();
         RequirePrepare(!update.selected || original_update.selected,
                        "Selected edition update has no authoritative original application update");
@@ -843,7 +837,6 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                            "Enabled DLC data or exact metadata is unreadable");
             const FileSys::PatchManager data_patches{
                 entry.title_id, system.GetFileSystemController(), provider};
-            RequirePrepare(!data_patches.HasEnabledMods(), "Enabled DLC mods are unsupported");
             const auto data_update = data_patches.ResolveUpdate(FileSys::ContentRecordType::Data);
             const auto key = std::format("dlc_{:016X}", entry.title_id);
             CaptureUpdate(input, identity, data_update, entry.title_id, key + "_update");

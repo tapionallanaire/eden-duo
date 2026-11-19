@@ -88,8 +88,9 @@ native code. Updating this catalog also updates Gradle's embedded profile select
 build with the same reviewed source worktrees.
 
 Readiness keeps the first identified program's actual admission failure on the
-fullscreen choice page. Enabled emulator mods block native preparation; they are
-not silently ignored or disabled, and the reason points to the game's settings.
+fullscreen choice page. Native preparation reads the original game, selected
+official update and enabled DLC directly. Emulator mods stay enabled for
+emulation; they are neither applied to native packs nor used to block them.
 For Switch Save Sync, local units are sixteen-hex title directories only.
 Native `.lock`, `.work`, `.new`, `.re` and `.restore` siblings are not Sync units
 and must not be removed to make enumeration succeed. Remote units still pass the
