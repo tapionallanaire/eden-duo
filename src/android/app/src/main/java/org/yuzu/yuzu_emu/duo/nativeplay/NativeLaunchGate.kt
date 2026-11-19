@@ -261,7 +261,8 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                         DuetSaveSync.get(appContext).afterExit(DuetSaveSync.SWITCH)
                         returned = false
                         phase = "native"
-                        native.launch(intent)
+                        // Explicit NEW_TASK breaks result-to task coupling before native crash cleanup.
+                        native.launch(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     } catch (e: NativeSaveSession.BusyException) { fail(e.message.orEmpty())
                     } catch (e: Exception) { nativeFailed(e.message ?: e.javaClass.simpleName) }
                 }
@@ -386,7 +387,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                 }
                 token = ""
                 android.widget.Toast.makeText(appContext,
-                    "Native play failed. Switching to emulation.\n$failure", android.widget.Toast.LENGTH_LONG).show()
+                    "$failure\nPlaying emulated instead.", android.widget.Toast.LENGTH_LONG).show()
                 phase = "preflight"
                 preflight()
             } catch (e: CancellationException) { throw e

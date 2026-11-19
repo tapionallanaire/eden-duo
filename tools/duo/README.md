@@ -98,3 +98,12 @@ existing strict name and canonical-parent checks.
 Native save-lease replies cross Binder with an app-defined receiver. Set the
 received Bundle's app class loader before reading any field, including the
 token: older Android versions may eagerly unpack every Parcelable.
+
+Native game processes also need separate tasks: the embedded manifests use
+`${applicationId}.native`, and the caller explicitly supplies `FLAG_ACTIVITY_NEW_TASK`.
+Affinity and `singleTask` alone can leave a result launch in the caller's task;
+Android's native-crash cleanup then finishes both activities. An immediate canceled
+result is expected with the explicit flag: wait for save-lease release and the
+native exit record rather than treating that result as a completed game.
+Keep startup failures first in the fallback toast; Android's two-line limit can
+otherwise hide the cause behind the generic emulation message.
