@@ -7,7 +7,6 @@ import android.content.Context
 import androidx.preference.PreferenceManager
 import java.io.File
 import kotlinx.serialization.json.Json
-import org.json.JSONObject
 import org.yuzu.yuzu_emu.duo.nativeplay.NativeSaveSession
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.model.Game
@@ -140,34 +139,8 @@ object DuetSaveSync {
         val root = approvedRoot(context) ?: return emptyMap()
         val identity = NativeSaveSession.identity(context)
         val result = legacySyncUnits(root, remote)
-        // The existing wire unit is the save owner directory, not a new program/profile/device protocol.
-        // Resolve retail metadata when present; never use a generated NUP as authority for save ownership.
-        for (game in games(context).filter { it.programIdHex in result.keys && !it.isHomebrew }) {
-            check(!game.path.substringBefore('?').endsWith(".nup", true)) {
-                "Retail metadata is unavailable for ${game.title}; its Switch peer mapping cannot be verified."
-            }
-            val binding = GameHelper.withPrepareContent(game.path, { game.programId }) {
-                JSONObject(NativeLibrary.getNativeSaveBinding(game.path, game.programIdHex.takeLast(3).toInt(16)))
-            }
-            NativeSaveSession.assertIdentity(context, identity)
-            val owner = binding.getString("save_owner_id")
-            check(binding.getInt("format") == 1 && binding.getString("program_id").equals(game.programIdHex, true)) {
-                "Switch save metadata does not match ${game.title}."
-            }
-            if (binding.isNull("account_path")) {
-                result.remove(game.programIdHex)
-                continue
-            }
-            val account = File(binding.getString("account_path")).canonicalFile
-            check(account == legacySyncUnit(root, owner)) { "Canonical account save is outside its approved peer mapping." }
-            if (!owner.equals(game.programIdHex, true)) {
-                check(game.programIdHex !in remote) {
-                    "The legacy peer slot for ${game.title} differs from its canonical save owner; explicit peer migration is required."
-                }
-                result.remove(game.programIdHex)
-            }
-            result[owner] = account
-        }
+        // Wire units are save-owner directories inside the approved profile, not game program IDs.
+        // Library entries (including NUP-only games) are names, not authority to remap those units.
         NativeSaveSession.assertIdentity(context, identity)
         return result
     }
