@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Switch 1 native play accepts offline BCAT delivery caches only when absent or empty. Games with existing delivery data still need emulation; native play does not change that data.
 - Native launch and preparation use full-screen Duet pages with game artwork, time/storage estimates, fixed actions and collapsible technical details instead of an oversized launch dialog.
 - Native play inherits the game's effective Duet GPU driver, including its per-game override; there is no separate native driver picker or preference.
 - Cancelling native preparation keeps emulated launch available. Cancelling after pack publication preserves the prepared data without granting permission to launch the game.
