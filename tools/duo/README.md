@@ -89,9 +89,13 @@ readiness. A mismatching version remains visible there but cannot run incompatib
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
 
-The 11-title refresh uses Peanuts `936ae088` with the embedded collection-member
-checks and distribution exclusions in `312c55d380`, and Banana `fe916556`.
-These inputs add 17 Switch 1 build rows; they do not change the Switch 2 roster.
+The catalog targets Peanuts `665c851017b78b112b8c622cdfedd997832362a8`
+and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 67 Switch 1
+and 10 Switch 2 programs. For distribution, use the companion source
+branches `dist/duet-20261121` on each private fork, not the standalone
+checkouts. They retain the embedded host and exclude captured prewarm
+seeds. Build each packer stage from its corresponding compiler sources;
+the Hogwarts shader reference must pass that compiler's packaging check.
 
 Readiness keeps the first identified program's actual admission failure on the
 fullscreen choice page. Native preparation reads the original game, selected

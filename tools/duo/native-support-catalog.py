@@ -14,6 +14,9 @@ import sys
 PRIVATE_PEANUTS = {
     "0100F43008C44000",  # Pokémon Legends: Z-A
     "0100F7E00C70E000",  # Hogwarts Legacy
+    "010038B015560000",  # Final Fantasy Tactics: The Ivalice Chronicles
+    "0100755017EE0000",  # Fantasy Life i
+    "0100BE7013E06000",  # Ni no Kuni II: Revenant Kingdom
     "01004A4010FEA000",  # Bayonetta 3 (#14)
     "010057D006492000",  # Octopath Traveler (#17)
     "01006A800016E000",  # Super Smash Bros. Ultimate (#12)
