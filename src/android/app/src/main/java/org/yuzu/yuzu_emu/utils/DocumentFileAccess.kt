@@ -116,6 +116,17 @@ object DocumentFileAccess {
         resolve(path)?.let { value(it, DocumentsContract.Document.COLUMN_SIZE)?.toLongOrNull() } ?: 0L
     }.getOrDefault(0L)
 
+    internal fun sourceStamp(path: String): String? {
+        val uri = resolve(path) ?: return null
+        val modified = DocumentsContract.Document.COLUMN_LAST_MODIFIED
+        return resolver.query(uri, arrayOf(SIZE, modified), null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val bytes = cursor.getLong(cursor.getColumnIndexOrThrow(SIZE))
+            val time = cursor.getLong(cursor.getColumnIndexOrThrow(modified))
+            if (bytes > 0 && time > 0) "$bytes:$time" else null
+        }
+    }
+
     fun name(path: String): String = runCatching {
         resolve(path)?.let { value(it, NAME) } ?: ""
     }.getOrDefault("")

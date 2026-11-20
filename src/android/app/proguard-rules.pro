@@ -27,5 +27,8 @@
 -dontwarn java.beans.VetoableChangeSupport
 
 -keep class dev.nxnative.android.EmbeddedGame {
-    public static android.content.Intent prepare(android.content.Context, java.lang.String, java.lang.String, long);
+    public static *;
+}
+-keep class dev.nxbanana.android.EmbeddedGame {
+    public static *;
 }

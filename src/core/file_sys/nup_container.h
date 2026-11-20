@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -167,6 +168,8 @@ public:
     /// Narrow indexed snapshot contract: program/0/romfs exists, and program/1 trees
     /// reference exactly the root executable/RomFS extents (without reading ROM bytes).
     bool HasIndexedProgramLayout(std::size_t package_index) const;
+    /// Collection layout: base menu at root, distinct ExeFS and RomFS at program/<index>.
+    bool HasCollectionProgramLayout(std::size_t package_index, u8 program_index) const;
 
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(
@@ -195,6 +198,7 @@ private:
     bool Parse();
     bool ParseMeta(PackageInfo& package);
     bool ValidateDirTree() const;
+    u32 ChildDirectory(u32 parent, std::string_view name) const;
     void BuildDirTree(u32 dir_index, VectorVfsDirectory& out);
     VirtualDir BuildPackageDir(u32 dir_index);
     std::vector<u8> ReadExtentRaw(const FileNode& node) const;

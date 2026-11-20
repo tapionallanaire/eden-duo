@@ -76,8 +76,10 @@ worktrees; add `--write` only after reviewing the proposed diff:
 python tools/duo/native-support-catalog.py --peanuts /path/to/peanuts --banana /path/to/banana
 ```
 
-Peanuts uses its published Switch 1 Android list plus the private Z-A and Hogwarts
-profiles. Banana uses its declared Android-ready Switch 2 profiles. Preserve every
+Peanuts uses `peanuts/release-titles.txt`, Switch 1 `nxGames` and Android
+`readiness.tsv` status rows, plus reviewed private merges not declared in those
+sources. Requirements alone do not declare Android support. Banana uses its
+declared Android-ready Switch 2 profiles. Preserve every
 registered code/module build allowed by `android_builds`; `shader_versions` is
 capture provenance, not a supported-code allowlist. Prepare independently verifies
 shader coverage. This does not make desktop-only profiles Android-ready.
@@ -87,9 +89,18 @@ readiness. A mismatching version remains visible there but cannot run incompatib
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
 
+The catalog targets Peanuts `665c851017b78b112b8c622cdfedd997832362a8`
+and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 67 Switch 1
+and 10 Switch 2 programs. For distribution, use the companion source
+branches `dist/duet-20261121` on each private fork, not the standalone
+checkouts. They retain the embedded host and exclude captured prewarm
+seeds. Build each packer stage from its corresponding compiler sources;
+the Hogwarts shader reference must pass that compiler's packaging check.
+
 Readiness keeps the first identified program's actual admission failure on the
-fullscreen choice page. Enabled emulator mods block native preparation; they are
-not silently ignored or disabled, and the reason points to the game's settings.
+fullscreen choice page. Native preparation reads the original game, selected
+official update and enabled DLC directly. Emulator mods stay enabled for
+emulation; they are neither applied to native packs nor used to block them.
 For Switch Save Sync, local units are sixteen-hex title directories only.
 Native `.lock`, `.work`, `.new`, `.re` and `.restore` siblings are not Sync units
 and must not be removed to make enumeration succeed. Remote units still pass the

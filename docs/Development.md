@@ -68,10 +68,12 @@ python tools/duo/native-support-catalog.py --peanuts <private-worktree> --banana
 python tools/duo/test_native_support_catalog.py
 ```
 
-The Peanuts roster includes its published Android list, private Z-A/Hogwarts
-profiles and Switch 1 entries explicitly declared in Android `nxGames`, including
-Trails in the Sky 2nd Chapter 1.0.3. Build the embedded modules/assets from those
-same reviewed sources; regenerating this catalog alone does not update an APK.
+Peanuts uses its release manifest, Switch 1 Android declarations (`nxGames`
+or `readiness.tsv` status), and reviewed private Android merges that lack either
+declaration. Never select every profile directory: that includes desktop-only
+games. For collections the program ID identifies the executable: KH2 is program 3,
+not the collection menu. Build the embedded modules/assets from those same
+reviewed sources; regenerating this catalog alone does not update an APK.
 
 Device acceptance still requires backed-up disposable progress, clean native
 exit, startup-failure fallback, compiler cancel/retry, effective-driver checks and

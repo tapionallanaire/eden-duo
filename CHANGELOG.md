@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## Duet Plus 1.3.2
+
+- Added native preparation for 11 more Switch games across 17 registered builds: Absolum, Bayonetta 3, Double Dragon Revive, Kingdom Hearts II Final Mix, Metroid Prime 4: Beyond, Octopath Traveler, Super Smash Bros. Ultimate, Trails beyond the Horizon, Trails in the Sky 1st Chapter, Trails through Daybreak II, and Ys X: Nordics.
+- Kingdom Hearts II Final Mix uses the playable program inside the collection rather than its menu. Native preparation still checks the installed build and shader coverage; unlisted games continue to use emulation.
+
+## Duet Plus 1.3.1
+
+- Native play no longer asks you to disable emulator mods or dual-screen companions. It prepares clean game content and leaves emulation settings unchanged.
+- Resolve updates and DLC inside Android storage folders before querying their size and modification time for native preparation.
+
+## Duet Plus 1.3.0
 
 - Switch 1 native play accepts offline BCAT delivery caches only when absent or empty. Games with existing delivery data still need emulation; native play does not change that data.
 - Native launch and preparation use full-screen Duet pages with game artwork, time/storage estimates, fixed actions and collapsible technical details instead of an oversized launch dialog.
@@ -14,6 +24,7 @@
 - Optional embedded Switch 1 and Switch 2 backends use exact effective content/build matching; indexed editions preserve both original and selected program resources.
 - Refresh supported native builds from the reviewed engine sources, including Trails in the Sky 2nd Chapter 1.0.3 and declared private Android profiles that are not yet in the published game table.
 - Recognize NUP updates with their separate update title ID during native admission, including Ocarina of Time, while still rejecting packages from another program and preserving enabled-mod checks.
+- Preserve both embedded runtimes' reflection entry points in optimized release builds, including preparation, driver handoff, save recovery and compiled-data controls.
 - Bound memory-mapped sequential reads at EOF and advance their cursor, preventing native packing from reading outside small files. Object reads share the same behavior, and reopening resets the cursor.
 - Preserve all touched GPU buffer-read units across unaligned and page-crossing ranges so overlapping CPU uploads cannot be reordered ahead of those reads.
 - Preserve shadow-RAM tracking and replay in accelerated shader-binding and constant-buffer setup macros.
