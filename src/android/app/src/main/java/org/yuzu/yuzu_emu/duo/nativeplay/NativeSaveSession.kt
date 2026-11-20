@@ -217,10 +217,19 @@ object NativeSaveSession {
         reserve(context, token, expectedIdentity) {
             val binding = GameHelper.withPrepareContent(source, { programId.toULong(16).toString() }) {
                 val observed = NativeGameSupport.findBuildCandidate(context, source, programIndex)
-                check(observed != null && observed.contentKey == contentKey && observed.profile.programId == programId) {
+                check(observed != null && observed.contentKey == contentKey &&
+                    observed.profile.programId == programId && observed.profile.engine == engine) {
                     "The original effective retail content changed before save admission"
                 }
                 JSONObject(NativeLibrary.getNativeSaveBinding(source, programIndex))
+            }
+            if (!binding.getBoolean("supported")) {
+                val kinds = binding.getJSONArray("unsupported_save_kinds")
+                NativeSaveBindingRules.requireOfflineBcat(engine, (0 until kinds.length()).map { kinds.getString(it) },
+                    File(NativeConfig.getNandDir()), binding.getString("program_id"))
+                // The offline host never mounts BCAT. Persist admission, not a BCAT path; recovery
+                // must still repair the account/device saves if delivery data appears after exit.
+                binding.put("unsupported_save_kinds", org.json.JSONArray()).put("supported", true)
             }
             validateBinding(binding)
             require(binding.getString("program_id") == programId) { "Canonical save program changed" }
@@ -235,6 +244,7 @@ object NativeSaveSession {
         val record = checkNotNull(reservation.record)
         check(reservation.identity == expectedIdentity && !reservation.launched &&
             record.getString("source") == source && record.getString("content_key") == contentKey &&
+            record.getString("engine") == engine.name &&
             record.getJSONObject("binding").getString("program_id") == programId)
         return token
     }
