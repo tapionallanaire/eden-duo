@@ -86,11 +86,15 @@ struct ResolvedPackage {
     u32 version{};
     VirtualDir exefs;
     VirtualDir romfs;
-    // Indexed native snapshot only: required for program 1; other nonzero indices are rejected.
+    // Indexed Switch 2 edition: the selected program is the package root.
     // Root ExeFS/RomFS remain the truthful selected program 1 and are also exposed at
     // program/1/{exefs,romfs}; original resources live at program/0/romfs.
     // Aliases share extents and retained file sources, not a second application package.
     VirtualDir program0_romfs{};
+    // A base collection instead keeps the menu at root. Its selected member has its
+    // own ExeFS/NPDM and RomFS under program/<index>, not aliases to the root.
+    VirtualDir member_exefs{};
+    VirtualDir member_romfs{};
 };
 
 // Streams retained VirtualFile sources through the same serializer as PackDump. Sources are

@@ -193,6 +193,10 @@ std::optional<u32> ReadContentVersion(const FileSys::NCA& meta, u64 title_id,
 
 // These are profile contracts, not a platform-bit conversion. CNMT records below must
 // independently prove the original application and each selected content source.
+constexpr u64 KingdomHeartsCollection = 0x010090C022978000ULL;
+constexpr jint KingdomHeartsIndex = 3;
+constexpr u64 KingdomHeartsMember = KingdomHeartsCollection + KingdomHeartsIndex;
+
 std::optional<u64> IndexedApplication(u64 program_id) {
     switch (program_id) {
     case 0x040015100B514001ULL:
@@ -204,8 +208,9 @@ std::optional<u64> IndexedApplication(u64 program_id) {
     }
 }
 
-std::optional<FileSys::ContentRecord> ProgramRecord(
-    const FileSys::NCA& meta, u64 application_id, FileSys::TitleType type, u8 index) {
+std::optional<FileSys::ContentRecord> ApplicationRecord(
+    const FileSys::NCA& meta, u64 application_id, FileSys::TitleType type, u8 index,
+    FileSys::ContentRecordType kind = FileSys::ContentRecordType::Program) {
     if (meta.GetStatus() != Loader::ResultStatus::Success) {
         return std::nullopt;
     }
@@ -227,8 +232,8 @@ std::optional<FileSys::ContentRecord> ProgramRecord(
                 FileSys::ContentRecord record{};
                 RequirePrepare(file->ReadObject(&record, offset + i * sizeof(record)) == sizeof(record),
                                "Cannot read application CNMT content record");
-                if (record.type == FileSys::ContentRecordType::Program && record.id_offset == index) {
-                    RequirePrepare(!result, "Application CNMT has duplicate program records");
+                if (record.type == kind && record.id_offset == index) {
+                    RequirePrepare(!result, "Application CNMT has duplicate content records");
                     result = record;
                 }
             }
@@ -238,7 +243,7 @@ std::optional<FileSys::ContentRecord> ProgramRecord(
     return std::nullopt;
 }
 
-bool MatchesProgramRecord(const FileSys::VirtualFile& raw,
+bool MatchesContentRecord(const FileSys::VirtualFile& raw,
                           const FileSys::ContentRecord& record) {
     if (!raw) {
         return false;
@@ -262,18 +267,18 @@ FileSys::PatchManager::SelectedUpdate ResolveIndexedUpdate(
     RequirePrepare(selected.metadata_raw && selected.version && selected.source,
                    "Indexed update has no exact application metadata/provider");
     const FileSys::NCA meta{selected.metadata_raw};
-    const auto record = ProgramRecord(meta, FileSys::GetUpdateTitleID(application_id),
+    const auto record = ApplicationRecord(meta, FileSys::GetUpdateTitleID(application_id),
                                      FileSys::TitleType::Update, 1);
     RequirePrepare(record.has_value(), "Selected application update has no program one record");
-    const auto original_record = ProgramRecord(meta, FileSys::GetUpdateTitleID(application_id),
+    const auto original_record = ApplicationRecord(meta, FileSys::GetUpdateTitleID(application_id),
                                               FileSys::TitleType::Update, 0);
-    RequirePrepare(original_record && MatchesProgramRecord(application_update.raw, *original_record),
+    RequirePrepare(original_record && MatchesContentRecord(application_update.raw, *original_record),
                    "Selected original update does not match its application CNMT program zero");
     const auto* source = provider.GetSlotProvider(*selected.source);
     RequirePrepare(source != nullptr, "Indexed update provider is unavailable");
     selected.raw = nullptr;
     const auto consider = [&](const FileSys::VirtualFile& raw) {
-        if (MatchesProgramRecord(raw, *record)) {
+        if (MatchesContentRecord(raw, *record)) {
             selected.raw = raw;
         }
     };
@@ -338,6 +343,12 @@ std::shared_ptr<FileSys::NSP> OpenRetailPackage(const FileSys::VirtualFile& file
 }
 
 u64 SelectedRetailProgram(const std::shared_ptr<FileSys::NSP>& package, jint index) {
+    if (index == KingdomHeartsIndex) {
+        RequirePrepare(package->GetNCA(KingdomHeartsMember, FileSys::ContentRecordType::Program) &&
+                           package->GetNCA(KingdomHeartsCollection, FileSys::ContentRecordType::Program),
+                       "Collection does not contain both menu and selected member");
+        return KingdomHeartsMember;
+    }
     if (index == 1) {
         u64 selected{};
         for (const auto& [id, entries] : package->GetNCAs()) {
@@ -354,12 +365,34 @@ u64 SelectedRetailProgram(const std::shared_ptr<FileSys::NSP>& package, jint ind
     return package->GetProgramTitleID();
 }
 
-Modules ReadModules(const FileSys::VirtualDir& exefs, u64 program_id) {
-    RequirePrepare(exefs != nullptr, "Effective executable is missing");
+u64 PrepareProgramId(const FileSys::VirtualDir& exefs, bool collection) {
+    const auto npdm = exefs ? exefs->GetFile("main.npdm") : nullptr;
+    RequirePrepare(npdm != nullptr, "Effective executable has no main.npdm");
+    if (collection) {
+        // The member packer uses the header-declared ACI0, never a byte-pattern search.
+        std::array<u32_le, 32> header{};
+        RequirePrepare(npdm->ReadObject(&header) == sizeof(header) &&
+                           header[0] == Common::MakeMagic('M', 'E', 'T', 'A'),
+                       "Invalid collection NPDM header");
+        const size_t aci = header[0x70 / 4], size = header[0x74 / 4];
+        std::array<u32_le, 16> aci_header{};
+        RequirePrepare(aci >= sizeof(header) && aci <= npdm->GetSize() &&
+                           size >= sizeof(aci_header) && size <= npdm->GetSize() - aci &&
+                           npdm->ReadObject(&aci_header, aci) == sizeof(aci_header) &&
+                           aci_header[0] == Common::MakeMagic('A', 'C', 'I', '0'),
+                       "Invalid collection NPDM ACI0 section");
+        const size_t kac = aci_header[0x30 / 4], kac_size = aci_header[0x34 / 4];
+        RequirePrepare(kac <= size && kac_size <= size - kac && kac_size % sizeof(u32) == 0,
+                       "Invalid collection NPDM capability descriptors");
+    }
     FileSys::ProgramMetadata metadata;
-    RequirePrepare(metadata.Load(exefs->GetFile("main.npdm")) == Loader::ResultStatus::Success &&
-                       metadata.GetTitleID() == program_id,
-                   "Effective NPDM does not identify the selected program");
+    RequirePrepare(metadata.Load(npdm) == Loader::ResultStatus::Success, "Effective NPDM is unreadable");
+    return metadata.GetTitleID();
+}
+
+Modules ReadModules(const FileSys::VirtualDir& exefs, u64 program_id) {
+    RequirePrepare(PrepareProgramId(exefs, program_id == KingdomHeartsMember || program_id == KingdomHeartsCollection)
+                       == program_id, "Effective NPDM does not identify the selected program");
     Modules modules;
     for (const auto& module : exefs->GetFiles()) {
         const auto name = module->GetName();
@@ -388,10 +421,18 @@ struct EffectiveInput {
     Json dlc = Json::array();
     Json programs = Json::array();
     std::optional<FileSys::ContentRecord> original_program_record;
+    std::optional<FileSys::ContentRecord> collection_control_record;
+
     std::vector<FileSys::Nup::ResolvedPackage> packages;
     // Explicitly retain sources, including CNMT provenance, throughout serialization.
     std::vector<FileSys::VirtualFile> sources;
     std::string content_key;
+
+    bool IsSupportedProgram() const {
+        return (program_index == 0 && (program_id & 0xFFF) == 0) ||
+               (program_index == 1 && IndexedApplication(program_id)) ||
+               (program_index == KingdomHeartsIndex && program_id == KingdomHeartsMember);
+    }
 
     std::vector<std::string> Fields() const {
         std::vector<std::string> fields{std::format("{:016X}", program_id),
@@ -493,10 +534,11 @@ void CaptureUpdate(EffectiveInput& input, ContentIdentity& identity,
 Json ResolveSaveControl(EffectiveInput& input, ContentIdentity& identity,
                         const FileSys::ContentProviderUnion& provider) {
     auto& system = EmulationSession::GetInstance().System();
-    u64 control_id = input.program_index == 1 && IndexedApplication(input.program_id) ?
+    const bool collection = input.program_index == KingdomHeartsIndex;
+    u64 control_id = collection || (input.program_index == 1 && IndexedApplication(input.program_id)) ?
         input.application_id : input.program_id;
     auto base = provider.GetEntry(control_id, FileSys::ContentRecordType::Control);
-    if (!base) {
+    if (!base && !collection) {
         const auto parent = provider.GetParentApplicationId(control_id);
         RequirePrepare(parent && *parent != control_id,
                        "Original game has no authoritative control metadata; NUP display metadata is not sufficient");
@@ -506,10 +548,16 @@ Json ResolveSaveControl(EffectiveInput& input, ContentIdentity& identity,
     }
     RequirePrepare(base && base->GetStatus() == Loader::ResultStatus::Success && base->GetRomFS(),
                    "Original control NCA is missing or unreadable");
+    RequirePrepare(!collection ||
+                       (base->GetTitleId() == control_id && base->GetType() == FileSys::NCAContentType::Control &&
+                        input.collection_control_record &&
+                        MatchesContentRecord(base->GetBaseFile(), *input.collection_control_record)),
+                   "Selected control is not the collection's original CNMT control");
     const FileSys::PatchManager patches{
         control_id, system.GetFileSystemController(), provider};
     input.context["control_base"] = identity.Capture(base->GetBaseFile());
     const auto update = patches.ResolveUpdate(FileSys::ContentRecordType::Control);
+    RequirePrepare(!collection || !update.selected, "Collection control update is not registered");
     CaptureUpdate(input, identity, update, control_id, "control_update");
     if (update.selected) {
         const FileSys::NCA effective{update.raw, base.get()};
@@ -578,7 +626,9 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                                      jint program_index,
                                      const std::function<void()>& pulse = {},
                                      Json* save_control = nullptr) {
-    RequirePrepare(program_index >= 0, "Invalid program index");
+    const bool collection = program_index == KingdomHeartsIndex;
+    RequirePrepare(program_index == 0 || program_index == 1 || collection,
+                   "Unsupported native program index");
     auto& session = EmulationSession::GetInstance();
     auto& system = session.System();
     const auto file = Core::GetGameFileFromPath(system.GetFilesystem(), path);
@@ -593,20 +643,19 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     input.context["source"] = identity.Capture(file, FileSys::NupContainer::IsNupFile(file));
     FileSys::VirtualDir exefs;
     FileSys::VirtualDir romfs;
+    FileSys::VirtualDir menu_exefs;
+    FileSys::VirtualDir menu_romfs;
     std::shared_ptr<FileSys::NCA> base;
     std::unique_ptr<FileSys::NupContainer> nup;
 
     if (FileSys::NupContainer::IsNupFile(file)) {
-        RequirePrepare(program_index == 0, "Multi-program NUP input is unsupported");
+        RequirePrepare(program_index == 0 || collection, "Unsupported indexed NUP input");
         Loader::AppLoader_NUP loader{file};
         const auto packaged = loader.ReadPackagedExeFS();
         RequirePrepare(packaged.has_value(), "NUP has no coherent executable/RomFS version");
         input.version = packaged->first;
         exefs = packaged->second;
-        FileSys::ProgramMetadata metadata;
-        RequirePrepare(metadata.Load(exefs->GetFile("main.npdm")) == Loader::ResultStatus::Success,
-                       "NUP NPDM is unreadable");
-        input.program_id = metadata.GetTitleID();
+        input.program_id = PrepareProgramId(exefs, collection);
         nup = std::make_unique<FileSys::NupContainer>(file);
         RequirePrepare(nup->GetStatus() == Loader::ResultStatus::Success,
                        "NUP metadata or table hash is invalid");
@@ -629,9 +678,27 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                                         {"source", input.context.at("source")}}.dump()},
                 {"supported", true}, {"unsupported_save_kinds", Json::array()}};
         }
-        romfs = FileSys::NupContainer::MergeShadowDirs(
-            base_index ? nup->GetRomFSDir(*base_index) : nullptr,
-            update_index ? nup->GetRomFSDir(*update_index) : nullptr);
+        if (!collection) {
+            romfs = FileSys::NupContainer::MergeShadowDirs(
+                base_index ? nup->GetRomFSDir(*base_index) : nullptr,
+                update_index ? nup->GetRomFSDir(*update_index) : nullptr);
+        } else {
+            RequirePrepare(base_index && !update_index && input.version == 0 &&
+                               input.program_id == KingdomHeartsCollection &&
+                               nup->HasCollectionProgramLayout(*base_index, KingdomHeartsIndex) &&
+                               nup->GetPackages()[*base_index].title_id == KingdomHeartsCollection &&
+                               !nup->GetPackages()[*base_index].standalone_update &&
+                               std::ranges::count(nup->GetPackages(), FileSys::NupContainer::PackageKind::Base,
+                                                  &FileSys::NupContainer::PackageInfo::kind) == 1,
+                           "Member requires the original v0 collection base package without updates");
+            menu_exefs = nup->GetExeFSDir(*base_index);
+            menu_romfs = nup->GetRomFSDir(*base_index);
+            const auto root = nup->GetPackageDir(*base_index);
+            exefs = root->GetDirectoryRelative("program/3/exefs");
+            romfs = root->GetDirectoryRelative("program/3/romfs");
+            input.application_id = KingdomHeartsCollection;
+            input.program_id = KingdomHeartsMember;
+        }
         // Embedded NUP AoC is not mounted by Duet; do not turn it on during export.
         input.context["nup_embedded_aoc"] = "not-emulated";
     } else {
@@ -654,15 +721,35 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         RequirePrepare(base && base->GetStatus() == Loader::ResultStatus::Success && version,
                        "Selected base NCA or authoritative application version is missing");
         input.version = *version;
-        if (indexed_application) {
-            const auto record = ProgramRecord(*meta, input.application_id,
-                                             FileSys::TitleType::Application, 1);
-            input.original_program_record = ProgramRecord(*meta, input.application_id,
+        if (indexed_application || collection) {
+            const auto record = ApplicationRecord(*meta, input.application_id,
+                                             FileSys::TitleType::Application, static_cast<u8>(program_index));
+            input.original_program_record = ApplicationRecord(*meta, input.application_id,
                 FileSys::TitleType::Application, 0);
             RequirePrepare(record && input.original_program_record &&
-                               MatchesProgramRecord(base->GetBaseFile(), *record) &&
+                               MatchesContentRecord(base->GetBaseFile(), *record) &&
                                base->GetTitleId() == input.program_id,
                            "Application CNMT does not bind both edition programs");
+            if (collection) {
+                const auto menu = package->GetNCA(input.application_id, FileSys::ContentRecordType::Program);
+                RequirePrepare(*version == 0 && menu && menu->GetStatus() == Loader::ResultStatus::Success &&
+                                   menu->GetTitleId() == KingdomHeartsCollection && menu->GetRomFS() &&
+                                   menu->GetType() == FileSys::NCAContentType::Program &&
+                                   base->GetType() == FileSys::NCAContentType::Program &&
+                                   MatchesContentRecord(menu->GetBaseFile(), *input.original_program_record),
+                               "Missing or mismatched v0 collection menu");
+                menu_exefs = menu->GetExeFS();
+                menu_romfs = FileSys::ExtractRomFS(menu->GetRomFS());
+                input.input_bytes += menu->GetRomFS()->GetSize();
+                input.context["original_base"] = identity.Capture(menu->GetBaseFile());
+                input.sources.push_back(menu->GetBaseFile());
+                if (save_control) {
+                    const auto control = ApplicationRecord(*meta, input.application_id,
+                        FileSys::TitleType::Application, 0, FileSys::ContentRecordType::Control);
+                    RequirePrepare(control.has_value(), "Collection CNMT has no original control record");
+                    input.collection_control_record = *control;
+                }
+            }
             input.context["application_id"] = std::format("{:016X}", input.application_id);
             input.context["program_index"] = program_index;
         }
@@ -684,9 +771,19 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         RequirePrepare(input.context["boot_base"]["header"] == input.context["base"]["header"] &&
                            registered_base->GetSize() == base->GetBaseFile()->GetSize(),
                        "Boot provider base conflicts with the selected container");
+        if (collection) {
+            const auto boot_menu = provider.GetEntryRaw(input.application_id, FileSys::ContentRecordType::Program);
+            RequirePrepare(MatchesContentRecord(boot_menu, *input.original_program_record),
+                           "Boot provider menu does not match collection CNMT");
+            input.context["boot_menu"] = identity.Capture(boot_menu);
+            RequirePrepare(input.context["boot_menu"]["header"] == input.context["original_base"]["header"],
+                           "Boot provider menu conflicts with selected collection");
+        }
         exefs = base->GetExeFS();
         RequirePrepare(base->GetRomFS() != nullptr, "Selected base RomFS is missing");
     }
+    RequirePrepare(input.program_id != KingdomHeartsMember || collection,
+                   "KH2 cannot be prepared or save-bound as a standalone package");
     if (input.application_id == 0) {
         input.application_id = FileSys::GetBaseTitleID(input.program_id);
     }
@@ -697,13 +794,20 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     auto update = patches.ResolveUpdate();
     FileSys::PatchManager::SelectedUpdate original_update;
     const bool indexed = program_index == 1 && IndexedApplication(input.program_id).has_value();
-    if (indexed) {
+    if (indexed || collection) {
         const FileSys::PatchManager original_patches{
             input.application_id, system.GetFileSystemController(), provider};
         original_update = original_patches.ResolveUpdate();
-        RequirePrepare(!update.selected || original_update.selected,
-                       "Selected edition update has no authoritative original application update");
-        update = ResolveIndexedUpdate(provider, input.application_id, input.program_id, original_update);
+        if (collection) {
+            RequirePrepare(!original_update.selected && !update.selected &&
+                               !original_patches.ResolveUpdate(FileSys::ContentRecordType::Meta).selected &&
+                               !patches.ResolveUpdate(FileSys::ContentRecordType::Meta).selected,
+                           "No native build is registered for an updated collection");
+        } else {
+            RequirePrepare(!update.selected || original_update.selected,
+                           "Selected edition update has no authoritative original application update");
+            update = ResolveIndexedUpdate(provider, input.application_id, input.program_id, original_update);
+        }
     }
     CaptureUpdate(input, identity, update,
                   indexed ? input.application_id : input.program_id, "update");
@@ -715,7 +819,9 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         if (!nup) {
             *save_control = ResolveSaveControl(input, identity, provider);
         }
-        return input;
+        if (!collection) {
+            return input;
+        }
     }
     if (nup) {
         RequirePrepare(!update.selected,
@@ -743,9 +849,31 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         input.input_bytes += file->GetSize();
     }
     using Kind = FileSys::NupContainer::PackageKind;
-    input.packages.push_back({input.version == 0 ? Kind::Base : Kind::Update,
-                              static_cast<u8>(input.version == 0 ? 0 : 1),
-                              input.program_id, input.version, exefs, romfs});
+    if (collection) {
+        const auto marker = romfs->GetFile("kh2_fifth.pkg");
+        RequirePrepare(menu_romfs && !menu_romfs->GetFile("kh2_fifth.pkg") &&
+                           marker && marker->GetSize() != 0,
+                       "Member RomFS is missing its KH2 data or aliases the collection menu");
+        const auto menu_modules = ReadModules(menu_exefs, input.application_id);
+        if (save_control) {
+            return input;
+        }
+        input.programs.push_back(Json{{"index", 0}, {"title_id", std::format("{:016X}", input.application_id)},
+                                      {"version", 0}, {"build_ids", menu_modules}});
+        input.context["application_id"] = std::format("{:016X}", input.application_id);
+        input.context["program_index"] = program_index;
+        for (const auto& module : menu_exefs->GetFiles()) {
+            input.input_bytes += module->GetSize();
+        }
+        auto& root = input.packages.emplace_back(FileSys::Nup::ResolvedPackage{
+            Kind::Base, 0, input.application_id, 0, menu_exefs, menu_romfs});
+        root.member_exefs = exefs;
+        root.member_romfs = romfs;
+    } else {
+        input.packages.push_back({input.version == 0 ? Kind::Base : Kind::Update,
+                                  static_cast<u8>(input.version == 0 ? 0 : 1),
+                                  input.program_id, input.version, exefs, romfs});
+    }
     if (indexed) {
         const auto slot = provider.GetSlotForEntry(input.application_id, FileSys::ContentRecordType::Program);
         RequirePrepare(slot.has_value(), "Original program zero has no selected provider");
@@ -754,13 +882,13 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         const auto meta = source->GetEntry(input.application_id, FileSys::ContentRecordType::Meta);
         const auto version = meta ? ReadContentVersion(*meta, input.application_id,
             FileSys::TitleType::Application) : std::nullopt;
-        const auto record = meta ? ProgramRecord(*meta, input.application_id,
+        const auto record = meta ? ApplicationRecord(*meta, input.application_id,
             FileSys::TitleType::Application, 0) : std::nullopt;
         RequirePrepare(original && original->GetStatus() == Loader::ResultStatus::Success &&
                            original->GetTitleId() == input.application_id && version && record &&
-                           MatchesProgramRecord(original->GetBaseFile(), *record) &&
+                           MatchesContentRecord(original->GetBaseFile(), *record) &&
                            input.original_program_record &&
-                           MatchesProgramRecord(original->GetBaseFile(), *input.original_program_record),
+                           MatchesContentRecord(original->GetBaseFile(), *input.original_program_record),
                        "Original program zero is missing or its CNMT conflicts with the selected edition");
         input.context["original_base"] = identity.Capture(original->GetBaseFile());
         input.context["original_metadata"] = identity.Capture(meta->GetBaseFile());
@@ -801,7 +929,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     const auto disabled_it = Settings::values.disabled_addons.find(base_id);
     bool dlc_disabled = disabled_it != Settings::values.disabled_addons.end() &&
         std::ranges::find(disabled_it->second, "DLC") != disabled_it->second.end();
-    if (indexed) {
+    if (indexed || collection) {
         for (const auto id : {input.program_id, FileSys::GetBaseTitleID(input.program_id)}) {
             if (const auto it = Settings::values.disabled_addons.find(id);
                 it != Settings::values.disabled_addons.end()) {
@@ -822,7 +950,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
             const auto* source = provider.GetSlotProvider(*slot);
             auto data = source->GetEntry(entry.title_id, FileSys::ContentRecordType::Data);
             auto meta = source->GetEntry(entry.title_id, FileSys::ContentRecordType::Meta);
-            if (indexed) {
+            if (indexed || collection) {
                 const auto application = meta ? AddonApplication(*meta, entry.title_id) : std::nullopt;
                 RequirePrepare(application || FileSys::GetBaseTitleID(entry.title_id) != base_id,
                                "Original application DLC has no authoritative association");
@@ -866,7 +994,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     input.context["program_id"] = std::format("{:016X}", input.program_id);
     input.context["version"] = input.version;
     input.context["modules"] = input.modules;
-    if (indexed) {
+    if (indexed || collection) {
         input.context["programs"] = input.programs;
     }
     input.context["mods"] = "none";
@@ -947,6 +1075,26 @@ void ValidateOutput(const EffectiveInput& input, const FileSys::VirtualFile& fil
                            output.GetRomFSDir(i),
                        "Prepared snapshot content identity mismatch");
         if (i == 0) {
+            if (expected.member_exefs) {
+                RequirePrepare(output.HasCollectionProgramLayout(i, KingdomHeartsIndex),
+                               "Prepared collection does not contain distinct menu and member trees");
+                const auto root = output.GetPackageDir(i);
+                const auto menu = output.GetExeFSDir(i);
+                const auto member = root->GetDirectoryRelative("program/3/exefs");
+                RequirePrepare(Json(ReadModules(menu, input.application_id)) ==
+                                   input.programs.at(0).at("build_ids") &&
+                                   ReadModules(member, input.program_id) == input.modules &&
+                                   FileSys::DeepEquals(expected.exefs->GetFile("main.npdm"),
+                                                       menu->GetFile("main.npdm")) &&
+                                   FileSys::DeepEquals(expected.member_exefs->GetFile("main.npdm"),
+                                                       member->GetFile("main.npdm")),
+                               "Prepared collection module or NPDM identity mismatch");
+                ValidateResolvedTree(expected.exefs, menu);
+                ValidateResolvedTree(expected.member_exefs, member);
+                ValidateResolvedTree(expected.romfs, output.GetRomFSDir(i));
+                ValidateResolvedTree(expected.member_romfs, root->GetDirectoryRelative("program/3/romfs"));
+                continue;
+            }
             RequirePrepare(ReadModules(output.GetExeFSDir(i), input.program_id) == input.modules,
                            "Prepared snapshot full module identity mismatch");
             if (expected.program0_romfs) {
@@ -983,7 +1131,7 @@ void ValidateExistingSnapshot(const EffectiveInput& input, const std::string& de
                        metadata.value("input_bytes", u64{}) == existing->GetSize() &&
                        metadata.value("nup_header", "") == OutputHeader(existing),
                    "Prepare input generation is corrupt or mismatched; do not overwrite it");
-    if (input.program_index == 1 || metadata.contains("program_index")) {
+    if (input.program_index != 0 || metadata.contains("program_index")) {
         RequirePrepare(metadata.at("program_index") == input.program_index &&
                            metadata.at("application_id") == std::format("{:016X}", input.application_id) &&
                            metadata.at("programs") == input.programs,
@@ -1105,10 +1253,24 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readPrepareProgramId(
         }
         u64 program_id{};
         if (FileSys::NupContainer::IsNupFile(file)) {
-            Loader::AppLoader_NUP loader{file};
-            if (program_index != 0 ||
-                loader.ReadProgramId(program_id) != Loader::ResultStatus::Success) {
-                return nullptr;
+            if (program_index == KingdomHeartsIndex) {
+                FileSys::NupContainer container{file};
+                const auto base = container.FindBasePackage();
+                if (container.GetStatus() != Loader::ResultStatus::Success || !base ||
+                    container.GetPackages()[*base].title_id != KingdomHeartsCollection ||
+                    !container.HasCollectionProgramLayout(*base, KingdomHeartsIndex)) {
+                    return nullptr;
+                }
+                const auto member = container.GetPackageDir(*base)->GetDirectoryRelative("program/3/exefs");
+                program_id = PrepareProgramId(member, true);
+                if (program_id != KingdomHeartsMember) {
+                    return nullptr;
+                }
+            } else {
+                Loader::AppLoader_NUP loader{file};
+                if (program_index != 0 || loader.ReadProgramId(program_id) != Loader::ResultStatus::Success) {
+                    return nullptr;
+                }
             }
         } else {
             const auto package = OpenRetailPackage(file, program_index);
@@ -1117,8 +1279,10 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readPrepareProgramId(
             }
             program_id = SelectedRetailProgram(package, program_index);
         }
-        return program_id == 0 ? nullptr :
-            Common::Android::ToJString(env, std::to_string(program_id));
+        if (program_id == 0 || (program_id == KingdomHeartsMember && program_index != KingdomHeartsIndex)) {
+            return nullptr;
+        }
+        return Common::Android::ToJString(env, std::to_string(program_id));
     } catch (const std::exception&) {
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
@@ -1152,12 +1316,9 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_isPrepareInputCompleteN
     JNIEnv* env, jobject support, jstring jpath, jint program_index, jobjectArray jexpected,
     jstring jdestination) {
     try {
-        RequirePrepare(program_index == 0 || program_index == 1, "Unsupported native program index");
         const auto input = ResolveEffectiveInput(
             env, support, Common::Android::GetJString(env, jpath), program_index);
-        RequirePrepare(input.Fields() == ReadExpectedFields(env, jexpected) &&
-                           ((program_index == 0 && (input.program_id & 0xFFF) == 0) ||
-                            (program_index == 1 && IndexedApplication(input.program_id))),
+        RequirePrepare(input.Fields() == ReadExpectedFields(env, jexpected) && input.IsSupportedProgram(),
                        "Selected effective content does not match the expected input");
         ValidateExistingSnapshot(input, Common::Android::GetJString(env, jdestination));
         return true;
@@ -1182,7 +1343,6 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_exportPrepareInputNativ
     bool owns_sidecar_part = false;
     bool owns_generation = false;
     try {
-        RequirePrepare(program_index == 0 || program_index == 1, "Unsupported native program index");
         PrepareProgress progress{env, callback};
         progress.Report(0, 0);
         progress.Check();
@@ -1194,8 +1354,7 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_exportPrepareInputNativ
         const auto expected = ReadExpectedFields(env, jexpected);
         RequirePrepare(input.Fields() == expected,
                        "Selected code, update, DLC, mods or source changed; choose native again");
-        RequirePrepare((program_index == 0 && (input.program_id & 0xFFF) == 0) ||
-                           (program_index == 1 && IndexedApplication(input.program_id)),
+        RequirePrepare(input.IsSupportedProgram(),
                        "Native consumer does not support this selected program");
         if (fs::exists(output) || fs::exists(sidecar)) {
             ValidateExistingSnapshot(input, destination);

@@ -76,8 +76,10 @@ worktrees; add `--write` only after reviewing the proposed diff:
 python tools/duo/native-support-catalog.py --peanuts /path/to/peanuts --banana /path/to/banana
 ```
 
-Peanuts uses its published Switch 1 Android list plus the private Z-A and Hogwarts
-profiles. Banana uses its declared Android-ready Switch 2 profiles. Preserve every
+Peanuts uses `peanuts/release-titles.txt`, Switch 1 `nxGames` and Android
+`readiness.tsv` status rows, plus reviewed private merges not declared in those
+sources. Requirements alone do not declare Android support. Banana uses its
+declared Android-ready Switch 2 profiles. Preserve every
 registered code/module build allowed by `android_builds`; `shader_versions` is
 capture provenance, not a supported-code allowlist. Prepare independently verifies
 shader coverage. This does not make desktop-only profiles Android-ready.
@@ -86,6 +88,10 @@ Title recognition opens the native/emulated choice independently of exact-build
 readiness. A mismatching version remains visible there but cannot run incompatible
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
+
+The 11-title refresh uses Peanuts `936ae088` with the embedded collection-member
+checks and distribution exclusions in `312c55d380`, and Banana `fe916556`.
+These inputs add 17 Switch 1 build rows; they do not change the Switch 2 roster.
 
 Readiness keeps the first identified program's actual admission failure on the
 fullscreen choice page. Native preparation reads the original game, selected

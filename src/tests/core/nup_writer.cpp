@@ -486,6 +486,77 @@ TEST_CASE("NUP indexed snapshot keeps program one at root and aliases its extent
             FileSys::Nup::PackResult::InvalidSource);
 }
 
+TEST_CASE("NUP collection snapshot keeps menu and selected program separate", "[nup]") {
+    TempDir t;
+    constexpr u64 collection = 0x010090C022978000ULL;
+    const auto exefs = [](u64 title, const char* main) {
+        auto npdm = Npdm(title);
+        npdm.replace(0, 4, "META");
+        npdm.replace(0x40, 4, "ACI0"); // Not the ACI0 declared by the header.
+        SetLe(npdm, 0x70, 0x80, 4);
+        SetLe(npdm, 0x74, 0x80, 4);
+        return std::make_shared<FileSys::VectorVfsDirectory>(
+            std::vector<FileSys::VirtualFile>{MemoryFile("main", main),
+                                              MemoryFile("main.npdm", npdm)});
+    };
+    auto packages = ResolvedPackages();
+    packages.resize(1);
+    auto& base = packages.front();
+    base.kind = NupContainer::PackageKind::Base;
+    base.flags = 0;
+    base.version = 0;
+    base.title_id = collection;
+    base.exefs = exefs(collection, "menu");
+    base.member_exefs = exefs(collection + 3, "KH2");
+    base.member_romfs = std::make_shared<FileSys::VectorVfsDirectory>(
+        std::vector<FileSys::VirtualFile>{MemoryFile("kh2_fifth.pkg", "member resources")});
+    const auto archive = t.path / "generation" / "collection.nup";
+    REQUIRE(FileSys::Nup::PackResolved(packages, archive) == FileSys::Nup::PackResult::Success);
+    FileSys::RealVfsFilesystem real;
+    NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE(nup.GetPackages().front().title_id == collection);
+    REQUIRE(nup.HasCollectionProgramLayout(0, 3));
+    REQUIRE_FALSE(nup.HasCollectionProgramLayout(0, 1));
+    REQUIRE(Read(nup.GetExeFSDir(0)->GetFile("main")) == "menu");
+    REQUIRE(PackedTree(nup.GetRomFSDir(0)) == PackedTree(base.romfs));
+    const auto member = nup.GetPackageDir(0)->GetDirectoryRelative("program/3");
+    REQUIRE(member != nullptr);
+    REQUIRE(PackedTree(member->GetSubdirectory("exefs")) == PackedTree(base.member_exefs));
+    REQUIRE(PackedTree(member->GetSubdirectory("romfs")) == PackedTree(base.member_romfs));
+    // A valid TOC can reuse directory indices. A member that points at the menu's RomFS
+    // must not qualify as a separate program, even if both ExeFS directories look valid.
+    auto aliased = ReadAll(archive);
+    const auto toc = Le(aliased, 8, 8);
+    const auto dirs = toc + 0x30 + 0x40; // one package
+    const auto dir_count = Le(aliased, toc + 8, 8);
+    const auto children = dirs + dir_count * 0x18 + Le(aliased, toc + 0x10, 8) * 0x50;
+    const auto pool = toc + Le(aliased, toc + 0x18, 8);
+    const auto menu_romfs = nup.GetPackages().front().romfs_dir;
+    bool changed = false;
+    for (auto pos = children; pos < pool; pos += 4) {
+        const auto index = Le(aliased, pos, 4);
+        if (index >= dir_count || index == menu_romfs) {
+            continue;
+        }
+        const auto record = dirs + index * 0x18;
+        if (aliased.substr(pool + Le(aliased, record, 4), Le(aliased, record + 4, 4)) == "romfs") {
+            SetLe(aliased, pos, menu_romfs, 4);
+            changed = true;
+            break;
+        }
+    }
+    REQUIRE(changed);
+    const auto hash = Sha256(std::string_view{aliased}.substr(toc, Le(aliased, 0x10, 8)));
+    std::copy(hash.begin(), hash.end(), aliased.begin() + 0x18);
+    NupContainer bad{MemoryFile("alias.nup", aliased)};
+    REQUIRE(bad.GetStatus() == Loader::ResultStatus::Success);
+    REQUIRE_FALSE(bad.HasCollectionProgramLayout(0, 3));
+    base.member_exefs = exefs(collection, "not a member");
+    REQUIRE(FileSys::Nup::PackResolved(packages, t.path / "invalid" / "input.nup") ==
+            FileSys::Nup::PackResult::InvalidSource);
+}
+
 TEST_CASE("NUP reads zstd members above the memory cache through a temporary file", "[nup]") {
     TempDir t;
     const auto root = t.path / "Game";

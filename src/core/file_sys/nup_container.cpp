@@ -787,6 +787,42 @@ VirtualDir NupContainer::GetPackageDir(std::size_t package_index) {
     return BuildPackageDir(packages[package_index].root_dir);
 }
 
+u32 NupContainer::ChildDirectory(u32 parent, std::string_view name) const {
+    u32 result = NoDir;
+    if (parent < dirs.size()) {
+        const auto& node = dirs[parent];
+        for (u64 i = node.first_child; i < u64{node.first_child} + node.child_count; ++i) {
+            const auto child = children[i];
+            if (child < dirs.size() && dirs[child].name == name) {
+                if (result != NoDir) {
+                    return NoDir;
+                }
+                result = child;
+            }
+        }
+    }
+    return result;
+}
+
+bool NupContainer::HasCollectionProgramLayout(std::size_t package_index, u8 program_index) const {
+    if (status != Loader::ResultStatus::Success || package_index >= packages.size() ||
+        !program_index) {
+        return false;
+    }
+    const auto& base = packages[package_index];
+    if (base.kind != PackageKind::Base || base.version != 0 || (base.title_id & 0xFFF) != 0 ||
+        base.exefs_dir == NoDir || base.romfs_dir == NoDir ||
+        ChildDirectory(base.root_dir, "exefs") != base.exefs_dir ||
+        ChildDirectory(base.root_dir, "romfs") != base.romfs_dir) {
+        return false;
+    }
+    const auto member =
+        ChildDirectory(ChildDirectory(base.root_dir, "program"), std::to_string(program_index));
+    const auto code = ChildDirectory(member, "exefs");
+    const auto data = ChildDirectory(member, "romfs");
+    return code != NoDir && data != NoDir && code != base.exefs_dir && data != base.romfs_dir;
+}
+
 bool NupContainer::HasIndexedProgramLayout(std::size_t package_index) const {
     if (status != Loader::ResultStatus::Success || package_index >= packages.size()) {
         return false;
@@ -795,29 +831,17 @@ bool NupContainer::HasIndexedProgramLayout(std::size_t package_index) const {
     if (package.kind == PackageKind::Addon || (package.title_id & 0xFFF) != 1) {
         return false;
     }
-    const auto directory = [&](u32 parent, std::string_view name) {
-        if (parent < dirs.size()) {
-            const auto& node = dirs[parent];
-            for (u64 i = node.first_child; i < u64{node.first_child} + node.child_count; ++i) {
-                const auto child = children[i];
-                if (child < dirs.size() && dirs[child].name == name) {
-                    return child;
-                }
-            }
-        }
-        return NoDir;
-    };
-    const auto program = directory(package.root_dir, "program");
-    const auto original = directory(program, "0");
-    const auto selected = directory(program, "1");
+    const auto program = ChildDirectory(package.root_dir, "program");
+    const auto original = ChildDirectory(program, "0");
+    const auto selected = ChildDirectory(program, "1");
     if (program == NoDir || original == NoDir || selected == NoDir ||
         dirs[program].child_count != 2 || dirs[original].child_count != 1 ||
-        dirs[selected].child_count != 2 || directory(original, "romfs") == NoDir) {
+        dirs[selected].child_count != 2 || ChildDirectory(original, "romfs") == NoDir) {
         return false;
     }
     std::vector<std::pair<u32, u32>> pending{
-        {package.exefs_dir, directory(selected, "exefs")},
-        {package.romfs_dir, directory(selected, "romfs")}};
+        {package.exefs_dir, ChildDirectory(selected, "exefs")},
+        {package.romfs_dir, ChildDirectory(selected, "romfs")}};
     while (!pending.empty()) {
         const auto [left, right] = pending.back();
         pending.pop_back();

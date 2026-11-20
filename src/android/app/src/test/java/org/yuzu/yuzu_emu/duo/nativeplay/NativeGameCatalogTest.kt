@@ -102,6 +102,23 @@ class NativeGameCatalogTest {
     }
 
     @Test
+    fun collectionTileOffersKh2ButOnlyProgramThreeMatchesItsBuild() {
+        val menu = "010090C022978000"
+        val kh2 = NativeGameBuild(
+            "010090C022978003", 0,
+            mapOf("main" to nsoId("e1bced80ffd14436980f7490b1d3c3e7"),
+                "subsdk1" to nsoId("99e21f98a397434b534c1459fc38a2b8"),
+                "sdk" to nsoId("bc204aae7319bab274894f1cc3f5da92"))
+        )
+        assertTrue(catalog.recognizesTitle(menu))
+        assertTrue(3 in catalog.programIndices)
+        assertEquals(NativeEngine.PEANUTS, catalog.match(kh2)?.engine)
+        assertNull(catalog.match(kh2.copy(programId = menu)))
+        assertNull(catalog.match(kh2.copy(moduleBuildIds = kh2.moduleBuildIds - "subsdk1")))
+        assertNull(catalog.match(kh2.copy(version = 65536)))
+    }
+
+    @Test
     fun listsMultipleSupportedVersionsAndRejectsUnknownPrograms() {
         assertEquals(listOf("4.0.0", "4.0.1"), catalog.versions("0100152000022000").map { it.displayVersion })
         assertTrue(catalog.versions("0000000000000000").isEmpty())

@@ -33,6 +33,7 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/swap.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -217,12 +218,27 @@ std::vector<u8> ReadWholeFile(const fs::path& path) {
     return data;
 }
 
-// Same as pack.py: the program ID at ACI0 + 0x10, whatever the NPDM header revision.
-std::optional<u64> NpdmProgramId(std::span<const u8> npdm) {
+// Loose dumps historically used the first ACI0 marker. Collection program paths must bind
+// to the header-declared ACI0 section, as the member loader does.
+std::optional<u64> NpdmProgramId(std::span<const u8> npdm, bool collection = false) {
     static constexpr std::array<u8, 4> aci0{'A', 'C', 'I', '0'};
-    const auto it = std::search(npdm.begin(), npdm.end(), aci0.begin(), aci0.end());
-    const auto offset = static_cast<size_t>(it - npdm.begin());
-    if (it == npdm.end() || offset + 0x18 > npdm.size()) {
+    size_t offset;
+    if (collection) {
+        if (npdm.size() < 0x80 || std::memcmp(npdm.data(), "META", 4) != 0) {
+            return std::nullopt;
+        }
+        std::array<u32_le, 2> section;
+        std::memcpy(section.data(), npdm.data() + 0x70, sizeof(section));
+        offset = section[0];
+        if (offset < 0x80 || offset > npdm.size() || section[1] < 0x18 ||
+            section[1] > npdm.size() - offset ||
+            std::memcmp(npdm.data() + offset, aci0.data(), aci0.size()) != 0) {
+            return std::nullopt;
+        }
+    } else {
+        offset = std::search(npdm.begin(), npdm.end(), aci0.begin(), aci0.end()) - npdm.begin();
+    }
+    if (npdm.size() - offset < 0x18) {
         return std::nullopt;
     }
     u64 id = 0;
@@ -871,23 +887,23 @@ void CollectResolvedTree(Plan& plan, u32 package, const VirtualDir& dir,
 }
 
 std::vector<u8> ReadResolvedMetadata(
-    const PlanEntry& entry, const std::atomic_bool* cancel,
+    const VirtualFile& file, u64 size, const std::atomic_bool* cancel,
     const std::function<void(const PackProgress&)>& progress) {
     // NPDM must fit a metadata TLV; ordinary file content is always streamed, never copied here.
-    if (entry.size > std::numeric_limits<u32>::max() - 8) {
+    if (size > std::numeric_limits<u32>::max() - 8) {
         throw PackError(PackResult::InvalidSource, "NPDM is too large for NUP metadata");
     }
-    std::vector<u8> bytes(static_cast<size_t>(entry.size));
+    std::vector<u8> bytes(static_cast<size_t>(size));
     for (size_t offset = 0; offset < bytes.size();) {
         PollResolvedDiscovery(cancel, progress);
         const auto count = std::min(ReadBufferSize, bytes.size() - offset);
-        if (entry.file->Read(bytes.data() + offset, count, offset) != count) {
+        if (file->Read(bytes.data() + offset, count, offset) != count) {
             throw PackError(PackResult::IoError, "cannot read resolved NPDM");
         }
         offset += count;
     }
     PollResolvedDiscovery(cancel, progress);
-    if (entry.file->GetSize() != entry.size) {
+    if (file->GetSize() != size) {
         throw PackError(PackResult::IoError, "resolved NPDM changed while packing");
     }
     return bytes;
@@ -947,6 +963,32 @@ Plan BuildResolvedPlan(const std::vector<ResolvedPackage>& packages, const Metad
                 plan.entries.push_back(std::move(alias));
             }
         }
+        if (package.member_exefs || package.member_romfs) {
+            if (kind != KindBase || (package.title_id & 0xFFF) != 0 ||
+                !package.member_exefs || !package.member_romfs ||
+                package.member_exefs == package.exefs || package.member_romfs == package.romfs) {
+                throw PackError(PackResult::InvalidSource,
+                                "expected a base collection and separate member trees");
+            }
+            const auto npdm = package.member_exefs->GetFile("main.npdm");
+            const auto main = package.member_exefs->GetFile("main");
+            if (!npdm || !main || !main->GetSize() || npdm->GetSize() > (1U << 20)) {
+                throw PackError(PackResult::InvalidSource, "collection member has no complete ExeFS");
+            }
+            const auto id =
+                NpdmProgramId(ReadResolvedMetadata(npdm, npdm->GetSize(), cancel, progress), true);
+            if (!id || (*id & ~u64{0xFF}) != package.title_id || *id == package.title_id) {
+                throw PackError(PackResult::InvalidSource,
+                                "member NPDM does not belong to this collection");
+            }
+            const auto prefix = "program/" + std::to_string(*id - package.title_id);
+            plan.entries.push_back({index, "program", {}, true});
+            plan.entries.push_back({index, prefix, {}, true});
+            CollectResolvedTree(plan, index, package.member_exefs, prefix + "/exefs", cancel,
+                                ancestors, progress);
+            CollectResolvedTree(plan, index, package.member_romfs, prefix + "/romfs", cancel,
+                                ancestors, progress);
+        }
 
         std::vector<std::pair<u16, std::vector<u8>>> tlvs;
         if (application) {
@@ -964,8 +1006,8 @@ Plan BuildResolvedPlan(const std::vector<ResolvedPackage>& packages, const Metad
             if (!npdm || !have_main) {
                 throw PackError(PackResult::InvalidSource, "resolved ExeFS needs main and main.npdm");
             }
-            auto bytes = ReadResolvedMetadata(*npdm, cancel, progress);
-            if (NpdmProgramId(bytes) != package.title_id) {
+            auto bytes = ReadResolvedMetadata(npdm->file, npdm->size, cancel, progress);
+            if (NpdmProgramId(bytes, package.member_exefs != nullptr) != package.title_id) {
                 throw PackError(PackResult::InvalidSource, "resolved NPDM program ID mismatch");
             }
             tlvs.emplace_back(TlvNpdm, std::move(bytes));
