@@ -1,5 +1,10 @@
 # Changelog
 
+## Duet Plus 1.3.2
+
+- Added native preparation for 11 more Switch games across 17 registered builds: Absolum, Bayonetta 3, Double Dragon Revive, Kingdom Hearts II Final Mix, Metroid Prime 4: Beyond, Octopath Traveler, Super Smash Bros. Ultimate, Trails beyond the Horizon, Trails in the Sky 1st Chapter, Trails through Daybreak II, and Ys X: Nordics.
+- Kingdom Hearts II Final Mix uses the playable program inside the collection rather than its menu. Native preparation still checks the installed build and shader coverage; unlisted games continue to use emulation.
+
 ## Duet Plus 1.3.1
 
 - Native play no longer asks you to disable emulator mods or dual-screen companions. It prepares clean game content and leaves emulation settings unchanged.
