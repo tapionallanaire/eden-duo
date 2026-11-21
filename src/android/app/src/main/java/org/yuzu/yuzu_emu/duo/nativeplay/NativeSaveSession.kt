@@ -216,7 +216,7 @@ object NativeSaveSession {
         engine: NativeEngine, programIndex: Int, programId: String, expectedIdentity: String, token: String): String {
         reserve(context, token, expectedIdentity) {
             val binding = GameHelper.withPrepareContent(source, { programId.toULong(16).toString() }) {
-                val observed = NativeGameSupport.findBuildCandidate(context, source, programIndex)
+                val observed = NativeGameSupport.findBuildCandidate(context, source, programId)
                 check(observed != null && observed.contentKey == contentKey &&
                     observed.profile.programId == programId && observed.profile.engine == engine) {
                     "The original effective retail content changed before save admission"

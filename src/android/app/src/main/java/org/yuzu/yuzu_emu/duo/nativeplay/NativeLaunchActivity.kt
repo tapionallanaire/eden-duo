@@ -16,6 +16,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.radiobutton.MaterialRadioButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,6 +36,7 @@ class NativeLaunchActivity : AppCompatActivity() {
     private var prepared = false
     private var childStarted = false
     private var contentKey = ""
+    private var programId = ""
     private var loading = false
     private var failure = ""
 
@@ -72,6 +74,7 @@ class NativeLaunchActivity : AppCompatActivity() {
         game = selected
         childStarted = savedInstanceState?.getBoolean("preparing") == true
         contentKey = savedInstanceState?.getString(CONTENT_KEY).orEmpty()
+        programId = savedInstanceState?.getString(PROGRAM_ID).orEmpty()
         failure = savedInstanceState?.getString("failure") ?: intent.getStringExtra(ERROR).orEmpty()
         binding = nativeLaunchContent(game) { finish() }
         binding.secondary.setOnClickListener { finishChoice(EMULATE) }
@@ -103,11 +106,14 @@ class NativeLaunchActivity : AppCompatActivity() {
         } else if (failure.isNotEmpty()) showFailure(failure) else loadReadiness()
     }
 
-    private fun loadReadiness() {
+    private fun loadReadiness(knownMembers: NativeGameSupport.Members? = null) {
         if (loading) return
         loading = true
+        failure = ""
         prepared = false
         match = null
+        binding.memberChoices.isVisible = false
+        binding.detailsText.text = ""
         binding.availability.setText(R.string.native_checking)
         binding.summary.text = ""
         binding.status.text = ""
@@ -116,19 +122,24 @@ class NativeLaunchActivity : AppCompatActivity() {
         binding.primary.isEnabled = false
         binding.secondary.isEnabled = true
         lifecycleScope.launch {
+            var options = knownMembers
             try {
                 var unavailableReason = ""
+                val members = knownMembers ?: withContext(Dispatchers.IO) {
+                    NativeGameSupport.members(this@NativeLaunchActivity, game) { unavailableReason = it.message.orEmpty() }
+                }
+                options = members
                 val candidate = withContext(Dispatchers.IO) {
-                    NativeGameSupport.findGameCandidate(this@NativeLaunchActivity, game.path) {
-                        if (unavailableReason.isEmpty()) unavailableReason = it.message.orEmpty()
-                    }
-                        ?.takeIf { PreparedNativeGame.available(it.profile.engine) }
+                    members.match(this@NativeLaunchActivity, game.path) { unavailableReason = it.message.orEmpty() }
                 }
                 match = candidate
                 contentKey = candidate?.contentKey.orEmpty()
-                if (candidate == null || !PreparedNativeGame.available(candidate.profile.engine)) {
-                    binding.availability.setText(R.string.native_not_available)
-                    binding.summary.text = unavailableReason.ifEmpty { getString(R.string.native_not_available_message) }
+                programId = candidate?.profile?.programId.orEmpty()
+                if (candidate == null) {
+                    val needsChoice = members.selected == null && members.choices.isNotEmpty()
+                    binding.availability.setText(if (needsChoice) R.string.native_launch_title else R.string.native_not_available)
+                    binding.summary.text = if (needsChoice) getString(R.string.native_choose_member)
+                        else unavailableReason.ifEmpty { getString(R.string.native_not_available_message) }
                     binding.primary.setText(R.string.native_play)
                     binding.primary.isVisible = true
                     binding.detailsToggle.isVisible = false
@@ -161,6 +172,7 @@ class NativeLaunchActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 showFailure(e.message ?: e.javaClass.simpleName)
             } finally {
+                options?.let { binding.showMembers(game, it, ::loadReadiness) }
                 loading = false
                 binding.progress.isVisible = false
             }
@@ -183,6 +195,7 @@ class NativeLaunchActivity : AppCompatActivity() {
     private fun setActionsEnabled(enabled: Boolean) {
         binding.primary.isEnabled = enabled
         binding.secondary.isEnabled = enabled
+        if (!enabled) binding.memberChoices.isVisible = false
     }
 
     private fun finishChoice(choice: String) {
@@ -192,7 +205,7 @@ class NativeLaunchActivity : AppCompatActivity() {
             if (choice == NATIVE) NativePlayPreferences.Mode.NATIVE else NativePlayPreferences.Mode.EMULATED)
         setResult(RESULT_OK, Intent().putExtra(CHOICE, choice)
             .putExtra(NativePreparationActivity.SOURCE_PATH, game.path)
-            .putExtra(CONTENT_KEY, contentKey))
+            .putExtra(CONTENT_KEY, contentKey).putExtra(PROGRAM_ID, programId))
         finish()
     }
 
@@ -202,6 +215,7 @@ class NativeLaunchActivity : AppCompatActivity() {
         outState.putString("failure", failure)
         // Preparation's result can arrive before readiness is loaded in a recreated host.
         outState.putString(CONTENT_KEY, contentKey)
+        outState.putString(PROGRAM_ID, programId)
         super.onSaveInstanceState(outState)
     }
 
@@ -210,11 +224,41 @@ class NativeLaunchActivity : AppCompatActivity() {
         private const val ERROR = "native_error"
         const val CHOICE = "native_choice"
         const val CONTENT_KEY = "native_content_key"
+        const val PROGRAM_ID = "native_program_id"
         const val EMULATE = "emulate"
         const val NATIVE = "native"
 
         internal fun intent(context: Context, game: Game, error: String = "") =
             Intent(context, NativeLaunchActivity::class.java).putExtra(GAME, game).putExtra(ERROR, error)
+    }
+}
+
+internal fun NativeGameProfile.titleFor(game: Game): String =
+    if (!programId.endsWith("000") || programId != game.programIdHex) title else game.title
+
+/** A single member needs no picker. A missing remembered member never silently selects its sibling. */
+internal fun ActivityNativeLaunchBinding.showMembers(
+    game: Game,
+    members: NativeGameSupport.Members,
+    onSelected: (NativeGameSupport.Members) -> Unit
+) {
+    val selected = members.selected
+    gameTitle.text = selected?.titleFor(game) ?: game.title
+    memberChoices.removeAllViews()
+    memberChoices.isVisible = members.choices.size > 1 || (selected == null && members.choices.isNotEmpty())
+    if (!memberChoices.isVisible) return
+    for (profile in members.choices) {
+        memberChoices.addView(MaterialRadioButton(root.context).apply {
+            id = View.generateViewId()
+            text = profile.title
+            isChecked = profile == selected
+            setOnClickListener {
+                if (profile != selected) {
+                    NativePlayPreferences.rememberProfile(context, game.programIdHex, profile)
+                    onSelected(members.copy(remembered = profile.engine to profile.programId))
+                }
+            }
+        })
     }
 }
 

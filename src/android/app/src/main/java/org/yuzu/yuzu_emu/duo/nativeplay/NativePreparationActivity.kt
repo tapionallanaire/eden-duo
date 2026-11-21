@@ -41,6 +41,7 @@ class NativePreparationActivity : AppCompatActivity() {
     private val cancelled = AtomicBoolean()
     private lateinit var game: Game
     private lateinit var expectedKey: String
+    private lateinit var programId: String
     private lateinit var binding: ActivityNativeLaunchBinding
     private lateinit var status: MaterialTextView
     private lateinit var progress: LinearProgressIndicator
@@ -66,10 +67,7 @@ class NativePreparationActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val ready = withContext(Dispatchers.IO) {
-                    val current = NativeGameSupport.findGameCandidate(this@NativePreparationActivity, game.path)
-                    if (current == null || current.contentKey != expectedKey) {
-                        throw IOException(getString(R.string.native_content_changed))
-                    }
+                    val current = NativeGameSupport.requireSelectedBuild(this@NativePreparationActivity, game.path, programId, expectedKey)
                     PreparedNativeGame.prepare(this@NativePreparationActivity, game.path, current)
                         ?: throw IOException(getString(R.string.native_runtime_unavailable))
                 }
@@ -97,7 +95,8 @@ class NativePreparationActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val selected = IntentCompat.getParcelableExtra(intent, GAME, Game::class.java)
         val key = intent.getStringExtra(CONTENT_KEY)
-        if (selected == null || key.isNullOrBlank()) {
+        programId = intent.getStringExtra(NativeLaunchActivity.PROGRAM_ID).orEmpty()
+        if (selected == null || key.isNullOrBlank() || programId.isEmpty()) {
             finishFailure(getString(R.string.native_prepare_interrupted))
             return
         }
@@ -116,6 +115,7 @@ class NativePreparationActivity : AppCompatActivity() {
 
     private fun buildContent() {
         binding = nativeLaunchContent(game) { cancelExport() }
+        binding.gameTitle.text = intent.getStringExtra("duet_game_title") ?: game.title
         binding.toolbar.setTitle(R.string.native_prepare_title)
         binding.availability.setText(R.string.native_prepare_title)
         binding.summary.setText(R.string.native_reading_content)
@@ -137,10 +137,7 @@ class NativePreparationActivity : AppCompatActivity() {
             try {
                 val next = exportMutex.withLock {
                     withContext(Dispatchers.IO) {
-                        val match = NativeGameSupport.findGameCandidate(this@NativePreparationActivity, game.path)
-                        if (match == null || match.contentKey != expectedKey) {
-                            throw IOException(getString(R.string.native_content_changed))
-                        }
+                        val match = NativeGameSupport.requireSelectedBuild(this@NativePreparationActivity, game.path, programId, expectedKey)
                         if (cancelled.get()) throw IOException(getString(R.string.native_prepare_cancelled))
                         val estimate = PreparedNativeGame.estimate(this@NativePreparationActivity, match)
                         runOnUiThread {
@@ -199,7 +196,7 @@ class NativePreparationActivity : AppCompatActivity() {
                         if (cancelled.get()) throw IOException(getString(R.string.native_prepare_cancelled))
                         if (error != null) throw IOException(error)
                         PreparedNativeGame.compile(this@NativePreparationActivity, game.path, input.path, match)
-                            .putExtra("duet_game_title", game.title)
+                            .putExtra("duet_game_title", match.profile.titleFor(game))
                             .putExtra("duet_game_subtitle", listOf(game.developer, game.version).filter { it.isNotBlank() }.joinToString(" · "))
                             .putExtra("duet_game_artwork", GameIconCache.read(game))
                             .putExtra("duet_prepare_details", getString(R.string.native_prepare_details, estimate.text, estimate.storagePath))
@@ -266,6 +263,8 @@ class NativePreparationActivity : AppCompatActivity() {
             return Intent(context, NativePreparationActivity::class.java)
                 .putExtra(GAME, game)
                 .putExtra(CONTENT_KEY, match.contentKey)
+                .putExtra(NativeLaunchActivity.PROGRAM_ID, match.profile.programId)
+                .putExtra("duet_game_title", match.profile.titleFor(game))
                 .putExtra("duet_force_recompile", recompile)
         }
     }

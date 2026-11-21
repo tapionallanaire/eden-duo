@@ -85,25 +85,31 @@ class NativeSettingsActivity : AppCompatActivity() {
     }
 
     private fun setBusy(value: Boolean) {
+        if (value) binding.memberChoices.isVisible = false
         binding.progress.isVisible = value
         binding.progress.isIndeterminate = true
         binding.primary.isEnabled = !value && match != null
         binding.secondary.isEnabled = !value && dataOwner != null
     }
 
-    private fun loadData(message: String? = null) {
+    private fun loadData(message: String? = null, knownMembers: NativeGameSupport.Members? = null) {
         if (loading || childStarted) return
         loading = true
         setBusy(true)
         lifecycleScope.launch {
+            var options = knownMembers
             try {
+                val members = knownMembers ?: withContext(Dispatchers.IO) {
+                    NativeGameSupport.members(this@NativeSettingsActivity, game)
+                }
+                options = members
                 val result = withContext(Dispatchers.IO) {
-                    val candidate = NativeGameSupport.findGameCandidate(this@NativeSettingsActivity, game.path)
-                        ?.takeIf { PreparedNativeGame.available(it.profile.engine) }
-                    val owner = candidate?.let { it.profile.engine to it.profile.programId }
-                        ?: NativePlayPreferences.lastProfile(this@NativeSettingsActivity, game.programIdHex)
-                        ?: assets.open(NativeGameCatalog.ASSET).reader().use(NativeGameCatalog::read)
-                            .versions(game.programIdHex).firstOrNull()?.let { it.engine to it.programId }
+                    val candidate = members.match(this@NativeSettingsActivity, game.path)
+                    val owner = members.selected?.let { it.engine to it.programId }
+                        ?: if (members.choices.isEmpty()) members.remembered
+                            ?: assets.open(NativeGameCatalog.ASSET).reader().use(NativeGameCatalog::read)
+                                .versions(game.programIdHex).firstOrNull()?.let { it.engine to it.programId }
+                        else null
                     val state = owner?.let { PreparedNativeGame.compiledData(this@NativeSettingsActivity, game.path, it.second, it.first) }
                     Triple(candidate, owner, state)
                 }
@@ -112,6 +118,7 @@ class NativeSettingsActivity : AppCompatActivity() {
                 val state = result.third
                 val busy = state?.getBoolean("busy") == true
                 binding.status.text = message ?: if (busy) getString(R.string.native_data_busy)
+                    else if (members.choices.isNotEmpty() && members.selected == null) getString(R.string.native_choose_member)
                     else if (match == null) getString(R.string.native_not_available_message)
                     else getString(R.string.native_needs_preparation)
                 binding.detailsText.text = getString(R.string.native_data_size,
@@ -127,7 +134,13 @@ class NativeSettingsActivity : AppCompatActivity() {
                 dataOwner = null
                 binding.status.text = e.message ?: e.javaClass.simpleName
                 setBusy(false)
-            } finally { loading = false }
+            } finally {
+                options?.let { members ->
+                    binding.showMembers(game, members) { loadData(knownMembers = it) }
+                    if (members.choices.isEmpty()) dataOwner?.let { binding.gameTitle.text = "${game.title} · ${it.second}" }
+                }
+                loading = false
+            }
         }
     }
 

@@ -23,6 +23,19 @@ class NativePrepareIdentityTest {
     }
 
     @Test
+    fun collectionSelectionNeverSubstitutesASiblingForTheRememberedMember() {
+        val kh1 = NativeGameProfile(NativeEngine.PEANUTS, "010090C022978001", 0, "1.0.0", "KH1", emptyMap())
+        val kh2 = kh1.copy(programId = "010090C022978003", title = "KH2")
+        val saved = kh2.engine to kh2.programId
+        fun selected(vararg options: NativeGameProfile, remembered: Pair<NativeEngine, String>? = null) =
+            NativeGameSupport.Members(options.toList(), remembered).selected
+        assertNull(selected(kh1, kh2))
+        assertEquals(kh2, selected(kh1, kh2, remembered = saved))
+        assertNull(selected(kh1, remembered = saved))
+        assertEquals(kh1, selected(kh1))
+    }
+
+    @Test
     fun rejectsTruncatedDuplicateOrUnversionedIdentity() {
         assertNull(NativeGameSupport.parseIdentity(fields.copyOfRange(0, 4)))
         assertNull(NativeGameSupport.parseIdentity(fields + fields[4]))
