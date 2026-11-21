@@ -117,8 +117,9 @@ class NativeCompilationActivity : AppCompatActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
+    // onStart runs before Lifecycle dispatches STARTED, so observe() would silently skip a returning capture.
+    override fun onResume() {
+        super.onResume()
         if (::binding.isInitialized) observe()
     }
 
