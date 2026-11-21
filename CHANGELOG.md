@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Android: **Exit emulation** now asks the game to close before stopping it. This lets Kingdom Hearts II Final Mix write the latest save even when exiting directly from its save screen.
+- **Settings → Native Play storage** shows total and per-game usage. Purge one game or all prepared games without deleting ROMs or saves; data in use is skipped.
+- A launch waiting for shared saves now continues when the previous game or save operation releases them. You can cancel without stopping the other game.
+- Finished native player tasks leave Android Recents; reopening an old task no longer attempts to start the game with an expired save session.
 
 ## Duet Plus 1.3.2
 

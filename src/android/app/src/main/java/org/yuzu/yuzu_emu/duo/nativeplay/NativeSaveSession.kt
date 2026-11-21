@@ -77,6 +77,9 @@ object NativeSaveSession {
         return ParcelFileDescriptor.adoptFd(fd)
     }
 
+    /** Exclude prelaunch reservations and live games without opening or recovering any saves. */
+    internal fun acquireStorageMaintenance(context: Context): Closeable = open(context)
+
     @JvmStatic fun identity(context: Context): String {
         val root = File(PathUtil.saveDir()).canonicalPath
         rememberSaveRoot(root)
