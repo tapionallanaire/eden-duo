@@ -67,8 +67,23 @@ def embedded_game(text, engine):
     return once(text, '    private static void maintenanceTitle(', api + '    private static void maintenanceTitle(')
 
 
+def game_activity(text):
+    # The embedded player owns a separate task, not a reusable launcher. Keep live games
+    # resumable, but never reuse a dead process's one-shot save handoff from Recents.
+    start = '        ExitWatch.game(this, id,'
+    text = once(text, start, '''        if (!hostRunning && (getIntent().getFlags() & android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+            finishAndRemoveTask();
+            return;
+        }
+''' + start)
+    text = once(text, 'ExitWatch.startFailed(why);\n            finish();',
+                'ExitWatch.startFailed(why);\n            finishAndRemoveTask();')
+    return once(text, 'backToFrontend();\n        finish();', 'backToFrontend();\n        finishAndRemoveTask();')
+
+
 def stage(engine, roots, output):
-    for name, transform in [('CompiledFiles', compiled_files), ('EmbeddedGame', lambda s: embedded_game(s, engine))]:
+    for name, transform in [('CompiledFiles', compiled_files), ('EmbeddedGame', lambda s: embedded_game(s, engine)),
+                            ('GameActivity', game_activity)]:
         paths = [(root, path) for root in roots for path in root.glob(f'dev/*/android/{name}.java')]
         if len(paths) != 1:
             raise ValueError(f'Expected one {name}.java in the embedded Java source roots; found {paths}')

@@ -10,7 +10,7 @@ for (String engine : ['peanuts', 'banana']) {
             def java = android.sourceSets.main.java
             def roots = java.srcDirs.toList() // Banana has already replaced these with its relocated sources.
             def generated = host.layout.buildDirectory.dir('generated/managedNativeStorage')
-            def patchedNames = ['**/EmbeddedGame.java', '**/CompiledFiles.java']
+            def patchedNames = ['**/EmbeddedGame.java', '**/CompiledFiles.java', '**/GameActivity.java']
             def rest = host.tasks.register('stageStorageHostJava', Sync) {
                 from(roots) { include '**/*.java'; exclude patchedNames }
                 into generated.map { it.dir('unchanged') }
