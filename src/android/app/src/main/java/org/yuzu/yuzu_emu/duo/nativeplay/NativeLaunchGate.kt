@@ -17,6 +17,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.yuzu.yuzu_emu.NativeLibrary
@@ -42,6 +43,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
     private var savesChecked = false
     private var shadersChecked = false
     private var dialog: AlertDialog? = null
+    private var overlapWait: Job? = null
     private lateinit var appContext: android.content.Context
     private var recoveringReturn = false
     private val pollReturn = Runnable { observeReturn() }
@@ -93,7 +95,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
 
     fun restore(saved: Bundle?) {
         val state = saved?.getBundle("NativeLaunchGate") ?: return
-        phase = state.getString("phase") ?: "choose"
+        phase = state.getString("phase")?.takeUnless { it == "occupied" } ?: "choose"
         @Suppress("DEPRECATION")
         game = state.getParcelable("game")
         custom = state.getBoolean("custom")
@@ -131,6 +133,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
         game = selected
         appContext = fragment.requireContext().applicationContext
         custom = useCustom
+        if (overlapWait?.isActive == true) return
         if (ordinary && phase != "native" && phase != "fallback" && NativeSaveSession.occupied(appContext, token)) {
             refuseOverlap()
             return
@@ -143,21 +146,36 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
             "fallback" -> recoverFallback()
             "choose" -> choose()
             "install" -> launchNative()
-            "occupied" -> refuseOverlap()
         }
     }
 
     private fun refuseOverlap() {
-        phase = "occupied"
-        fragment.lifecycleScope.launchWhenStarted {
+        if (overlapWait?.isActive == true) return
+        overlapWait = fragment.lifecycleScope.launchWhenResumed {
             dialog?.dismiss()
             dialog = MaterialAlertDialogBuilder(fragment.requireContext())
                 .setTitle(R.string.native_launch_title)
                 .setMessage(R.string.native_close_current_game)
-                .setPositiveButton(android.R.string.cancel) { _, _ -> fragment.requireActivity().finish() }
-                .setOnCancelListener { fragment.requireActivity().finish() }
-                .setOnDismissListener { dialog = null }.show()
+                .setNegativeButton(android.R.string.cancel) { _, _ -> cancelWait() }
+                .setOnCancelListener { cancelWait() }.show()
+            try {
+                waitForLaunchSlot { NativeSaveSession.occupied(appContext, token) }
+            } catch (e: CancellationException) { throw e
+            } catch (e: Exception) {
+                dialog?.dismiss()
+                fail(e.message ?: e.javaClass.simpleName)
+                return@launchWhenResumed
+            }
+            dialog?.dismiss()
+            dialog = null
+            overlapWait = null
+            if (!fragment.requireActivity().isFinishing) decide(checkNotNull(game), custom, true)
         }
+    }
+
+    private fun cancelWait() {
+        overlapWait?.cancel()
+        fragment.requireActivity().finish()
     }
 
     private fun choose() {
@@ -324,6 +342,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
     }
     fun destroy() {
         changingConfiguration = fragment.activity?.isChangingConfigurations == true
+        overlapWait?.cancel()
         pause(); dialog?.dismiss(); dialog = null
         if (!changingConfiguration && phase != "native")
             NativeSaveSession.cancel(token)
