@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Android: **Exit emulation** now asks the game to close before stopping it. This lets Kingdom Hearts II Final Mix write the latest save even when exiting directly from its save screen.
+
 ## Duet Plus 1.3.2
 
 - Added native preparation for 11 more Switch games across 17 registered builds: Absolum, Bayonetta 3, Double Dragon Revive, Kingdom Hearts II Final Mix, Metroid Prime 4: Beyond, Octopath Traveler, Super Smash Bros. Ultimate, Trails beyond the Horizon, Trails in the Sky 1st Chapter, Trails through Daybreak II, and Ys X: Nordics.
