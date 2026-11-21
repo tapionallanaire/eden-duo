@@ -2044,6 +2044,7 @@ SOFTWARE.
     <string name="native_needs_preparation">Native play · Preparation needed</string>
     <string name="native_prepare_summary">%1$s\nAbout %2$s free storage needed</string>
     <string name="native_prepare_details">%1$s\n\nSelected storage\n%2$s</string>
+    <string name="native_choose_member">Choose a game from this collection for native play.</string>
     <string name="native_not_available">Native play unavailable</string>
     <string name="native_not_available_message">Duet could not match the installed content to a native profile. You can still play emulated.</string>
     <string name="native_shared_save_notice">Both modes use the same save for your selected Duet profile. Emulation mods stay enabled but are not applied in native play.</string>

@@ -9,6 +9,8 @@ import androidx.annotation.WorkerThread
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import org.yuzu.yuzu_emu.R
+import org.yuzu.yuzu_emu.model.Game
 import org.yuzu.yuzu_emu.utils.DocumentFileAccess
 import org.yuzu.yuzu_emu.utils.GameHelper
 
@@ -31,39 +33,58 @@ internal object NativeGameSupport {
 
     data class Identity(val build: NativeGameBuild, val contentKey: String, val inputBytes: Long)
 
-    /** Resolve only program indices represented by shipped profiles; never relabel program zero. */
-    fun findGameCandidate(
-        context: Context,
-        path: String,
-        onFailure: ((Throwable) -> Unit)? = null
-    ): Match? = runCatching {
-        val catalog = context.assets.open(NativeGameCatalog.ASSET).reader().use(NativeGameCatalog::read)
-        catalog.programIndices.firstNotNullOfOrNull { findBuildCandidate(context, path, it, onFailure) }
-    }.onFailure { onFailure?.invoke(it) }.getOrNull()
+    data class Members(val choices: List<NativeGameProfile>, val remembered: Pair<NativeEngine, String>?) {
+        val selected = if (remembered == null) choices.singleOrNull() else choices.singleOrNull {
+            it.engine == remembered.first && it.programId == remembered.second
+        }
+
+        fun match(context: Context, path: String, onFailure: ((Throwable) -> Unit)? = null) = selected?.let { member ->
+            findBuildCandidate(context, path, member.programId, onFailure)?.takeIf {
+                it.profile.engine == member.engine && PreparedNativeGame.available(member.engine)
+            }
+        }
+    }
+
+    /** Discover actual members cheaply. The catalog row identifies a title, not a runnable build. */
+    fun members(context: Context, game: Game, onFailure: ((Throwable) -> Unit)? = null): Members {
+        val choices = runCatching {
+            val catalog = context.assets.open(NativeGameCatalog.ASSET).reader().use(NativeGameCatalog::read)
+            GameHelper.withPrepareSource {
+                catalog.programIndices.mapNotNull { index ->
+                    val id = readPrepareProgramId(game.path, index)?.toULongOrNull() ?: return@mapNotNull null
+                    if (id.toInt() and 0xfff != index) return@mapNotNull null
+                    catalog.versions(id.toString(16).padStart(16, '0')).firstOrNull()
+                }
+            }
+        }.onFailure { onFailure?.invoke(it) }.getOrDefault(emptyList())
+        return Members(choices, NativePlayPreferences.lastProfile(context, game.programIdHex))
+    }
 
     /** Registers and resolves the same content as boot, without starting emulation. */
     fun findBuildCandidate(
         context: Context,
         path: String,
-        programIndex: Int,
+        programId: String,
         onFailure: ((Throwable) -> Unit)? = null
     ): Match? {
-        var identified = false
+        val programIndex = programId.takeLast(3).toIntOrNull(16) ?: return null
         return runCatching {
-            GameHelper.withPrepareContent(path, {
-                readPrepareProgramId(path, programIndex)?.also { identified = true }
-                    ?: error("Cannot identify selected program")
-            }) {
+            GameHelper.withPrepareContent(path, { programId.toULong(16).toString() }) {
                 val identity = readGameBuild(path, programIndex)?.let(::parseIdentity)
                     ?: return@withPrepareContent null
                 val catalog = context.assets.open(NativeGameCatalog.ASSET).reader()
                     .use(NativeGameCatalog::read)
-                val profile = catalog.match(identity.build) ?: return@withPrepareContent null
+                val profile = catalog.match(identity.build)?.takeIf { it.programId == programId }
+                    ?: return@withPrepareContent null
                 Match(profile, catalog.versions(profile.programId), identity.build,
                     identity.contentKey, identity.inputBytes)
             }
-        }.onFailure { if (identified) onFailure?.invoke(it) }.getOrNull()
+        }.onFailure { onFailure?.invoke(it) }.getOrNull()
     }
+
+    fun requireSelectedBuild(context: Context, path: String, programId: String, key: String): Match =
+        findBuildCandidate(context, path, programId)?.takeIf { it.contentKey == key }
+            ?: throw IOException(context.getString(R.string.native_content_changed))
 
     /** Reuse only a fully validated snapshot; interrupted generations are never overwritten. */
     @WorkerThread

@@ -102,7 +102,7 @@ class NativeGameCatalogTest {
     }
 
     @Test
-    fun collectionTileOffersKh2ButOnlyProgramThreeMatchesItsBuild() {
+    fun collectionMembersWithTheSameSdkRequireTheirOwnMain() {
         val menu = "010090C022978000"
         val kh2 = NativeGameBuild(
             "010090C022978003", 0,
@@ -110,6 +110,13 @@ class NativeGameCatalogTest {
                 "subsdk1" to nsoId("99e21f98a397434b534c1459fc38a2b8"),
                 "sdk" to nsoId("bc204aae7319bab274894f1cc3f5da92"))
         )
+        val kh1 = kh2.copy(
+            programId = "010090C022978001",
+            moduleBuildIds = kh2.moduleBuildIds + ("main" to nsoId("badf2faf580b712464365c4d529d92c9"))
+        )
+        assertEquals(NativeEngine.PEANUTS, catalog.match(kh1)?.engine)
+        assertNull(catalog.match(kh2.copy(programId = kh1.programId)))
+        assertNull(catalog.match(kh1.copy(programId = kh2.programId)))
         assertTrue(catalog.recognizesTitle(menu))
         assertTrue(3 in catalog.programIndices)
         assertEquals(NativeEngine.PEANUTS, catalog.match(kh2)?.engine)

@@ -87,6 +87,12 @@
                 android:textAppearance="?attr/textAppearanceBodyLarge" />
 
             <RadioGroup
+                android:id="@+id/member_choices"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone" />
+
+            <RadioGroup
                 android:id="@+id/native_mode"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

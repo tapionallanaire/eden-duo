@@ -32,6 +32,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
     private var custom = false
     private var token = ""
     private var contentKey = ""
+    private var programId = ""
     private var playIdentity = ""
     private var failure = ""
     private var busy = false
@@ -73,6 +74,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                 }
                 NativeLaunchActivity.NATIVE -> {
                     contentKey = data.getStringExtra(NativeLaunchActivity.CONTENT_KEY).orEmpty()
+                    programId = data.getStringExtra(NativeLaunchActivity.PROGRAM_ID).orEmpty()
                     launchNative()
                 }
                 else -> {
@@ -97,6 +99,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
         custom = state.getBoolean("custom")
         token = state.getString("token") ?: ""
         contentKey = state.getString("contentKey") ?: ""
+        programId = state.getString(NativeLaunchActivity.PROGRAM_ID).orEmpty()
         playIdentity = state.getString("playIdentity") ?: ""
         failure = state.getString("failure") ?: ""
         returned = state.getBoolean("returned")
@@ -113,6 +116,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
             putBoolean("custom", custom)
             putString("token", token)
             putString("contentKey", contentKey)
+            putString(NativeLaunchActivity.PROGRAM_ID, programId)
             putString("playIdentity", playIdentity)
             putString("failure", failure)
             putBoolean("returned", returned)
@@ -170,7 +174,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
         fragment.lifecycleScope.launch {
             val match: NativeGameSupport.Match?
             val nativeReady: Boolean
-            val supportedTitle: Boolean
+            var supportedTitle: Boolean
             try {
                 supportedTitle = withContext(Dispatchers.IO) {
                     appContext.assets.open(NativeGameCatalog.ASSET).reader()
@@ -182,8 +186,9 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                     return@launch
                 }
                 val result = withContext(Dispatchers.IO) {
-                    val candidate = NativeGameSupport.findGameCandidate(appContext, selected.path)
-                        ?.takeIf { PreparedNativeGame.available(it.profile.engine) }
+                    val members = NativeGameSupport.members(appContext, selected)
+                    if (members.choices.isNotEmpty()) supportedTitle = true
+                    val candidate = members.match(appContext, selected.path)
                     val ready = candidate != null && mode == NativePlayPreferences.Mode.NATIVE &&
                         failure.isEmpty() && runCatching {
                             PreparedNativeGame.prepare(appContext, selected.path, candidate)
@@ -209,6 +214,7 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                 preflight()
             } else if (nativeReady) {
                 contentKey = match.contentKey
+                programId = match.profile.programId
                 launchNative()
             } else {
                 showChoice(selected)
@@ -241,14 +247,14 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                 // Resolve on the UI thread, without a suspension inside the config transaction.
                 val resolved = NativeLaunchDriver.resolve(selected, custom)
                 val intent = withContext(Dispatchers.IO) {
-                    val match = NativeGameSupport.findGameCandidate(appContext, selected.path)
-                    check(match != null && match.contentKey == contentKey) { fragment.getString(R.string.native_content_changed) }
+                    val match = NativeGameSupport.requireSelectedBuild(appContext, selected.path, programId, contentKey)
                     NativeSaveSession.reserveNative(appContext, selected.path, contentKey,
                         match.profile.engine, match.programIndex, match.profile.programId, playIdentity, token)
                     NativeSaveSession.acquire(appContext, token).use {
                         val prepared = checkNotNull(PreparedNativeGame.prepare(appContext, selected.path, match))
                         val installed = PreparedNativeGame.prepareDriver(appContext,
                             NativeLaunchDriver.validate(resolved), match.profile.engine)
+                        NativePlayPreferences.rememberProfile(appContext, selected.programIdHex, match.profile)
                         prepared.putExtra("duet_gpu_driver", installed)
                     }
                 }

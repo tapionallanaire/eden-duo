@@ -15,7 +15,6 @@ PRIVATE_PEANUTS = {
     "0100F43008C44000",  # Pokémon Legends: Z-A
     "0100F7E00C70E000",  # Hogwarts Legacy
     "010038B015560000",  # Final Fantasy Tactics: The Ivalice Chronicles
-    "0100755017EE0000",  # Fantasy Life i
     "0100BE7013E06000",  # Ni no Kuni II: Revenant Kingdom
     "01004A4010FEA000",  # Bayonetta 3 (#14)
     "010057D006492000",  # Octopath Traveler (#17)
@@ -23,6 +22,9 @@ PRIVATE_PEANUTS = {
     "01006AE02236C000",  # Double Dragon Revive (#10)
     "01007B102141A000",  # Trails beyond the Horizon (#9)
     "0100A83022A22000",  # Absolum (#18)
+    "01001BB01E8E2000",  # Fantasian Neo Dimension (#45)
+    "010090C022978001",  # Kingdom Hearts Final Mix, collection program 1 (#32)
+    "0100D7C01F254000",  # Dragon Quest I & II HD-2D Remake (#38)
 }
 CATALOG = Path(__file__).resolve().parents[2] / "src/android/app/src/main/assets/native_games.tsv"
 

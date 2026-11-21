@@ -194,8 +194,13 @@ std::optional<u32> ReadContentVersion(const FileSys::NCA& meta, u64 title_id,
 // These are profile contracts, not a platform-bit conversion. CNMT records below must
 // independently prove the original application and each selected content source.
 constexpr u64 KingdomHeartsCollection = 0x010090C022978000ULL;
-constexpr jint KingdomHeartsIndex = 3;
-constexpr u64 KingdomHeartsMember = KingdomHeartsCollection + KingdomHeartsIndex;
+constexpr bool IsKingdomHeartsIndex(jint index) {
+    return index == 1 || index == 3;
+}
+
+constexpr bool IsKingdomHeartsMember(u64 id) {
+    return id == KingdomHeartsCollection + 1 || id == KingdomHeartsCollection + 3;
+}
 
 std::optional<u64> IndexedApplication(u64 program_id) {
     switch (program_id) {
@@ -343,11 +348,13 @@ std::shared_ptr<FileSys::NSP> OpenRetailPackage(const FileSys::VirtualFile& file
 }
 
 u64 SelectedRetailProgram(const std::shared_ptr<FileSys::NSP>& package, jint index) {
-    if (index == KingdomHeartsIndex) {
-        RequirePrepare(package->GetNCA(KingdomHeartsMember, FileSys::ContentRecordType::Program) &&
+    if (index == 3 || (index == 1 && package->GetNCA(KingdomHeartsCollection,
+                                                      FileSys::ContentRecordType::Program))) {
+        const auto member = KingdomHeartsCollection + index;
+        RequirePrepare(package->GetNCA(member, FileSys::ContentRecordType::Program) &&
                            package->GetNCA(KingdomHeartsCollection, FileSys::ContentRecordType::Program),
                        "Collection does not contain both menu and selected member");
-        return KingdomHeartsMember;
+        return member;
     }
     if (index == 1) {
         u64 selected{};
@@ -391,7 +398,7 @@ u64 PrepareProgramId(const FileSys::VirtualDir& exefs, bool collection) {
 }
 
 Modules ReadModules(const FileSys::VirtualDir& exefs, u64 program_id) {
-    RequirePrepare(PrepareProgramId(exefs, program_id == KingdomHeartsMember || program_id == KingdomHeartsCollection)
+    RequirePrepare(PrepareProgramId(exefs, IsKingdomHeartsMember(program_id) || program_id == KingdomHeartsCollection)
                        == program_id, "Effective NPDM does not identify the selected program");
     Modules modules;
     for (const auto& module : exefs->GetFiles()) {
@@ -431,7 +438,7 @@ struct EffectiveInput {
     bool IsSupportedProgram() const {
         return (program_index == 0 && (program_id & 0xFFF) == 0) ||
                (program_index == 1 && IndexedApplication(program_id)) ||
-               (program_index == KingdomHeartsIndex && program_id == KingdomHeartsMember);
+               (IsKingdomHeartsIndex(program_index) && program_id == KingdomHeartsCollection + program_index);
     }
 
     std::vector<std::string> Fields() const {
@@ -534,7 +541,7 @@ void CaptureUpdate(EffectiveInput& input, ContentIdentity& identity,
 Json ResolveSaveControl(EffectiveInput& input, ContentIdentity& identity,
                         const FileSys::ContentProviderUnion& provider) {
     auto& system = EmulationSession::GetInstance().System();
-    const bool collection = input.program_index == KingdomHeartsIndex;
+    const bool collection = IsKingdomHeartsMember(input.program_id);
     u64 control_id = collection || (input.program_index == 1 && IndexedApplication(input.program_id)) ?
         input.application_id : input.program_id;
     auto base = provider.GetEntry(control_id, FileSys::ContentRecordType::Control);
@@ -626,8 +633,8 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                                      jint program_index,
                                      const std::function<void()>& pulse = {},
                                      Json* save_control = nullptr) {
-    const bool collection = program_index == KingdomHeartsIndex;
-    RequirePrepare(program_index == 0 || program_index == 1 || collection,
+    bool collection = false;
+    RequirePrepare(program_index == 0 || IsKingdomHeartsIndex(program_index),
                    "Unsupported native program index");
     auto& session = EmulationSession::GetInstance();
     auto& system = session.System();
@@ -649,7 +656,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     std::unique_ptr<FileSys::NupContainer> nup;
 
     if (FileSys::NupContainer::IsNupFile(file)) {
-        RequirePrepare(program_index == 0 || collection, "Unsupported indexed NUP input");
+        collection = IsKingdomHeartsIndex(program_index);
         Loader::AppLoader_NUP loader{file};
         const auto packaged = loader.ReadPackagedExeFS();
         RequirePrepare(packaged.has_value(), "NUP has no coherent executable/RomFS version");
@@ -685,7 +692,7 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         } else {
             RequirePrepare(base_index && !update_index && input.version == 0 &&
                                input.program_id == KingdomHeartsCollection &&
-                               nup->HasCollectionProgramLayout(*base_index, KingdomHeartsIndex) &&
+                               nup->HasCollectionProgramLayout(*base_index, program_index) &&
                                nup->GetPackages()[*base_index].title_id == KingdomHeartsCollection &&
                                !nup->GetPackages()[*base_index].standalone_update &&
                                std::ranges::count(nup->GetPackages(), FileSys::NupContainer::PackageKind::Base,
@@ -693,11 +700,12 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                            "Member requires the original v0 collection base package without updates");
             menu_exefs = nup->GetExeFSDir(*base_index);
             menu_romfs = nup->GetRomFSDir(*base_index);
-            const auto root = nup->GetPackageDir(*base_index);
-            exefs = root->GetDirectoryRelative("program/3/exefs");
-            romfs = root->GetDirectoryRelative("program/3/romfs");
+            const auto member = nup->GetPackageDir(*base_index)->GetDirectoryRelative(
+                std::format("program/{}", program_index));
+            exefs = member->GetSubdirectory("exefs");
+            romfs = member->GetSubdirectory("romfs");
             input.application_id = KingdomHeartsCollection;
-            input.program_id = KingdomHeartsMember;
+            input.program_id = KingdomHeartsCollection + program_index;
         }
         // Embedded NUP AoC is not mounted by Duet; do not turn it on during export.
         input.context["nup_embedded_aoc"] = "not-emulated";
@@ -707,6 +715,8 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                            !package->IsExtractedType(),
                        "Prepare needs a readable retail NSP/XCI or coherent NUP");
         input.program_id = SelectedRetailProgram(package, program_index);
+        collection = IsKingdomHeartsIndex(program_index) &&
+                     input.program_id == KingdomHeartsCollection + program_index;
         const auto indexed_application = program_index == 1 ?
             IndexedApplication(input.program_id) : std::nullopt;
         input.application_id = indexed_application.value_or(FileSys::GetBaseTitleID(input.program_id));
@@ -782,8 +792,8 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
         exefs = base->GetExeFS();
         RequirePrepare(base->GetRomFS() != nullptr, "Selected base RomFS is missing");
     }
-    RequirePrepare(input.program_id != KingdomHeartsMember || collection,
-                   "KH2 cannot be prepared or save-bound as a standalone package");
+    RequirePrepare(!IsKingdomHeartsMember(input.program_id) || collection,
+                   "Collection members cannot be prepared or save-bound as standalone packages");
     if (input.application_id == 0) {
         input.application_id = FileSys::GetBaseTitleID(input.program_id);
     }
@@ -850,10 +860,11 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
     }
     using Kind = FileSys::NupContainer::PackageKind;
     if (collection) {
-        const auto marker = romfs->GetFile("kh2_fifth.pkg");
-        RequirePrepare(menu_romfs && !menu_romfs->GetFile("kh2_fifth.pkg") &&
+        const auto marker_name = program_index == 1 ? "kh1_first.pkg" : "kh2_fifth.pkg";
+        const auto marker = romfs->GetFile(marker_name);
+        RequirePrepare(menu_romfs && !menu_romfs->GetFile(marker_name) &&
                            marker && marker->GetSize() != 0,
-                       "Member RomFS is missing its KH2 data or aliases the collection menu");
+                       "Member RomFS is missing its game data or aliases the collection menu");
         const auto menu_modules = ReadModules(menu_exefs, input.application_id);
         if (save_control) {
             return input;
@@ -1076,11 +1087,12 @@ void ValidateOutput(const EffectiveInput& input, const FileSys::VirtualFile& fil
                        "Prepared snapshot content identity mismatch");
         if (i == 0) {
             if (expected.member_exefs) {
-                RequirePrepare(output.HasCollectionProgramLayout(i, KingdomHeartsIndex),
+                RequirePrepare(output.HasCollectionProgramLayout(i, input.program_index),
                                "Prepared collection does not contain distinct menu and member trees");
-                const auto root = output.GetPackageDir(i);
+                const auto root = output.GetPackageDir(i)->GetDirectoryRelative(
+                    std::format("program/{}", input.program_index));
                 const auto menu = output.GetExeFSDir(i);
-                const auto member = root->GetDirectoryRelative("program/3/exefs");
+                const auto member = root->GetSubdirectory("exefs");
                 RequirePrepare(Json(ReadModules(menu, input.application_id)) ==
                                    input.programs.at(0).at("build_ids") &&
                                    ReadModules(member, input.program_id) == input.modules &&
@@ -1092,7 +1104,7 @@ void ValidateOutput(const EffectiveInput& input, const FileSys::VirtualFile& fil
                 ValidateResolvedTree(expected.exefs, menu);
                 ValidateResolvedTree(expected.member_exefs, member);
                 ValidateResolvedTree(expected.romfs, output.GetRomFSDir(i));
-                ValidateResolvedTree(expected.member_romfs, root->GetDirectoryRelative("program/3/romfs"));
+                ValidateResolvedTree(expected.member_romfs, root->GetSubdirectory("romfs"));
                 continue;
             }
             RequirePrepare(ReadModules(output.GetExeFSDir(i), input.program_id) == input.modules,
@@ -1253,17 +1265,18 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readPrepareProgramId(
         }
         u64 program_id{};
         if (FileSys::NupContainer::IsNupFile(file)) {
-            if (program_index == KingdomHeartsIndex) {
+            if (IsKingdomHeartsIndex(program_index)) {
                 FileSys::NupContainer container{file};
                 const auto base = container.FindBasePackage();
                 if (container.GetStatus() != Loader::ResultStatus::Success || !base ||
                     container.GetPackages()[*base].title_id != KingdomHeartsCollection ||
-                    !container.HasCollectionProgramLayout(*base, KingdomHeartsIndex)) {
+                    !container.HasCollectionProgramLayout(*base, program_index)) {
                     return nullptr;
                 }
-                const auto member = container.GetPackageDir(*base)->GetDirectoryRelative("program/3/exefs");
+                const auto member = container.GetPackageDir(*base)->GetDirectoryRelative(
+                    std::format("program/{}/exefs", program_index));
                 program_id = PrepareProgramId(member, true);
-                if (program_id != KingdomHeartsMember) {
+                if (program_id != KingdomHeartsCollection + program_index) {
                     return nullptr;
                 }
             } else {
@@ -1279,7 +1292,8 @@ Java_org_yuzu_yuzu_1emu_duo_nativeplay_NativeGameSupport_readPrepareProgramId(
             }
             program_id = SelectedRetailProgram(package, program_index);
         }
-        if (program_id == 0 || (program_id == KingdomHeartsMember && program_index != KingdomHeartsIndex)) {
+        if (program_id == 0 || (IsKingdomHeartsMember(program_id) &&
+                                program_id != KingdomHeartsCollection + program_index)) {
             return nullptr;
         }
         return Common::Android::ToJString(env, std::to_string(program_id));

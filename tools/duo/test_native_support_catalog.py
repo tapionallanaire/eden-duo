@@ -29,6 +29,7 @@ with tempfile.TemporaryDirectory() as directory:
         games[title] = SimpleNamespace(dir=directory)
     included = catalog.supported(root, "peanuts", games)
     assert {"0100000000010000", "010090C022978003", "01007A2027548000",
-            "010057D006492000", "0100F7E00C70E000", "0100F43008C44000"} <= included
+            "010057D006492000", "0100F7E00C70E000", "0100F43008C44000",
+            "010090C022978001", "01001BB01E8E2000", "0100D7C01F254000"} <= included
     assert not {"01003FC01670C000", "0400486024DEC000", "010090C022978000"} & included
 print("Release, declared and reviewed Android profiles recognized; unrelated profiles excluded.")

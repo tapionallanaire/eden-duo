@@ -78,23 +78,28 @@ object GameHelper {
             }
         }
 
-    /** Uses boot registration, but never reads/exports a build with missing known enabled input. */
-    fun <T> withPrepareContent(gamePath: String, programId: () -> String, action: () -> T): T =
+    internal fun <T> withPrepareSource(action: () -> T): T =
         GameLibraryContent.withDataImportRead {
             NativeLibrary.reloadKeys()
             synchronized(filesystemProviderLock) {
                 check(!emulationActive) { "Stop emulation before preparing native content" }
-                check(GameLibraryContent.registerContentForBoot(
-                    gamePath,
-                    programId(),
-                    externalContentMounted,
-                    libraryScanCompleted,
-                    externalContentExtensions,
-                    ::mountExternalContentDirectories,
-                    ::mountGameFolderContent
-                )) { "Cannot prepare native content: known enabled update/DLC is unavailable" }
                 action()
             }
+        }
+
+    /** Uses boot registration, but never reads/exports a build with missing known enabled input. */
+    fun <T> withPrepareContent(gamePath: String, programId: () -> String, action: () -> T): T =
+        withPrepareSource {
+            check(GameLibraryContent.registerContentForBoot(
+                gamePath,
+                programId(),
+                externalContentMounted,
+                libraryScanCompleted,
+                externalContentExtensions,
+                ::mountExternalContentDirectories,
+                ::mountGameFolderContent
+            )) { "Cannot prepare native content: known enabled update/DLC is unavailable" }
+            action()
         }
 
     fun onEmulationStopped() {
