@@ -131,6 +131,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
             android:theme="@style/Theme.Yuzu.Main" />
 
         <activity
+            android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeStorageActivity"
+            android:exported="false"
+            android:label="@string/native_storage_title"
+            android:theme="@style/Theme.Yuzu.Main" />
+
+        <activity
             android:name="org.yuzu.yuzu_emu.duo.nativeplay.NativeSessionWaitActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Material.NoActionBar" />

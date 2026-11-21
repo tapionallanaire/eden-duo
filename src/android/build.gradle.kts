@@ -11,6 +11,8 @@ plugins {
     id("org.jetbrains.kotlin.android") version "1.9.20" apply false
 }
 
+apply(from = "native-storage/hosts.gradle")
+
 tasks.register("clean").configure {
     delete(rootProject.buildDir)
 }

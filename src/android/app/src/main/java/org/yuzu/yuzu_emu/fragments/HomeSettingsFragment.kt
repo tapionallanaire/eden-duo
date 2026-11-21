@@ -33,6 +33,7 @@ import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
 import org.yuzu.yuzu_emu.adapters.HomeSettingAdapter
 import org.yuzu.yuzu_emu.databinding.FragmentHomeSettingsBinding
+import org.yuzu.yuzu_emu.duo.nativeplay.NativeStorageActivity
 import org.yuzu.yuzu_emu.duo.savetransfer.SaveTransferActivity
 import org.yuzu.yuzu_emu.features.DocumentProvider
 import org.yuzu.yuzu_emu.features.fetcher.SpacingItemDecoration
@@ -229,6 +230,14 @@ class HomeSettingsFragment : Fragment() {
                     { NativeLibrary.isFirmwareAvailable() },
                     R.string.applets_error_firmware,
                     R.string.applets_error_description
+                )
+            )
+            add(
+                HomeSetting(
+                    R.string.native_storage_title,
+                    R.string.native_storage_description,
+                    R.drawable.ic_folder_open,
+                    { startActivity(Intent(requireContext(), NativeStorageActivity::class.java)) }
                 )
             )
             add(

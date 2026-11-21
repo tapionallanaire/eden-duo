@@ -196,6 +196,16 @@ internal object PreparedNativeGame {
     fun preparationResult(context: Context, path: String, kind: NativeEngine): Intent? =
         preparationCall("preparationResult", context, path, kind) as Intent?
 
+    /** Worker only: one transaction in the owning engine, including private identity discovery. */
+    fun managedStorage(context: Context, titleId: String?, purge: Boolean, kind: NativeEngine): org.json.JSONArray {
+        val engine = embeddedEngine(kind) ?: return org.json.JSONArray()
+        return try {
+            org.json.JSONArray(engine.getMethod(
+                "managedStorage", Context::class.java, String::class.java, Boolean::class.javaPrimitiveType
+            ).invoke(null, context, titleId, purge) as String)
+        } catch (e: InvocationTargetException) { throw e.targetException }
+    }
+
     fun compiledData(context: Context, path: String, titleId: String, kind: NativeEngine): JSONObject {
         val engine = embeddedEngine(kind)
             ?: return JSONObject().put("present", false).put("bytes", 0L).put("input_bytes", 0L).put("busy", false)
@@ -208,8 +218,10 @@ internal object PreparedNativeGame {
     fun deleteCompiledData(context: Context, path: String, titleId: String, kind: NativeEngine) {
         val engine = checkNotNull(embeddedEngine(kind))
         try {
-            engine.getMethod("deleteCompiledData", Context::class.java, String::class.java, String::class.java)
-                .invoke(null, context, path, titleId)
+            NativeSaveSession.acquireStorageMaintenance(context).use {
+                engine.getMethod("deleteCompiledData", Context::class.java, String::class.java, String::class.java)
+                    .invoke(null, context, path, titleId)
+            }
         } catch (e: InvocationTargetException) { throw e.targetException }
     }
 }

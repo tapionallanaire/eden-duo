@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Apply from the Android root. Do not mutate the caller's pinned engine checkouts.
+def overlay = buildscript.sourceFile.parentFile
+for (String engine : ['peanuts', 'banana']) {
+    def host = rootProject.findProject(":${engine}Host")
+    if (host == null) continue
+    def kind = engine
+    host.pluginManager.withPlugin('com.android.library') {
+        host.androidComponents.finalizeDsl { android ->
+            def java = android.sourceSets.main.java
+            def roots = java.srcDirs.toList() // Banana has already replaced these with its relocated sources.
+            def generated = host.layout.buildDirectory.dir('generated/managedNativeStorage')
+            def patchedNames = ['**/EmbeddedGame.java', '**/CompiledFiles.java', '**/GameActivity.java']
+            def rest = host.tasks.register('stageStorageHostJava', Sync) {
+                from(roots) { include '**/*.java'; exclude patchedNames }
+                into generated.map { it.dir('unchanged') }
+                if (kind == 'banana') dependsOn 'bananaEmbeddedSources'
+            }
+            def apiDir = generated.map { it.dir('api') }
+            def api = host.tasks.register('stageStorageHostApi', Exec) {
+                if (kind == 'banana') dependsOn 'bananaEmbeddedSources'
+                inputs.files(roots.collect { dir -> host.fileTree(dir) { include patchedNames } })
+                inputs.files(new File(overlay, 'stage.py'), new File(overlay, 'StorageApi.java.inc'))
+                inputs.property('engine', kind)
+                outputs.dir(apiDir)
+                commandLine([host.providers.gradleProperty('pythonExecutable').orElse(host.providers.gradleProperty('nxPython'))
+                        .getOrElse('python'), new File(overlay, 'stage.py'), kind, apiDir.get().asFile] + roots)
+            }
+            java.setSrcDirs([rest, api])
+            host.tasks.named('preBuild') { dependsOn rest, api }
+        }
+    }
+}

@@ -2024,7 +2024,7 @@ SOFTWARE.
     <string name="native_prepare_title">Prepare native play</string>
     <string name="native_play">Play natively</string>
     <string name="native_compile_play">Compile &amp; play</string>
-    <string name="native_close_current_game">A native game is still running. Close the current game before launching another game.</string>
+    <string name="native_close_current_game">Waiting for shared saves. If a game is open, close it when you’re ready. This launch will continue automatically once the saves are free.</string>
     <string name="native_prepare_interrupted">Native preparation was interrupted. You can run the game emulated.</string>
     <string name="native_prepare_cancelled">Native preparation was cancelled.</string>
     <string name="native_prepare_cancelling">Cancelling… Waiting for the current read to stop.</string>
