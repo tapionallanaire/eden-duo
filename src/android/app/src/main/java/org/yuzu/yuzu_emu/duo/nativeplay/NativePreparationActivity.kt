@@ -115,6 +115,7 @@ class NativePreparationActivity : AppCompatActivity() {
 
     private fun buildContent() {
         binding = nativeLaunchContent(game) { cancelExport() }
+        binding.root.keepScreenOn = intent.getBooleanExtra(CAPTURE_FOREGROUND, false)
         binding.gameTitle.text = intent.getStringExtra("duet_game_title") ?: game.title
         binding.toolbar.setTitle(R.string.native_prepare_title)
         binding.availability.setText(R.string.native_prepare_title)
@@ -196,6 +197,9 @@ class NativePreparationActivity : AppCompatActivity() {
                         if (cancelled.get()) throw IOException(getString(R.string.native_prepare_cancelled))
                         if (error != null) throw IOException(error)
                         PreparedNativeGame.compile(this@NativePreparationActivity, game.path, input.path, match)
+                            .putExtra(GAME, game)
+                            .putExtra(CUSTOM_DRIVER, intent.getBooleanExtra(CUSTOM_DRIVER, true))
+                            .putExtra(CAPTURE_FOREGROUND, intent.getBooleanExtra(CAPTURE_FOREGROUND, false))
                             .putExtra("duet_game_title", match.profile.titleFor(game))
                             .putExtra("duet_game_subtitle", listOf(game.developer, game.version).filter { it.isNotBlank() }.joinToString(" · "))
                             .putExtra("duet_game_artwork", GameIconCache.read(game))
@@ -253,7 +257,9 @@ class NativePreparationActivity : AppCompatActivity() {
 
     companion object {
         const val SOURCE_PATH = "duet_game_path"
-        private const val GAME = "native_game"
+        internal const val GAME = "native_game"
+        internal const val CUSTOM_DRIVER = "duet_use_game_driver"
+        internal const val CAPTURE_FOREGROUND = "duet_prepare_needs_foreground"
         private const val CONTENT_KEY = "native_content_key"
         // ponytail: one export at a time; use per-input locks only if concurrent preparation is needed.
         internal val exportMutex = Mutex()
@@ -262,6 +268,7 @@ class NativePreparationActivity : AppCompatActivity() {
             NativePlayPreferences.rememberProfile(context, game.programIdHex, match.profile)
             return Intent(context, NativePreparationActivity::class.java)
                 .putExtra(GAME, game)
+                .putExtra(CAPTURE_FOREGROUND, match.profile.programId == "010055D009F78000" && match.profile.version == 327680L)
                 .putExtra(CONTENT_KEY, match.contentKey)
                 .putExtra(NativeLaunchActivity.PROGRAM_ID, match.profile.programId)
                 .putExtra("duet_game_title", match.profile.titleFor(game))

@@ -63,7 +63,7 @@ class YuzuApplication : Application() {
         application = this
         nativeProcess = android.os.Build.VERSION.SDK_INT >= 28 &&
             Application.getProcessName().substringAfter(':', "") in setOf(
-                "peanuts_game", "peanuts_pack", "banana_game", "banana_pack")
+                "peanuts_game", "peanuts_capture", "peanuts_pack", "banana_game", "banana_pack")
         if (nativeProcess) return
         documentsTree = DocumentsTree()
         createNotificationChannels()

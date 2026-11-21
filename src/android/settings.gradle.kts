@@ -31,6 +31,9 @@ providers.gradleProperty("duetPeanutsSourceDir").orNull?.let { source ->
     require(app.resolve("src/embedded/AndroidManifest.xml").isFile) {
         "duetPeanutsSourceDir must point to the Peanuts source with the embedded host."
     }
+    require(app.resolve("src/ondevice/java/dev/nxnative/android/EmbeddedShaderCapture.java").isFile) {
+        "This Duet host requires a Peanuts distribution with on-device runtime shader capture."
+    }
     val games = file("app/src/main/assets/native_games.tsv").useLines { rows ->
         rows.filter { it.startsWith("peanuts\t") }.map { it.split('\t')[1] }.distinct().toList()
     }

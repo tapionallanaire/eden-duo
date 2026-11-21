@@ -89,7 +89,8 @@ class NativeLaunchActivity : AppCompatActivity() {
                 childStarted = true
                 setActionsEnabled(false)
                 try {
-                    preparation.launch(NativePreparationActivity.intent(this, game, candidate))
+                    preparation.launch(NativePreparationActivity.intent(this, game, candidate)
+                        .putExtra(NativePreparationActivity.CUSTOM_DRIVER, intent.getBooleanExtra(NativePreparationActivity.CUSTOM_DRIVER, true)))
                     NativePlayPreferences.setMode(this, game.programIdHex, NativePlayPreferences.Mode.NATIVE)
                 } catch (e: Exception) {
                     childStarted = false
