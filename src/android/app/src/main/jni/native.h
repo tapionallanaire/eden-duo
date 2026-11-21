@@ -44,6 +44,7 @@ public:
     void PauseEmulation();
     void UnPauseEmulation();
     void HaltEmulation();
+    void RequestGuestExit();
     void RunEmulation();
     void ShutdownEmulation();
     // Eden Duo: a run cycle spans InitializeEmulation..ShutdownEmulation. The next cycle must
@@ -96,6 +97,7 @@ private:
     Core::SystemResultStatus m_load_result{Core::SystemResultStatus::ErrorNotInitialized};
     std::atomic<bool> m_is_running = false;
     bool m_cycle_active = false;           // Eden Duo: guarded by m_mutex
+    bool m_guest_exit_pending = false;     // guarded by m_mutex
     std::condition_variable m_cycle_cv;    // Eden Duo
     std::atomic<bool> m_is_paused = false;
     Common::Android::SoftwareKeyboard::AndroidKeyboard* m_software_keyboard{};

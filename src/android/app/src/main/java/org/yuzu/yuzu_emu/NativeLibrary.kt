@@ -209,6 +209,8 @@ object NativeLibrary {
      */
     external fun stopEmulation()
 
+    external fun requestGuestExit()
+
     /**
      * Returns true if emulation is running (or is paused).
      */

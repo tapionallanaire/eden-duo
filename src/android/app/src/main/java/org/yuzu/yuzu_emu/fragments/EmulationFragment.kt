@@ -1118,7 +1118,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
 
                 R.id.menu_exit -> {
                     clearPausedFrame()
-                    emulationState.stop()
+                    emulationState.stop(requestGuestExit = true)
                     NativeConfig.reloadGlobalConfig()
                     emulationViewModel.setIsEmulationStopping(true)
                     binding.drawerLayout.close()
@@ -2808,10 +2808,14 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
             get() = state == State.RUNNING
 
         @Synchronized
-        fun stop() {
+        fun stop(requestGuestExit: Boolean = false) {
             if (state != State.STOPPED) {
                 Log.debug("[EmulationFragment] Stopping emulation.")
-                NativeLibrary.stopEmulation()
+                if (requestGuestExit) {
+                    NativeLibrary.requestGuestExit()
+                } else {
+                    NativeLibrary.stopEmulation()
+                }
                 state = State.STOPPED
             } else {
                 Log.warning("[EmulationFragment] Stop called while already stopped.")

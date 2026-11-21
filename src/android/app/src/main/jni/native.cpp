@@ -449,9 +449,16 @@ bool EmulationSession::BeginEmulationCycle() {
 void EmulationSession::EndEmulationCycle() {
     {
         std::scoped_lock lock(m_mutex);
+        m_guest_exit_pending = false;
         m_cycle_active = false;
     }
     m_cycle_cv.notify_all();
+}
+
+void EmulationSession::RequestGuestExit() {
+    std::scoped_lock lock(m_mutex);
+    m_guest_exit_pending = true;
+    m_cv.notify_one();
 }
 
 void EmulationSession::HaltEmulation() {
@@ -502,14 +509,27 @@ void EmulationSession::RunEmulation() {
         std::optional<u64> reload_title;
         {
             [[maybe_unused]] std::unique_lock lock(m_mutex);
-            if (m_cv.wait_for(lock, std::chrono::milliseconds(800), [&]() {
-                    return !m_is_running || m_pending_shader_cache_title.has_value();
-                })) {
-                if (!m_is_running) {
-                    break;
-                }
-                reload_title = std::exchange(m_pending_shader_cache_title, std::nullopt);
+            m_cv.wait(lock, [&] {
+                return !m_is_running || m_guest_exit_pending || m_pending_shader_cache_title;
+            });
+            if (!m_is_running) {
+                break;
             }
+            if (std::exchange(m_guest_exit_pending, false)) {
+                lock.unlock();
+                if (m_is_paused) {
+                    UnPauseEmulation();
+                }
+                LOG_INFO(Frontend, "Requesting guest exit before stopping emulation");
+                m_system.SetExitRequested(true);
+                m_system.GetAppletManager().RequestExit();
+                lock.lock();
+                if (!m_cv.wait_for(lock, std::chrono::seconds(5), [&] { return !m_is_running; })) {
+                    LOG_WARNING(Frontend, "Guest exit timed out; stopping emulation");
+                }
+                break;
+            }
+            reload_title = std::exchange(m_pending_shader_cache_title, std::nullopt);
         }
 
         if (reload_title.has_value())
@@ -1074,6 +1094,10 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_setShaderRunMode(JNIEnv* env, jclass 
 }
 void Java_org_yuzu_yuzu_1emu_NativeLibrary_stopEmulation(JNIEnv* env, jclass clazz) {
     EmulationSession::GetInstance().HaltEmulation();
+}
+
+void Java_org_yuzu_yuzu_1emu_NativeLibrary_requestGuestExit(JNIEnv* env, jclass clazz) {
+    EmulationSession::GetInstance().RequestGuestExit();
 }
 
 // Eden Duo: hand back host memory that the caches no longer need, when Android reports low memory
