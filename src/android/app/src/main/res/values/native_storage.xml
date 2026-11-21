@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_storage_title">Native Play storage</string>
+    <string name="native_storage_description">Review prepared game data and free up space.</string>
+    <string name="native_storage_total">Total used: %1$s</string>
+    <string name="native_storage_partial_total">Known usage: %1$s (some sizes unavailable)</string>
+    <string name="native_storage_unknown_size">Size unavailable</string>
+    <string name="native_storage_empty">No prepared Native Play data on this device.</string>
+    <string name="native_storage_refresh">Refresh</string>
+    <string name="native_storage_purge_all">Purge all</string>
+    <string name="native_storage_purge">Purge</string>
+    <string name="native_storage_confirm_all">Purge Native Play data for all games?</string>
+    <string name="native_storage_confirm_game">Purge Native Play data for %1$s?</string>
+    <string name="native_storage_warning">You may need to prepare the game data again before playing. In-use data is skipped. ROMs and saves are kept.</string>
+    <string name="native_storage_row">%1$s\n%2$s · %3$s</string>
+    <string name="native_storage_action">Purge data for %1$s</string>
+    <string name="native_storage_result">Purged: %1$d · In use: %2$d · Failed: %3$d</string>
+    <string name="native_storage_load_error">Could not read storage usage. Refresh to try again.</string>
+    <string name="native_storage_purge_error">Purge did not finish. Check the remaining data before trying again.</string>
+    <string name="native_storage_loading">Checking storage…</string>
+    <string name="native_storage_working">Purging prepared data…</string>
+</resources>
