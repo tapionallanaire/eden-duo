@@ -89,13 +89,20 @@ readiness. A mismatching version remains visible there but cannot run incompatib
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
 
-The catalog targets Peanuts `665c851017b78b112b8c622cdfedd997832362a8`
-and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 67 Switch 1
-and 10 Switch 2 programs. For distribution, use the companion source
-branches `dist/duet-20261121` on each private fork, not the standalone
-checkouts. They retain the embedded host and exclude captured prewarm
-seeds. Build each packer stage from its corresponding compiler sources;
-the Hogwarts shader reference must pass that compiler's packaging check.
+The catalog targets Peanuts `6d6c65838691a1226a18881b1a040603075ce89b`
+and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
+and 10 Switch 2 programs (99 registered builds). For the APK, use the
+Peanuts distribution branch `dist/duet-6d6c6583` (`70ae60957571`) and the
+unchanged Banana branch `dist/duet-20261121` (`261437065079`). They retain
+the embedded hosts and exclude captured prewarm seeds. Use each engine's
+matching packer stage; the Hogwarts shader reference must pass its packaging check.
+
+This sync adds Crisis Core Reunion, The Dark Prince, Fantasian Neo Dimension,
+Dragon Quest I & II HD-2D Remake, and Kingdom Hearts Final Mix (collection
+program 1, not the menu or program 3). Recognition is not a gameplay result:
+The Dark Prince stalled before the title screen in standalone testing.
+Dragon Quest VII is not enabled: its strict shader build needs a compiler
+change that is not in the pinned Peanuts source.
 
 Readiness keeps the first identified program's actual admission failure on the
 fullscreen choice page. Native preparation reads the original game, selected
