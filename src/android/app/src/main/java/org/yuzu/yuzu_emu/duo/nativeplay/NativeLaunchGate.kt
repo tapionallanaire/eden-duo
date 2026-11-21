@@ -242,7 +242,8 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
 
     private fun showChoice(selected: Game) {
         phase = "surface"
-        try { choice.launch(NativeLaunchActivity.intent(appContext, selected, failure)) }
+        try { choice.launch(NativeLaunchActivity.intent(appContext, selected, failure)
+            .putExtra(NativePreparationActivity.CUSTOM_DRIVER, custom)) }
         catch (_: Exception) {
             phase = "cancelled"
             fragment.requireActivity().finish()

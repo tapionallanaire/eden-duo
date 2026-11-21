@@ -185,6 +185,14 @@ internal object PreparedNativeGame {
     fun preparationStatus(context: Context, path: String, kind: NativeEngine) =
         JSONObject(preparationCall("preparationStatus", context, path, kind) as String)
 
+    fun launchPendingCapture(activity: Activity, path: String, driver: String) {
+        try {
+            checkNotNull(embeddedEngine(NativeEngine.PEANUTS))
+                .getMethod("launchPendingCapture", Activity::class.java, String::class.java, String::class.java)
+                .invoke(null, activity, path, driver)
+        } catch (e: InvocationTargetException) { throw e.targetException }
+    }
+
     fun startPreparation(context: Context, path: String, kind: NativeEngine) {
         preparationCall("startPreparation", context, path, kind)
     }

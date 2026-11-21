@@ -92,10 +92,15 @@ build with the same reviewed source worktrees.
 The catalog targets Peanuts `6d6c65838691a1226a18881b1a040603075ce89b`
 and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
 and 10 Switch 2 programs (99 registered builds). For the APK, use the
-Peanuts distribution branch `dist/duet-6d6c6583` (`70ae60957571`) and the
+Peanuts distribution with embedded capture (`feat/embedded-fe3h-autocapture`, `878530f69daf`) and the
 unchanged Banana branch `dist/duet-20261121` (`261437065079`). They retain
 the embedded hosts and exclude captured prewarm seeds. Use each engine's
 matching packer stage; the Hogwarts shader reference must pass its packaging check.
+
+For Three Houses 1.2.0, Compile & play captures the nine startup shaders from
+the selected game on the device. The capture process uses a disposable save;
+its provisional pack is never published. Native play still requires all 1,372
+shaders. Do not ship a capture directory or copy one from another device.
 
 This sync adds Crisis Core Reunion, The Dark Prince, Fantasian Neo Dimension,
 Dragon Quest I & II HD-2D Remake, and Kingdom Hearts Final Mix (collection

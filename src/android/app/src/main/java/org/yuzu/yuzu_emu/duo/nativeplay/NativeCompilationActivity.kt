@@ -21,6 +21,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.content.IntentCompat
+import androidx.lifecycle.Lifecycle
+import org.yuzu.yuzu_emu.model.Game
 import org.json.JSONObject
 import org.yuzu.yuzu_emu.R
 import org.yuzu.yuzu_emu.YuzuApplication
@@ -39,6 +42,7 @@ class NativeCompilationActivity : AppCompatActivity() {
     private var completed = false
     private var startingAt = 0L
     private var lastError: String? = null
+    private var captureDriver: String? = null
 
     override fun attachBaseContext(base: Context) = super.attachBaseContext(YuzuApplication.applyLanguage(base))
 
@@ -52,6 +56,7 @@ class NativeCompilationActivity : AppCompatActivity() {
             else -> { fail(getString(R.string.native_runtime_unavailable), safeForEmulation = true); return }
         }
         binding = ActivityNativeLaunchBinding.inflate(layoutInflater)
+        binding.root.keepScreenOn = intent.getBooleanExtra(NativePreparationActivity.CAPTURE_FOREGROUND, false)
         setContentView(binding.root)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
@@ -236,6 +241,18 @@ class NativeCompilationActivity : AppCompatActivity() {
                         cancelPreparation(false)
                     }
                     render(state, alive)
+                    if (!cancelling && alive && state.optBoolean("capture_pending") &&
+                        engine == NativeEngine.PEANUTS && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                        val driver = captureDriver ?: run {
+                            val game = requireNotNull(IntentCompat.getParcelableExtra(intent, NativePreparationActivity.GAME, Game::class.java))
+                            val choice = NativeLaunchDriver.resolve(game, intent.getBooleanExtra(NativePreparationActivity.CUSTOM_DRIVER, true))
+                            withContext(Dispatchers.IO) {
+                                PreparedNativeGame.prepareDriver(this@NativeCompilationActivity, NativeLaunchDriver.validate(choice), engine)
+                            }.also { captureDriver = it }
+                        }
+                        if (!cancelling && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+                            PreparedNativeGame.launchPendingCapture(this@NativeCompilationActivity, path, driver)
+                    }
                 } catch (e: CancellationException) { throw e
                 } catch (e: Exception) {
                     lastError = e.message ?: e.javaClass.simpleName
