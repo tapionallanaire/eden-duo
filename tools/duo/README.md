@@ -102,6 +102,12 @@ formatting on ordinary mesh draws. No cache migration or new user setting is req
 Both distributions retain the embedded hosts and exclude captured prewarm seeds. Use each engine's
 matching packer stage; the Hogwarts shader reference must pass its packaging check.
 
+The pinned distribution is in `tools/duo/peanuts.rev` (commit and `DMSH_VK_CHAIN`). A build with
+`-PduetPeanutsSourceDir` fails unless that source has the pinned `DMSH_VK_CHAIN` and, for a git
+checkout, the pinned commit; pass `-PduetPeanutsSnapshot=true` for a sanitized release snapshot
+(another commit, same contents), which is then checked by its chain version only. Update both
+lines of `peanuts.rev` with the README pin above whenever Peanuts is synchronized.
+
 The Peanuts translator fix keeps the handle word of a bindless texture handle that the
 guest spilled to local memory and reloads (Hogwarts Legacy dropped its Niagara particle
 writes: spell effects stuck as a bright disc with exposure flicker). It changes
