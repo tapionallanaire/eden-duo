@@ -89,10 +89,10 @@ readiness. A mismatching version remains visible there but cannot run incompatib
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
 
-The catalog targets Peanuts `6d6c65838691a1226a18881b1a040603075ce89b`
+The catalog targets Peanuts `dist/duet-20261122` (`ff366f2b07f3f1bd142b5af6aebefce0007b3cc9`)
 and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
-and 10 Switch 2 programs (99 registered builds). For the APK, use the
-Peanuts distribution with embedded capture (`feat/embedded-fe3h-autocapture`, `878530f69daf`) and Banana
+and 10 Switch 2 programs (99 registered builds). For the APK, use that Peanuts
+distribution (embedded capture `878530f69daf` plus the translator fix below) and Banana
 `perf/duet-android-cache` (`0056ba53bd52617cfcbaad677d826bbc91a17744`, based on `dist/duet-20261121`).
 Pass that checkout as `-PduetBananaSourceDir=/path/to/BananaNative` when building Duet Plus.
 All ten Switch 2 Native Play hosts pack small Vulkan images into the fullest existing block with
@@ -101,6 +101,13 @@ The hosts also reject stale Vulkan caches before reading the payload and skip di
 formatting on ordinary mesh draws. No cache migration or new user setting is required.
 Both distributions retain the embedded hosts and exclude captured prewarm seeds. Use each engine's
 matching packer stage; the Hogwarts shader reference must pass its packaging check.
+
+The Peanuts translator fix keeps the handle word of a bindless texture handle that the
+guest spilled to local memory and reloads (Hogwarts Legacy dropped its Niagara particle
+writes: spell effects stuck as a bright disc with exposure flicker). It changes
+`DMSH_CHAIN` to `4c58e2225984` and `DMSH_VK_CHAIN` to `b1683fc3bd6d` (ABI `cb5a89b39291`
+unchanged): packs carry `shaders/v-<DMSH_VK_CHAIN>/`, so every natively prepared game must
+rebuild its shader library once (Prepare again) after this update.
 
 For Three Houses 1.2.0, Compile & play captures the nine startup shaders from
 the selected game on the device. The capture process uses a disposable save;
