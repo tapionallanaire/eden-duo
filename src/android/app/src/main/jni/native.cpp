@@ -462,6 +462,12 @@ void EmulationSession::RequestGuestExit() {
 }
 
 void EmulationSession::HaltEmulation() {
+    // Already halted: return without the lock. After a game exits by itself, the applet manager
+    // calls Exit() on every update, including during ShutdownMainProcess, which holds m_mutex
+    // while it joins that thread.
+    if (!m_is_running) {
+        return;
+    }
     std::scoped_lock lock(m_mutex);
     m_is_running = false;
     m_pending_shader_cache_title.reset();
