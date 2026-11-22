@@ -1391,18 +1391,23 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         // back still submits from its idle hook, so the front must not flush these pages itself.
         VideoCommon::GpuSplit::Get().Run(
             [this, first_page, size = end_page - first_page] {
-                static const bool batch = [] {
+                static const auto batch_override = []() -> std::optional<bool> {
                     if (const char* value = std::getenv("EDEN_NX2_CMDPAGE_BATCH")) {
                         return std::string_view{value} == "1";
                     }
 #ifdef __ANDROID__
                     char value[PROP_VALUE_MAX];
-                    return __system_property_get("debug.duet.nx2.cmdbatch", value) == 1 &&
-                           value[0] == '1';
+                    if (const int len = __system_property_get("debug.duet.nx2.cmdbatch", value)) {
+                        return len == 1 && value[0] == '1';
+                    }
+                    return std::nullopt;
 #else
                     return false;
 #endif
                 }();
+                // Do not cache the game's DMA setting: Android can change it between launches.
+                const bool batch = batch_override ? *batch_override :
+                    Settings::values.dma_accuracy.GetValue() == Settings::DmaAccuracy::Unsafe;
                 if (batch && size == 0x1000 && rasterizer != nullptr) {
                     if (const auto device = memory_manager.GpuToCpuAddress(first_page)) {
                         rasterizer->FlushGpuWrittenCommandListPage(*device);

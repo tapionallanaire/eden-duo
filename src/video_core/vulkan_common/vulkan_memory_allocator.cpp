@@ -215,6 +215,11 @@ MemoryAllocator::~MemoryAllocator() = default;
 // Diagnostic: what is being created, logged at every further 256 MiB (sizes asked for, never
 // subtracted on free; image sizes estimated at 4 bytes a texel).
 static void NoteCreated(const char* kind, u64 size, u64 detail_a, u64 detail_b) {
+#ifdef __ANDROID__
+    if (!GPU::Logging::IsActive() || !Settings::values.gpu_log_memory_tracking.GetValue()) {
+        return;
+    }
+#endif
     static std::atomic<u64> total{};
     static std::atomic<u64> images{};
     static std::atomic<u64> buffers{};

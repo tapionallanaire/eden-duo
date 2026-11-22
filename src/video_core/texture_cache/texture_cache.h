@@ -472,7 +472,14 @@ void TextureCache<P>::TickFrame() {
             }
         }
     }
-    if (Settings::CurrentProgramIsSwitch2()) {
+    static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
+#ifdef __ANDROID__
+    // This diagnostic asks the driver and VMA for heap usage in addition to the collector below.
+    const bool log_device_use = log_tc;
+#else
+    constexpr bool log_device_use = true;
+#endif
+    if (log_device_use && Settings::CurrentProgramIsSwitch2()) {
         // Where the GPU memory goes: logged when the cache's images or the device's use moved
         // by 256 MiB.
         static u64 logged_images{};
@@ -515,7 +522,6 @@ void TextureCache<P>::TickFrame() {
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is
     // explicitly enabled.
-    static const bool log_tc = std::getenv("EDEN_NX2_TC_LOG") != nullptr;
     static u64 frames{};
     if (log_tc && ++frames % 600 == 0) {
         u64 image_bytes{};
