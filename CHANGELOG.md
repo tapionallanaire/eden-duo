@@ -6,6 +6,7 @@
   - On Android, choose **Graphics → Advanced → DMA Accuracy → Unsafe** to opt in. Default leaves batching off. For an isolated A/B without changing DMA accuracy, use `adb shell setprop debug.duet.nx2.cmdbatch 1` or `0`, force-stop Duet Plus, and replay the same scene. Clear the property to return to the menu setting. `EDEN_NX2_CMDPAGE_BATCH` takes precedence over both.
 - Android Vulkan emulation skips allocation tallies unless GPU logging and memory tracking are enabled. Switch 2 also skips the extra diagnostic heap sample every 20 frames unless texture-cache logging (`EDEN_NX2_TC_LOG`) is enabled. The collector still samples memory usage and handles pressure as before.
 - Android: **Exit emulation** now asks the game to close before stopping it. This lets Kingdom Hearts II Final Mix write the latest save even when exiting directly from its save screen.
+- Android: **Exit emulation** no longer hangs on "Shutting down" when the game closes itself after the exit request (Kingdom Hearts Birth by Sleep, Hogwarts Legacy). Stopping emulation and the game's own exit waited on each other.
 - **Settings → Native Play storage** shows total and per-game usage. Purge one game or all prepared games without deleting ROMs or saves; data in use is skipped.
 - A launch waiting for shared saves now continues when the previous game or save operation releases them. You can cancel without stopping the other game.
 - Finished native player tasks leave Android Recents; reopening an old task no longer attempts to start the game with an expired save session.
