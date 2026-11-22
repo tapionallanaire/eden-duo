@@ -157,25 +157,6 @@ static std::shared_ptr<NSP> OpenContainerAsNsp(const VirtualFile& file, Loader::
     return nullptr;
 }
 
-// Checks that every .ncz entry in the container is NCZBLOCK. Solid NCZ has no random access,
-// and the whole point of this build is to reject it at scan time so such files never appear
-// in the game list. Containers without any .ncz (plain NSP/XCI) pass through.
-static bool ContainerIsFullyBlockCompressed(const std::shared_ptr<NSP>& nsp) {
-    if (!nsp) {
-        return false;
-    }
-    for (const auto& entry : nsp->GetFiles()) {
-        const auto name = entry->GetName();
-        if (name.size() < 4 || name.substr(name.size() - 4) != ".ncz") {
-            continue;
-        }
-        if (!Core::Crypto::IsBlockCompressedNCZ(entry)) {
-            return false; // solid NCZ -> reject the whole container
-        }
-    }
-    return true; // no .ncz at all, or all block-compressed
-}
-
 template <typename Callback>
 bool ForEachContainerEntry(const std::shared_ptr<NSP>& nsp, bool only_content,
                            std::optional<u64> base_program_id, Callback&& on_entry) {
@@ -833,7 +814,7 @@ static std::shared_ptr<NCA> GetNCAFromNSPForID(const NSP& nsp, const NcaID& id) 
     auto file = nsp.GetFile(std::format("{}.nca", id_string));
     if (file == nullptr) {
         if (auto ncz_file = nsp.GetFile(std::format("{}.ncz", id_string))) {
-            file = Core::Crypto::DecompressNCZForInstall(
+            file = Core::Crypto::DecompressNCZ(
                 ncz_file, std::format("{}.nca", id_string));
         }
     }
@@ -850,6 +831,7 @@ InstallResult RegisteredCache::InstallEntry(const XCI& xci, bool overwrite_if_ex
 
 InstallResult RegisteredCache::InstallEntry(const NSP& nsp, bool overwrite_if_exists,
                                             const VfsCopyFunction& copy) {
+    const Core::Crypto::SolidNczUnpackScope unpack_solid_ncz; // installs copy every NCA in full
     const auto ncas = nsp.GetNCAsCollapsed();
     const auto meta_iter = std::find_if(ncas.begin(), ncas.end(), [](const auto& nca) {
         return nca->GetType() == NCAContentType::Meta;
@@ -1312,12 +1294,6 @@ bool ManualContentProvider::AddEntriesFromContainer(const std::shared_ptr<NSP>& 
         return false;
     }
 
-    // Reject solid NCZ (.nsz without -B): only block-compressed NCZ is supported.
-    if (!ContainerIsFullyBlockCompressed(nsp)) {
-        LOG_DEBUG(Service_FS, "Skipping solid-compressed container: {}", nsp->GetName());
-        return false;
-    }
-
     return ForEachContainerEntry(
         nsp, only_content, base_program_id,
         [this](TitleType title_type, ContentRecordType content_type, u64 title_id,
@@ -1512,12 +1488,6 @@ void ExternalContentProvider::ProcessNSP(const VirtualFile& file) {
 
     const auto nsp = OpenContainerAsNsp(file, Loader::FileType::NSP);
     if (!nsp) {
-        return;
-    }
-
-    // Reject solid NCZ (.nsz without -B): Eden only supports block-compressed NCZ.
-    if (!ContainerIsFullyBlockCompressed(nsp)) {
-        LOG_DEBUG(Service_FS, "Skipping solid-compressed container: {}", file->GetName());
         return;
     }
 

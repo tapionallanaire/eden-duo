@@ -254,7 +254,7 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
                     if (ncz_file != nullptr) {
                         next_file = Core::Crypto::DecompressNCZ(ncz_file, std::format("{}.nca", id_string));
                         if (next_file == nullptr) {
-                            LOG_DEBUG(Service_FS, "Skipping solid or unsupported NCZ content {}.ncz", id_string);
+                            LOG_DEBUG(Service_FS, "Skipping unreadable NCZ content {}.ncz", id_string);
                             continue;
                         }
                     }
@@ -271,22 +271,29 @@ void NSP::ReadNCAs(const std::vector<VirtualFile>& files) {
                     continue;
                 }
 
+                // A solid NCZ outside a launch reads as its NCA header only (no unpack): its header
+                // names the content, which is enough for scans; a launch unpacks and reads it all.
+                const bool pending = Core::Crypto::IsNczPendingUnpack(next_file);
                 auto next_nca = std::make_shared<NCA>(std::move(next_file));
+                const auto nca_status = pending && next_nca->GetStatus() ==
+                                                       Loader::ResultStatus::ErrorBadNCAHeader
+                                            ? Loader::ResultStatus::Success
+                                            : next_nca->GetStatus();
 
                 if (next_nca->GetType() == NCAContentType::Program) {
-                    program_status[next_nca->GetTitleId()] = next_nca->GetStatus();
+                    program_status[next_nca->GetTitleId()] = nca_status;
                     program_ids.insert(next_nca->GetTitleId() & 0xFFFFFFFFFFFFF000);
                 }
 
-                if (next_nca->GetStatus() != Loader::ResultStatus::Success &&
-                    next_nca->GetStatus() != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
+                if (nca_status != Loader::ResultStatus::Success &&
+                    nca_status != Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
                     continue;
                 }
 
                 // If the last 3 hexadecimal digits of the CNMT TitleID is 0x800 or is missing the
                 // BKTRBaseRomFS, this is an update NCA. Otherwise, this is a base NCA.
                 if ((cnmt.GetTitleID() & 0x800) != 0 ||
-                    next_nca->GetStatus() == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
+                    nca_status == Loader::ResultStatus::ErrorMissingBKTRBaseRomFS) {
                     // If the last 3 hexadecimal digits of the NCA's TitleID is between 0x1 and
                     // 0x7FF, this is a multi-program update NCA. Otherwise, this is a regular
                     // update NCA.

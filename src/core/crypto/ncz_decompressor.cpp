@@ -3,10 +3,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
+#include <limits>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -14,6 +18,8 @@
 #include <zstd.h>
 
 #include "common/common_types.h"
+#include "common/fs/file.h"
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/zstd_compression.h"
 #include "core/crypto/aes_util.h"
@@ -85,6 +91,8 @@ std::optional<std::pair<std::vector<Section>, std::optional<BlockHeader>>> Parse
         Section s{};
         s.offset = static_cast<s64>(Le(e, 8));
         s.size = static_cast<s64>(Le(e + 8, 8));
+        if (s.offset < 0 || s.size < 0 || s.offset > std::numeric_limits<s64>::max() - s.size)
+            return std::nullopt;
         s.crypto_type = Le(e + 16, 8);
         std::memcpy(s.key.data(), e + 32, 16);
         std::memcpy(s.counter.data(), e + 48, 16);
@@ -301,139 +309,231 @@ private:
     u64 nca_size{};
 };
 
-// Solid NCZ: one zstd stream over the whole body. Decoded incrementally into memory, up to the
-// requested offset, so sequential install reads are O(n) instead of O(n^2).
-class SolidNczFile final : public FileSys::VfsFile {
+// The NCA unpacked from a solid NCZ, under the NCZ's name and source paths.
+class CachedNcaFile final : public FileSys::VfsFile {
 public:
-    SolidNczFile(std::string name_, FileSys::VirtualFile source_,
-                 std::vector<Section> sections_, u64 payload_start_)
-        : name{std::move(name_)}, source{std::move(source_)}, sections{std::move(sections_)},
-          payload_start{payload_start_} {
-        const auto raw_header = source->ReadBytes(HeaderSize, 0);
-        data.assign(raw_header.begin(), raw_header.end());
-        frontier = HeaderSize;
-    }
+    CachedNcaFile(std::string name_, std::vector<std::string> sources_,
+                  const std::filesystem::path& path)
+        : name{std::move(name_)}, sources{std::move(sources_)},
+          file{path, Common::FS::FileAccessMode::Read, Common::FS::FileType::BinaryFile},
+          size{file.IsOpen() ? file.GetSize() : 0} {}
 
-    ~SolidNczFile() override {
-        if (stream != nullptr) ZSTD_freeDStream(stream);
-    }
-
+    bool IsOpen() const { return file.IsOpen(); }
     std::string GetName() const override { return name; }
-    std::size_t GetSize() const override {
-        u64 size = HeaderSize;
-        for (const auto& s : sections)
-            size = std::max<u64>(size, static_cast<u64>(s.offset + s.size));
-        return static_cast<std::size_t>(size);
-    }
+    std::size_t GetSize() const override { return static_cast<std::size_t>(size); }
     bool Resize(std::size_t) override { return false; }
     FileSys::VirtualDir GetContainingDirectory() const override { return nullptr; }
-    std::vector<std::string> GetSourcePaths() const override {
-        return source->GetSourcePaths();
-    }
+    std::vector<std::string> GetSourcePaths() const override { return sources; }
     bool IsWritable() const override { return false; }
     bool IsReadable() const override { return true; }
 
-    std::size_t Read(u8* out, std::size_t len, std::size_t off) const override {
+    std::size_t Read(u8* data, std::size_t len, std::size_t off) const override {
         std::scoped_lock lock{mutex};
-        const u64 nca_size = GetSize();
-        if (off >= nca_size) return 0;
-        len = static_cast<std::size_t>(std::min<u64>(len, nca_size - off));
-        const u64 needed = off + len;
-        if (needed > frontier && !DecodeTo(needed)) return 0;
-        std::memcpy(out, data.data() + off, len);
-        return len;
+        if (off >= size || !file.Seek(static_cast<s64>(off))) return 0;
+        return file.ReadSpan(
+            std::span<u8>{data, static_cast<std::size_t>(std::min<u64>(len, size - off))});
     }
 
     std::size_t Write(const u8*, std::size_t, std::size_t) override { return 0; }
     bool Rename(std::string_view) override { return false; }
 
 private:
-    bool DecodeTo(u64 needed) const {
-        if (stream == nullptr) {
-            stream = ZSTD_createDStream();
-            if (stream == nullptr) return false;
-            ZSTD_DCtx_setParameter(stream, ZSTD_d_windowLogMax, 31);
-            read_pos = payload_start;
-        }
+    const std::string name;
+    const std::vector<std::string> sources;
+    const Common::FS::IOFile file;
+    const u64 size;
+    mutable std::mutex mutex;
+};
 
-        const u64 file_size = source->GetSize();
-        std::vector<u8> out_buf(Chunk);
-
-        std::size_t index = 0;
-        for (; index < sections.size(); ++index) {
-            const auto& s = sections[index];
-            const u64 begin = std::max<u64>(static_cast<u64>(s.offset), HeaderSize);
-            const u64 end = std::max<u64>(static_cast<u64>(s.offset) + static_cast<u64>(s.size),
-                                          begin);
-            if (end > frontier) break;
-        }
-
-        for (; index < sections.size() && frontier < needed; ++index) {
-            const auto& s = sections[index];
-            const u64 begin = std::max<u64>(static_cast<u64>(s.offset), HeaderSize);
-            const u64 end = std::max<u64>(static_cast<u64>(s.offset) + static_cast<u64>(s.size),
-                                          begin);
-            if (end <= frontier) continue;
-            u64 pos = std::max<u64>(begin, frontier);
-
-            std::optional<AESCipher<Key128>> cipher;
-            if (s.Ctr()) cipher.emplace(s.key, Mode::CTR);
-
-            while (pos < end && frontier < needed) {
-                const u64 want = std::min<u64>(end - pos, out_buf.size());
-                std::size_t produced = 0;
-                while (produced < want) {
-                    if (in.pos >= in.size) {
-                        const u64 remaining = file_size - read_pos;
-                        const std::size_t chunk = static_cast<std::size_t>(
-                            std::min<u64>(Chunk, remaining));
-                        if (chunk == 0) { LOG_ERROR(Crypto, "Solid NCZ: truncated"); return false; }
-                        const auto bytes = source->ReadBytes(chunk, read_pos);
-                        if (bytes.empty()) { LOG_ERROR(Crypto, "Solid NCZ: truncated"); return false; }
-                        read_pos += bytes.size();
-                        in_buf.assign(bytes.begin(), bytes.end());
-                        in.src = in_buf.data();
-                        in.size = in_buf.size();
-                        in.pos = 0;
-                    }
-                    ZSTD_outBuffer outb{out_buf.data() + produced, want - produced, 0};
-                    const std::size_t res = ZSTD_decompressStream(stream, &outb, &in);
-                    if (ZSTD_isError(res)) {
-                        LOG_ERROR(Crypto, "Solid NCZ: zstd error");
+// Writes the NCA a solid NCZ holds to path: its header copy, then each section's bytes from the
+// one zstd stream, encrypted again where the section is AES-CTR, so the file is the NCA as dumped.
+bool UnpackSolid(const FileSys::VirtualFile& f, const std::vector<Section>& sections,
+                 u64 payload_start, const std::filesystem::path& path) {
+    Common::FS::IOFile out{path, Common::FS::FileAccessMode::Write,
+                           Common::FS::FileType::BinaryFile};
+    const auto header = f->ReadBytes(HeaderSize, 0);
+    if (!out.IsOpen() || header.size() != HeaderSize ||
+        out.WriteSpan(std::span<const u8>{header}) != HeaderSize) {
+        return false;
+    }
+    const std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(),
+                                                                   ZSTD_freeDCtx};
+    if (!dctx) return false;
+    ZSTD_DCtx_setParameter(dctx.get(), ZSTD_d_windowLogMax, 31);
+    std::vector<u8> in_buf(Chunk), out_buf(Chunk * 4);
+    ZSTD_inBuffer in{in_buf.data(), 0, 0};
+    u64 read_pos = payload_start;
+    const u64 file_size = f->GetSize();
+    for (const auto& s : sections) {
+        const u64 begin = std::max<u64>(static_cast<u64>(s.offset), HeaderSize);
+        const u64 end = std::max<u64>(static_cast<u64>(s.offset + s.size), begin);
+        std::optional<AESCipher<Key128>> cipher;
+        if (s.Ctr()) cipher.emplace(s.key, Mode::CTR);
+        for (u64 pos = begin; pos < end;) {
+            ZSTD_outBuffer o{out_buf.data(),
+                             static_cast<std::size_t>(std::min<u64>(end - pos, out_buf.size())),
+                             0};
+            while (o.pos < o.size) {
+                if (in.pos == in.size) {
+                    const auto want = std::min<u64>(Chunk, file_size - std::min(read_pos, file_size));
+                    const std::size_t n =
+                        want == 0 ? 0
+                                  : f->Read(in_buf.data(), static_cast<std::size_t>(want),
+                                            static_cast<std::size_t>(read_pos));
+                    if (n == 0) {
+                        LOG_ERROR(Crypto, "Solid NCZ {}: truncated", f->GetName());
                         return false;
                     }
-                    produced += outb.pos;
+                    read_pos += n;
+                    in.size = n;
+                    in.pos = 0;
                 }
-                if (cipher) {
-                    Key128 iv{};
-                    SetIv(iv, s.counter, pos);
-                    cipher->SetIV(iv);
-                    cipher->Transcode(out_buf.data(), produced, out_buf.data(), Op::Encrypt);
+                if (const auto r = ZSTD_decompressStream(dctx.get(), &o, &in); ZSTD_isError(r)) {
+                    LOG_ERROR(Crypto, "Solid NCZ {}: {}", f->GetName(), ZSTD_getErrorName(r));
+                    return false;
                 }
-                data.insert(data.end(), out_buf.begin(), out_buf.begin() + produced);
-                pos += produced;
-                frontier = pos;
             }
+            if (cipher) {
+                Key128 iv{};
+                SetIv(iv, s.counter, pos);
+                cipher->SetIV(iv);
+                cipher->Transcode(out_buf.data(), o.pos, out_buf.data(), Op::Encrypt);
+            }
+            if (out.WriteSpan(std::span<const u8>{out_buf.data(), o.pos}) != o.pos) return false;
+            pos += o.pos;
         }
-        return frontier >= needed;
+    }
+    return out.Flush();
+}
+
+thread_local bool unpack_allowed = false;
+
+// ponytail: a solid NCZ (nsz without -B) has no random access, so a launch or an install unpacks
+// the whole NCA once into <cache>/ncz/<id>.nca: as much disk as the NCA, kept for later launches
+// until the cache is cleared, and that first launch waits for it. Block NCZ (nsz -B) needs no
+// copy. Nothing bounds the folder; evict per game if cache space matters.
+std::shared_ptr<CachedNcaFile> UnpackSolidCached(const FileSys::VirtualFile& f,
+                                                 const std::string& name,
+                                                 const std::vector<Section>& sections,
+                                                 u64 payload_start, u64 nca_size, bool unpack) {
+    const auto dir = Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "ncz";
+    const auto path = dir / name;
+    static std::mutex unpack_mutex; // one unpack at a time; a second opener reuses its result
+    std::scoped_lock lock{unpack_mutex};
+    std::error_code ec;
+    if (std::filesystem::file_size(path, ec) != nca_size || ec) {
+        if (!unpack) return nullptr;
+        // An unpack cut short (killed, crashed) leaves a .part: nothing reads one, so drop them all.
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.path().extension() == ".part") std::filesystem::remove(entry.path(), ec);
+        }
+        std::filesystem::create_directories(dir, ec);
+        constexpr u64 Reserve = 2ULL << 30; // leave the device room to keep working
+        const auto space = std::filesystem::space(dir, ec);
+        if (ec || space.available < Reserve || nca_size > space.available - Reserve) {
+            LOG_CRITICAL(Crypto,
+                         "Not enough free space to unpack solid NCZ {}: needs {} MiB plus 2048 "
+                         "MiB to spare in {}, {} MiB free. Free space or recompress with nsz -B.",
+                         name, nca_size >> 20, Common::FS::PathToUTF8String(dir),
+                         ec ? 0 : space.available >> 20);
+            return nullptr;
+        }
+        auto part = path;
+        part += ".part";
+        LOG_INFO(Crypto, "Unpacking solid NCZ {} ({} bytes) into {}", name, nca_size,
+                 Common::FS::PathToUTF8String(dir));
+        const auto start = std::chrono::steady_clock::now();
+        bool ok = UnpackSolid(f, sections, payload_start, part);
+        if (ok) {
+            std::filesystem::rename(part, path, ec);
+            ok = !ec;
+        }
+        if (!ok) {
+            LOG_ERROR(Crypto, "Could not unpack solid NCZ {} into {}", name,
+                      Common::FS::PathToUTF8String(dir));
+            std::filesystem::remove(part, ec);
+            return nullptr;
+        }
+        LOG_INFO(Crypto, "Unpacked {} in {} ms", name,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - start)
+                     .count());
+    }
+    auto file = std::make_shared<CachedNcaFile>(name, f->GetSourcePaths(), path);
+    return file->IsOpen() && file->GetSize() == nca_size ? file : nullptr;
+}
+
+// Live SolidNczFiles, so IsNczPendingUnpack can tell one apart without RTTI.
+std::mutex solid_files_mutex;
+std::set<const FileSys::VfsFile*> solid_files;
+
+// A solid NCZ's NCA: its header copy at once, the rest from the unpacked cache file. Until that
+// exists, only a thread inside a SolidNczUnpackScope (launch, install) unpacks it; elsewhere
+// (library scans, metadata) reads past the header come back short and nothing is written.
+class SolidNczFile final : public FileSys::VfsFile {
+public:
+    SolidNczFile(std::string name_, FileSys::VirtualFile source_, std::vector<u8> header_,
+                 std::vector<Section> sections_, u64 payload_start_)
+        : name{std::move(name_)}, source{std::move(source_)}, header{std::move(header_)},
+          sections{std::move(sections_)}, payload_start{payload_start_} {
+        for (const auto& s : sections)
+            nca_size = std::max<u64>(nca_size, static_cast<u64>(s.offset + s.size));
+        std::scoped_lock lock{solid_files_mutex};
+        solid_files.insert(this);
+    }
+
+    ~SolidNczFile() override {
+        std::scoped_lock lock{solid_files_mutex};
+        solid_files.erase(this);
+    }
+
+    std::string GetName() const override { return name; }
+    std::size_t GetSize() const override { return static_cast<std::size_t>(nca_size); }
+    bool Resize(std::size_t) override { return false; }
+    FileSys::VirtualDir GetContainingDirectory() const override { return nullptr; }
+    std::vector<std::string> GetSourcePaths() const override { return source->GetSourcePaths(); }
+    bool IsWritable() const override { return false; }
+    bool IsReadable() const override { return true; }
+
+    std::size_t Read(u8* data, std::size_t len, std::size_t off) const override {
+        if (off >= nca_size) return 0;
+        len = static_cast<std::size_t>(std::min<u64>(len, nca_size - off));
+        std::size_t done = 0;
+        if (off < HeaderSize) {
+            done = static_cast<std::size_t>(std::min<u64>(len, HeaderSize - off));
+            std::memcpy(data, header.data() + off, done);
+        }
+        if (done == len) return len;
+        const auto body = Body(unpack_allowed);
+        return body ? done + body->Read(data + done, len - done, off + done) : done;
+    }
+
+    std::size_t Write(const u8*, std::size_t, std::size_t) override { return 0; }
+    bool Rename(std::string_view) override { return false; }
+
+    bool Pending() const { return !unpack_allowed && Body(false) == nullptr; }
+
+private:
+    std::shared_ptr<CachedNcaFile> Body(bool unpack) const {
+        std::scoped_lock lock{mutex};
+        if (!body)
+            body = UnpackSolidCached(source, name, sections, payload_start, nca_size, unpack);
+        return body;
     }
 
     const std::string name;
     const FileSys::VirtualFile source;
+    const std::vector<u8> header;
     const std::vector<Section> sections;
     const u64 payload_start;
+    u64 nca_size = HeaderSize;
     mutable std::mutex mutex;
-    mutable std::vector<u8> data;
-    mutable ZSTD_DStream* stream = nullptr;
-    mutable u64 read_pos = 0;
-    mutable u64 frontier = 0;
-    mutable std::vector<u8> in_buf;
-    mutable ZSTD_inBuffer in{nullptr, 0, 0};
+    mutable std::shared_ptr<CachedNcaFile> body;
 };
 
-// Shared opener: block path always; solid only when allow_solid is true.
-FileSys::VirtualFile OpenNcz(const FileSys::VirtualFile& f, std::string_view name,
-                             bool allow_solid) {
+} // Anonymous namespace
+
+FileSys::VirtualFile DecompressNCZ(const FileSys::VirtualFile& f, std::string_view name) {
     if (!f) return nullptr;
     u64 ps = 0;
     auto parsed = ParseHeader(f, ps);
@@ -453,30 +553,31 @@ FileSys::VirtualFile OpenNcz(const FileSys::VirtualFile& f, std::string_view nam
                                               std::move(sections), std::move(body));
     }
 
-    if (allow_solid) {
-        return std::make_shared<SolidNczFile>(std::string{name}, f, std::move(sections), ps);
+    // Only solid entries become host files. Never interpret archive-supplied names as paths.
+    if (!name.ends_with(".nca") || name.size() <= 4 || name.front() == '.' ||
+        name.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_.") !=
+            std::string_view::npos)
+        return nullptr;
+    auto hdr = f->ReadBytes(HeaderSize, 0);
+    if (hdr.size() != HeaderSize) return nullptr;
+    return std::make_shared<SolidNczFile>(std::string{name}, f, std::move(hdr),
+                                          std::move(sections), ps);
+}
+
+SolidNczUnpackScope::SolidNczUnpackScope() : previous{unpack_allowed} {
+    unpack_allowed = true;
+}
+
+SolidNczUnpackScope::~SolidNczUnpackScope() {
+    unpack_allowed = previous;
+}
+
+bool IsNczPendingUnpack(const FileSys::VirtualFile& file) {
+    {
+        std::scoped_lock lock{solid_files_mutex};
+        if (!solid_files.contains(file.get())) return false;
     }
-
-    LOG_DEBUG(Crypto, "Solid NCZ {} skipped (only NCZBLOCK is supported for play)", name);
-    return nullptr;
-}
-
-} // Anonymous namespace
-
-bool IsBlockCompressedNCZ(const FileSys::VirtualFile& f) {
-    if (!f) return false;
-    u64 ps = 0;
-    const auto p = ParseHeader(f, ps);
-    return p && p->second.has_value();
-}
-
-FileSys::VirtualFile DecompressNCZ(const FileSys::VirtualFile& f, std::string_view name) {
-    return OpenNcz(f, name, /*allow_solid=*/false);
-}
-
-FileSys::VirtualFile DecompressNCZForInstall(const FileSys::VirtualFile& f,
-                                             std::string_view name) {
-    return OpenNcz(f, name, /*allow_solid=*/true);
+    return static_cast<const SolidNczFile*>(file.get())->Pending();
 }
 
 } // namespace Core::Crypto

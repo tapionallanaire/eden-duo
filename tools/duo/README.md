@@ -89,12 +89,29 @@ readiness. A mismatching version remains visible there but cannot run incompatib
 native code. Updating this catalog also updates Gradle's embedded profile selection;
 build with the same reviewed source worktrees.
 
-The catalog targets Peanuts `dist/duet-20261122` (`ff366f2b07f3f1bd142b5af6aebefce0007b3cc9`)
-and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
-and 10 Switch 2 programs (99 registered builds). For the APK, use that Peanuts
-distribution (embedded capture `878530f69daf` plus the translator fix below) and Banana
-`perf/duet-android-cache` (`0056ba53bd52617cfcbaad677d826bbc91a17744`, based on `dist/duet-20261121`).
-Pass that checkout as `-PduetBananaSourceDir=/path/to/BananaNative` when building Duet Plus.
+Use the same private source commits for the catalog, Gradle's embedded hosts and
+the pack-tool stages. Peanuts `dist/odin-sky108-20261122` is based on the
+`ff366f2b` translator distribution. It retains Sky 1st Chapter 1.0.4 and adds
+the exact 1.0.8 build from the Odin installation; each build requires its own
+shader set. The cancelled intermediate 1.0.7 generation can be retired without
+removing published packs, inputs or saves. The catalog contains 72 Switch 1 and
+10 Switch 2 programs (100 registered builds).
+
+From this repository's root, with `P` and `B` set to clean, separately owned
+checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
+
+```sh
+git -C "$P" switch --detach 3b4cbfdb0610849b0806939dd8cb64c6e969fd3a &&
+git -C "$B" switch --detach 0056ba53bd52617cfcbaad677d826bbc91a17744 &&
+python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
+```
+
+The Peanuts commit must already be available locally or via the owner's private
+distribution branch; the previous `dist/duet-20261122` does not have these
+changes. Pass `-PduetPeanutsSourceDir="$P"` and `-PduetBananaSourceDir="$B"`
+using absolute paths. Generate each pack-tool stage from its corresponding
+checkout: a matching catalog alone does not authenticate the staged tools.
+
 All ten Switch 2 Native Play hosts pack small Vulkan images into the fullest existing block with
 an aligned fit before requesting another 64 MiB. Dedicated images keep the driver's allocation.
 The hosts also reject stale Vulkan caches before reading the payload and skip diagnostic key

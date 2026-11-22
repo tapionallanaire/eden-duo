@@ -25,6 +25,7 @@
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "core/core.h"
+#include "core/crypto/ncz_decompressor.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
@@ -633,6 +634,9 @@ EffectiveInput ResolveEffectiveInput(JNIEnv* env, jobject support, const std::st
                                      jint program_index,
                                      const std::function<void()>& pulse = {},
                                      Json* save_control = nullptr) {
+    // Native play reads the whole program (build IDs, ExeFS, RomFS): a solid NSZ/XCZ the user is
+    // choosing to play is unpacked here, as an emulated launch does, after its free-space check.
+    const Core::Crypto::SolidNczUnpackScope unpack_solid_ncz;
     bool collection = false;
     RequirePrepare(program_index == 0 || IsKingdomHeartsIndex(program_index),
                    "Unsupported native program index");

@@ -10,26 +10,34 @@
 namespace Core::Crypto {
 
 /**
- * Opens an NCZBLOCK-compressed NCA (nsz -B / .xcz block format) as a VirtualFile backed by
- * on-demand block decoding. Nothing is written to disk; each read decodes only the blocks it
- * covers and re-encrypts CTR sections. Solid NCZ is not supported.
+ * Opens an NCZ (the compressed NCA of an NSZ/XCZ) as the NCA it holds. A block-compressed one
+ * (NCZBLOCK, nsz -B) is decoded on demand, its CTR sections served decrypted. A solid one serves
+ * its NCA header at once; the rest comes from <cache>/ncz/<output_name>, which a thread inside a
+ * SolidNczUnpackScope fills on its first read (one full unpack, after a free-space check).
  *
  * @param ncz_file    The raw NCZ payload (e.g. "<id>.ncz" entry from an NSZ/XCZ PFS0).
  * @param output_name Name to give the returned VirtualFile (e.g. "<id>.nca").
  *
- * @return a VirtualFile for the NCA, or nullptr if the NCZ is malformed or not NCZBLOCK.
+ * @return a VirtualFile for the NCA, or nullptr if the NCZ is malformed or cannot be unpacked.
  */
 [[nodiscard]] FileSys::VirtualFile DecompressNCZ(const FileSys::VirtualFile& ncz_file,
                                                  std::string_view output_name);
 
-/**
- * Returns true if the given file is an NCZ payload in block-compressed (NCZBLOCK) form,
- * i.e. one that DecompressNCZ() can open. Solid NCZ returns false.
- */
-[[nodiscard]] bool IsBlockCompressedNCZ(const FileSys::VirtualFile& ncz_file);
+/// While alive, this thread may unpack solid NCZs it reads (a launch, an install). Library scans
+/// and metadata reads run without one and never write the unpacked NCA.
+class SolidNczUnpackScope {
+public:
+    SolidNczUnpackScope();
+    ~SolidNczUnpackScope();
+    SolidNczUnpackScope(const SolidNczUnpackScope&) = delete;
+    SolidNczUnpackScope& operator=(const SolidNczUnpackScope&) = delete;
 
-// Install to NAND: same as DecompressNCZ, but solid NCZ is decoded on demand too.
-[[nodiscard]] FileSys::VirtualFile DecompressNCZForInstall(
-    const FileSys::VirtualFile& ncz_file, std::string_view output_name);
+private:
+    bool previous;
+};
+
+/// True for a solid NCZ's NCA (from DecompressNCZ) that is not unpacked and may not be on this
+/// thread: only its header can be read.
+[[nodiscard]] bool IsNczPendingUnpack(const FileSys::VirtualFile& file);
 
 } // namespace Core::Crypto

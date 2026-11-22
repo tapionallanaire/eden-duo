@@ -26,10 +26,6 @@
 #include <openssl/evp.h>
 #include <zstd.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
@@ -38,6 +34,11 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/deconstructed_rom_directory.h"
+
+// After vfs_real.h: its CreateFile/MoveFile/... members would otherwise meet windows.h macros.
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include <format>
 
