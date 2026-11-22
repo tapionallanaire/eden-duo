@@ -55,12 +55,6 @@
     <string name="dual_screen_filter_show_all">Show all games</string>
     <string name="dual_screen_filter_empty">No games match this filter. Try clearing search or turning off the dual screen filter.</string>
     <string name="game_filter_empty">No games match your search or filters.</string>
-    <string name="about_eden_duo" translatable="false">Eden Duo</string>
-    <string name="about_eden" translatable="false">Eden</string>
-    <string name="about_discord" translatable="false">Discord</string>
-    <string name="about_github" translatable="false">GitHub</string>
-    <string name="eden_duo_discord_link" translatable="false">https://discord.gg/r6vBWKAqCK</string>
-    <string name="eden_duo_github_link" translatable="false">https://github.com/igawa6/eden-duo</string>
     <string name="dual_screen_mod_fetch_source">Eden Duo companions for %1$s</string>
     <string name="dual_screen_mod_fetch_loading">Fetching published companion releases…</string>
     <string name="dual_screen_mod_fetch_empty">No published companion releases for this game yet.</string>
@@ -90,10 +84,6 @@
     <string name="dual_screen_mod_checksum_mismatch">The companion\'s native module is damaged (checksum mismatch). Download the package again.</string>
     <string name="dual_screen_mod_version_mismatch">The version in the file name does not match the package (%1$s). Download the package again.</string>
     <string name="dual_screen_mod_cannot_write">Eden Duo cannot write to %1$s. Files copied there with adb or by another app can cause this; remove them and try again.</string>
-    <string name="about_kofi" translatable="false">Ko-fi</string>
-    <string name="about_next_game_poll">Next game poll</string>
-    <string name="eden_duo_kofi_link" translatable="false">https://ko-fi.com/igawa6</string>
-    <string name="eden_duo_poll_link" translatable="false">https://ko-fi.com/polls/3rd-Poll-Next-Switch-Game-on-Eden-Duo-C7J128KB48</string>
     <!-- The library's "not in your library" section. -->
     <string name="companion_unowned_header">Dual-screen games not in your library</string>
     <string name="companion_unowned_covers_credit">Covers: GameTDB</string>
