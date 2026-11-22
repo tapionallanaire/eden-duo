@@ -93,9 +93,9 @@ The catalog targets Peanuts `6d6c65838691a1226a18881b1a040603075ce89b`
 and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
 and 10 Switch 2 programs (99 registered builds). For the APK, use the
 Peanuts distribution with embedded capture (`feat/embedded-fe3h-autocapture`, `878530f69daf`) and Banana
-`perf/duet-android-cache` (`f9a46b31ec`, based on `dist/duet-20261121`). Pass the latter checkout as
-`-PduetBananaSourceDir=/path/to/BananaNative` when building Duet Plus. It validates the Vulkan cache
-header and shader-library stamp before reading the cache body; no cache migration is required.
+`perf/duet-android-cache` (`3036582982`, based on `dist/duet-20261121`). Pass the latter checkout as
+`-PduetBananaSourceDir=/path/to/BananaNative` when building Duet Plus. It rejects stale Vulkan caches
+before reading their payload and skips diagnostic key formatting on ordinary mesh draws. No cache migration.
 Both distributions retain the embedded hosts and exclude captured prewarm seeds. Use each engine's
 matching packer stage; the Hogwarts shader reference must pass its packaging check.
 
