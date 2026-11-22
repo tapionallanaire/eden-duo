@@ -90,8 +90,8 @@ native code. Updating this catalog also updates Gradle's embedded profile select
 build with the same reviewed source worktrees.
 
 Use the same private source commits for the catalog, Gradle's embedded hosts and
-the pack-tool stages. Peanuts `dist/duet-20261122` at `bdd4cacd` (the merge of
-`dist/odin-sky108-20261122` onto the `ff366f2b` translator distribution) retains Sky 1st Chapter 1.0.4 and adds
+the pack-tool stages. Peanuts `dist/duet-20261122` at `e634a364` (the `ff366f2b` translator distribution, the
+`dist/odin-sky108-20261122` Sky profiles, and prepared games kept across app updates) retains Sky 1st Chapter 1.0.4 and adds
 the exact 1.0.8 build from the Odin installation; each build requires its own
 shader set. The cancelled intermediate 1.0.7 generation can be retired without
 removing published packs, inputs or saves. The catalog contains 72 Switch 1 and
@@ -101,13 +101,13 @@ From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach bdd4cacd44aff139aceed6edc4db84cfbfdb2791 &&
-git -C "$B" switch --detach 0056ba53bd52617cfcbaad677d826bbc91a17744 &&
+git -C "$P" switch --detach e634a364b4b6bb603b7985a5d1a2f4caf5616bf7 &&
+git -C "$B" switch --detach 7296c8b090ca31f0c7cd2a21b7a61fe0212f2ff4 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
 
-The Peanuts commit is on the owner's private distribution branch
-`dist/duet-20261122` (same tree as `3b4cbfdb`, the merged PR head). Pass `-PduetPeanutsSourceDir="$P"` and `-PduetBananaSourceDir="$B"`
+The Peanuts commit is on the owner's private distribution branch `dist/duet-20261122`, the
+Banana commit on `dist/duet-20261121` (`0056ba53` plus the same launch fix). Pass `-PduetPeanutsSourceDir="$P"` and `-PduetBananaSourceDir="$B"`
 using absolute paths. Generate each pack-tool stage from its corresponding
 checkout: a matching catalog alone does not authenticate the staged tools.
 
