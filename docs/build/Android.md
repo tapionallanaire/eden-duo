@@ -83,6 +83,69 @@ Examples:
 * Build optimized release with update checker for ChromeOS:
   * `.ci/android/build.sh -c -r -t optimized`
 
+### Duet Plus: Odin 2 in-place update
+
+Build from the integration checkout. The `mainlineRelease` APK contains the emulator;
+both Native Play hosts are optional Gradle inputs, **not** included by a bare
+`assembleMainlineRelease`. Use separate build worktrees for the exact Peanuts and
+Banana revisions in [the native catalog notes](../../tools/duo/README.md#native-support-catalogpy).
+Set `PEANUTS` and `BANANA` to their absolute paths and `PEANUTS_STAGE` and
+`BANANA_STAGE` to the corresponding engine packer `stage` directories. Generate
+them from those same revisions with Peanuts `peanuts/scripts/ondevice-stage.sh`
+and Banana `android/ondevice/stage-linux.sh`, respectively. Do not reuse captured
+game data or set `PN_PREWARM_SEEDS`. Install both the app NDK (`30.0.16248370`)
+and the native hosts' NDK (`28.2.13676358`).
+
+From the integration repository root, in Bash:
+
+```bash
+set -eu
+python3 tools/duo/native-support-catalog.py --peanuts "$PEANUTS" --banana "$BANANA"
+cd src/android
+./gradlew :app:assembleMainlineRelease -Pnightly=false \
+  "-PduetPeanutsSourceDir=$PEANUTS" "-PnxPackStage=$PEANUTS_STAGE" \
+  "-PduetBananaSourceDir=$BANANA" "-PduetBananaPackStage=$BANANA_STAGE"
+apk=app/build/outputs/apk/mainline/release/app-mainline-release.apk
+```
+
+The build can use the bundled development signer as an intermediate. **Do not
+install that APK.** On the owner's signing host, set `OWNER_KEYSTORE`,
+`OWNER_ALIAS`, and `OWNER_LINEAGE` to the existing release keystore, alias and
+proof-of-rotation file. Put Android SDK Build Tools 36.0.0 on `PATH`; let
+`apksigner` prompt for the password. Write a separate APK, without publishing it:
+
+```bash
+signed=duetplus-odin-update.apk
+apksigner sign --ks "$OWNER_KEYSTORE" --ks-key-alias "$OWNER_ALIAS" \
+  --lineage "$OWNER_LINEAGE" --rotation-min-sdk-version 28 --min-sdk-version 33 \
+  --v1-signing-enabled false --v2-signing-enabled false --v4-signing-enabled false \
+  --out "$signed" "$apk"
+```
+
+Before handing off the signed APK, run this offline gate with `PREVIOUS_APK`
+pointing to the retained **owner-signed** Odin build `34372248`, not a development
+APK. Android orders updates by `versionCode`, not the display name. Gradle derives
+the code from build time (ten-second intervals since 2016-01-01 UTC).
+
+```bash
+set -euo pipefail
+package=$(aapt2 dump badging "$signed" | sed -n '1p')
+[[ $package == "package: name='com.tapionallanaire.duetplus' "* ]]
+[[ $package =~ versionCode=\'([0-9]+)\' ]]
+(( 10#${BASH_REMATCH[1]} > 34372248 ))
+cert='Signer #1 certificate SHA-256 digest: 2d7c097ce3e35549c94e29d6e96ceb4b64b6fc568afb219dc514d4e057303add'
+for file in "$PREVIOUS_APK" "$signed"; do
+  apksigner verify --min-sdk-version 33 --print-certs "$file" | tr -d '\r' | grep -Fx "$cert"
+done
+old=$(apksigner lineage --in "$PREVIOUS_APK" --print-certs -v)
+new=$(apksigner lineage --in "$signed" --print-certs -v)
+[[ -n $old && $old == "$new" ]]
+```
+
+Stop on failure; do not uninstall, clear data or force a downgrade. For side-by-side
+development keep using `assembleMainlineRelWithDebInfo` (`com.tapionallanaire.duetplus.dev`).
+Neither signing nor checking the APK requires a connected device or changing an earlier branch.
+
 ### Additional Resources
 
 <https://developer.android.com/studio/intro>

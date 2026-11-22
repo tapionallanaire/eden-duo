@@ -28,6 +28,7 @@ peanuts	010028600EBDA000	262144	1.2.2	Super Mario 3D World + Bowser's Fury	main=
 peanuts	01002B00111A2000	0	1.0.0	Hyrule Warriors: Age of Calamity	main=935ebe83c4a0658348a8a1c05cf8dac3	subsdk0=3ab92c3444d4ece2f52417b5d8ee86eb	sdk=95832210b36121e88b4f9b7b66239dad
 peanuts	01002B00111A2000	327680	1.3.0	Hyrule Warriors: Age of Calamity	main=c3cf52bf2b05d7310884971b50bcccb8	subsdk0=3ab92c3444d4ece2f52417b5d8ee86eb	sdk=95832210b36121e88b4f9b7b66239dad
 peanuts	01002C9022770000	196608	1.0.4	Trails in the Sky 1st Chapter	main=2ad8cc7892ebf9fab667f6d218366c24	subsdk0=ca7f78a09c547c54beac3a33ed6bf364	sdk=7bba185a35ee9b4d0af66a4df910a823
+peanuts	01002C9022770000	458752	1.0.8	Trails in the Sky 1st Chapter	main=4cabd528adbc28e8f35ec047c0abc4cd	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
 peanuts	01002DA013484000	65536	1.0.1	The Legend of Zelda: Skyward Sword HD	main=5441af3c89f97e1d25a8ccf14c742bf8	subsdk0=4dd097b435891c5e0e15a65dbe47124f	subsdk1=535249a546887cac875a099e9c8ef367	sdk=b39add63421be525d352e576dab438d3
 peanuts	0100300012F2A000	0	1.0.0	Advance Wars 1+2: Re-Boot Camp	main=320a17744aefd67fec5738ca0c629795	subsdk0=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
 peanuts	010035F022078000	0	1.0.0	DRAGON BALL: Sparking! ZERO	main=764daf48e0d3500e369c1baffa5159d6	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9

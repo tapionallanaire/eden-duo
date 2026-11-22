@@ -84,15 +84,23 @@ internal object ExternalContentBootRules {
         val candidates = known.filter { !it.external || inExternalRoots(it.uri) } +
             external.filter { baseTitleId in it.value.titles && inExternalRoots(it.key) }
                 .map { ContentContainer(it.key, false, it.value.records) }
-        return candidates.filter { it.uri != gamePath }.groupBy { it.uri }.map { (uri, entries) ->
+        val merged = candidates.filter { it.uri != gamePath }.groupBy { it.uri }.map { (uri, entries) ->
             ContentContainer(uri, entries.all { it.gameFolder },
                 entries.flatMap { it.records }.distinct(), entries.all { it.external })
-        }.filter { container ->
+        }
+        // Boot applies only the newest enabled update: an older one a newer known update supersedes is not input.
+        val newestUpdate = merged.flatMap { it.records }.mapNotNull {
+            it.version.takeIf { _ ->
+                it.baseTitleId == baseTitleId && it.kind == 1 && "Update@${it.version}" !in disabled
+            }
+        }.maxOrNull()
+        return merged.filter { container ->
             container.records.isEmpty() || container.records.any {
                 it.baseTitleId == baseTitleId && when (it.kind) {
                     0 -> false
                     1 -> "Update" !in disabled &&
-                        (it.version == null || "Update@${it.version}" !in disabled)
+                        (it.version == null || "Update@${it.version}" !in disabled &&
+                            (newestUpdate == null || it.version >= newestUpdate))
                     2 -> "DLC" !in disabled
                     else -> true
                 }

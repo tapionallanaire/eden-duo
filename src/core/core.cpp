@@ -32,6 +32,7 @@
 #include "common/thread.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/crypto/ncz_decompressor.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/arm/debug.h"
@@ -1357,6 +1358,7 @@ void System::InitializeDebugger() {
 
 SystemResultStatus System::Load(Frontend::EmuWindow& emu_window, const std::string& filepath,
                                 Service::AM::FrontendAppletParameters& params) {
+    const Core::Crypto::SolidNczUnpackScope unpack_solid_ncz; // the game being launched may be one
     return impl->Load(*this, emu_window, filepath, params);
 }
 

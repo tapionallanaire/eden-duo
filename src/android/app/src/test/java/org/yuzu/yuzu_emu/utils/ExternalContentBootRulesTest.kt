@@ -294,6 +294,28 @@ class ExternalContentBootRulesTest {
     }
 
     @Test
+    fun onlyTheNewestKnownUpdateIsRequired() {
+        val old = ContentContainer("update-v393216", false, listOf(ContentRecord(titleA, 1, 393216)))
+        val new = ContentContainer("update-v458752", false, listOf(ContentRecord(titleA, 1, 458752)))
+        val dlc = ContentContainer("dlc", false, listOf(ContentRecord(titleA, 2)))
+        // A superseded update that went missing does not block boot; the newest and DLC still do.
+        assertEquals(listOf("update-v458752", "dlc"), ExternalContentBootRules.requiredContainers(
+            titleA, "base", listOf(old, new, dlc), emptyMap(), emptySet()
+        ) { true }.map { it.uri })
+        // The newest known update stays required even when it is the one that went missing.
+        assertEquals(listOf("update-v458752"), ExternalContentBootRules.requiredContainers(
+            titleA, "base", listOf(new), emptyMap(), emptySet()
+        ) { true }.map { it.uri })
+        // Disabling the newest makes the next one the update boot applies.
+        assertEquals(listOf("update-v393216", "dlc"), ExternalContentBootRules.requiredContainers(
+            titleA, "base", listOf(old, new, dlc), emptyMap(), setOf("Update@458752")
+        ) { true }.map { it.uri })
+        assertEquals(listOf("update-v458752"), ExternalContentBootRules.requiredContainers(
+            titleA, "base", listOf(old, new, dlc), emptyMap(), setOf("DLC")
+        ) { true }.map { it.uri })
+    }
+
+    @Test
     fun configuredDocumentRootsIncludeVolumeRootAndExcludeNeighboringDirectoryNames() {
         assertTrue(ExternalContentBootRules.inDocumentRoot("primary:Updates/a.nsp", "primary:"))
         assertTrue(ExternalContentBootRules.inDocumentRoot("primary:Updates/a.nsp", "primary:Updates"))
