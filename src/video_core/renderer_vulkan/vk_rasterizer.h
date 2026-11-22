@@ -114,6 +114,7 @@ public:
     bool Nx2ListSpeculationAllowed(DAddr page) override;
     void Nx2CheckSpeculatedList(DAddr addr, u32 size, u64 hash) override;
     void NoteGpuWrittenCommandListSynced(DAddr page) override;
+    void FlushGpuWrittenCommandListPage(DAddr page) override;
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;

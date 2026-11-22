@@ -72,7 +72,11 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
 }
 
 template <class P>
-BufferCache<P>::~BufferCache() = default;
+BufferCache<P>::~BufferCache() {
+    if (nx2_list_batch_staging) {
+        runtime.FreeDeferredStagingBuffer(*nx2_list_batch_staging);
+    }
+}
 
 template <class P>
 void BufferCache<P>::PurgeUnused() {
@@ -3134,6 +3138,97 @@ void BufferCache<P>::Nx2NoteListSynced(DAddr page) {
 }
 
 template <class P>
+bool BufferCache<P>::Nx2TryDownloadListPage(DAddr page) {
+    if constexpr (IS_OPENGL) {
+        return false;
+    } else {
+        constexpr auto page_size = Nx2ListPageBatch::PageSize;
+        static_assert(page_size == (1ULL << Tegra::Nx2WrittenPageBits));
+        static_assert(page_size == Core::DEVICE_PAGESIZE);
+        const auto index = page >> CACHING_PAGEBITS;
+        if (download_cpu_read_ranges || page % page_size != 0 || index >= page_table.size()) {
+            return false;
+        }
+        const BufferId id = page_table[index];
+        if (!id) {
+            return false;
+        }
+        Buffer& buffer = slot_buffers[id];
+        const DAddr buffer_end = buffer.CpuAddr() + buffer.SizeBytes();
+        if (page < buffer.CpuAddr() || page + page_size > buffer_end) {
+            return false;
+        }
+        // Only the demanded page retires dirty ranges. Check CPU ownership at consumption, not
+        // when prefetching: a deferred CPU write can already be in guest memory.
+        const auto consume = [&] {
+            if (!nx2_list_batch_staging || download_cpu_read_ranges) {
+                return false;
+            }
+            std::span<const u8> bytes;
+            {
+                std::scoped_lock lock{nx2_list_mutex};
+                const auto it = nx2_list_pages.find(page);
+                if (it == nx2_list_pages.end()) {
+                    return false;
+                }
+                bytes = nx2_list_batch.Page(nx2_list_batch_staging->mapped_span, page,
+                                            it->second.writes);
+            }
+            if (bytes.empty()) {
+                return false;
+            }
+            const auto cpu_written = PendingCpuWriteRanges();
+            ConsumeDownloadRanges(page, page_size, [&](DAddr begin, DAddr end) {
+                WriteDownloadedMemory(cpu_written, begin, bytes.data() + (begin - page), end - begin);
+            });
+            return true;
+        };
+        if (consume()) {
+            return true;
+        }
+        Nx2ListPageBatch batch{.first = page};
+        {
+            std::scoped_lock lock{nx2_list_mutex};
+            for (DAddr p = page; batch.count < batch.MaxPages && p + page_size <= buffer_end;
+                 p += page_size) {
+                const auto it = nx2_list_pages.find(p);
+                if (it == nx2_list_pages.end() || !it->second.draw_written ||
+                    it->second.synced_writes == it->second.writes ||
+                    !gpu_modified_ranges.Intersects(p, page_size)) {
+                    break;
+                }
+                batch.writes[batch.count++] = it->second.writes;
+            }
+        }
+        if (batch.count < 2) {
+            return false;
+        }
+        if (!nx2_list_batch_staging) {
+            nx2_list_batch_staging = runtime.DownloadStagingBuffer(batch.MaxPages * page_size, true);
+        }
+        const auto& staging = *nx2_list_batch_staging;
+        const BufferCopy copy{
+            .src_offset = page - buffer.CpuAddr(),
+            .dst_offset = staging.offset,
+            .size = batch.count * page_size,
+        };
+        buffer.MarkUsage(copy.src_offset, copy.size);
+        runtime.PreCopyBarrier();
+        runtime.CopyBuffer(staging.buffer, buffer, std::span{&copy, 1}, false);
+        runtime.PostDownloadBarrier();
+        nx2_list_batch = batch;
+        {
+            // GPU ownership is still intact for every page; CPU faults see it during this wait.
+            mutex.unlock();
+            SCOPE_EXIT { mutex.lock(); };
+            runtime.Finish();
+        }
+        runtime.InvalidateDownload(staging);
+        return consume(); // Includes the demanded page's generation recheck after the wait.
+    }
+}
+
+template <class P>
 void BufferCache<P>::Nx2NoteListHostWrite(DAddr device_addr, u64 size, std::span<const u8> data) {
     if constexpr (!IS_OPENGL) {
         if (size == 0 || !Tegra::g_nx2_has_command_list_pages.load(std::memory_order_relaxed)) {
@@ -3856,33 +3951,33 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
 }
 
 template <class P>
+template <typename Func>
+void BufferCache<P>::ConsumeDownloadRanges(DAddr addr, u64 size, Func&& consume) {
+    memory_tracker.ForEachDownloadRangeAndClear(addr, size, [&](DAddr start, u64 length) {
+        gpu_modified_ranges.ForEachInRange(start, length, consume);
+        ClearDownload(start, length);
+        gpu_modified_ranges.Subtract(start, length);
+    });
+}
+
+template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size,
                                           bool unlock_while_waiting) {
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
-    memory_tracker.ForEachDownloadRangeAndClear(
-        device_addr, size, [&](u64 device_addr_out, u64 range_size) {
-            const DAddr buffer_addr = buffer.CpuAddr();
-            const auto add_download = [&](DAddr start, DAddr end) {
-                const u64 new_offset = start - buffer_addr;
-                const u64 new_size = end - start;
-                copies.push_back(BufferCopy{
-                    .src_offset = new_offset,
-                    .dst_offset = total_size_bytes,
-                    .size = new_size,
-                });
-                // Align up to avoid cache conflicts
-                constexpr u64 align = 64ULL;
-                constexpr u64 mask = ~(align - 1ULL);
-                total_size_bytes += (new_size + align - 1) & mask;
-                largest_copy = (std::max)(largest_copy, new_size);
-            };
-
-            gpu_modified_ranges.ForEachInRange(device_addr_out, range_size, add_download);
-            ClearDownload(device_addr_out, range_size);
-            gpu_modified_ranges.Subtract(device_addr_out, range_size);
+    const DAddr buffer_addr = buffer.CpuAddr();
+    ConsumeDownloadRanges(device_addr, size, [&](DAddr start, DAddr end) {
+        const u64 new_size = end - start;
+        copies.push_back(BufferCopy{
+            .src_offset = start - buffer_addr,
+            .dst_offset = total_size_bytes,
+            .size = new_size,
         });
+        // Align up to avoid cache conflicts
+        total_size_bytes += Common::AlignUp(new_size, 64);
+        largest_copy = (std::max)(largest_copy, new_size);
+    });
     if (total_size_bytes == 0) {
         return;
     }
@@ -3950,6 +4045,8 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    // A slot can be reused for a different backing buffer without another list write.
+    nx2_list_batch.count = 0;
     memory_tracker.BumpGpuEpoch();
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);

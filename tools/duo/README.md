@@ -92,9 +92,14 @@ build with the same reviewed source worktrees.
 The catalog targets Peanuts `6d6c65838691a1226a18881b1a040603075ce89b`
 and Banana `6fe5ea0272db0c98c0cdce25cb0db1a490cf0ac1`: 72 Switch 1
 and 10 Switch 2 programs (99 registered builds). For the APK, use the
-Peanuts distribution with embedded capture (`feat/embedded-fe3h-autocapture`, `878530f69daf`) and the
-unchanged Banana branch `dist/duet-20261121` (`261437065079`). They retain
-the embedded hosts and exclude captured prewarm seeds. Use each engine's
+Peanuts distribution with embedded capture (`feat/embedded-fe3h-autocapture`, `878530f69daf`) and Banana
+`perf/duet-android-cache` (`0056ba53bd52617cfcbaad677d826bbc91a17744`, based on `dist/duet-20261121`).
+Pass that checkout as `-PduetBananaSourceDir=/path/to/BananaNative` when building Duet Plus.
+All ten Switch 2 Native Play hosts pack small Vulkan images into the fullest existing block with
+an aligned fit before requesting another 64 MiB. Dedicated images keep the driver's allocation.
+The hosts also reject stale Vulkan caches before reading the payload and skip diagnostic key
+formatting on ordinary mesh draws. No cache migration or new user setting is required.
+Both distributions retain the embedded hosts and exclude captured prewarm seeds. Use each engine's
 matching packer stage; the Hogwarts shader reference must pass its packaging check.
 
 For Three Houses 1.2.0, Compile & play captures the nine startup shaders from

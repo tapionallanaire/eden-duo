@@ -2383,6 +2383,16 @@ void RasterizerVulkan::NoteGpuWrittenCommandListSynced(DAddr page) {
     buffer_cache.Nx2NoteListSynced(page);
 }
 
+void RasterizerVulkan::FlushGpuWrittenCommandListPage(DAddr page) {
+    if (page == 0) {
+        return;
+    }
+    std::scoped_lock lock{buffer_cache.mutex};
+    if (!buffer_cache.Nx2TryDownloadListPage(page)) {
+        buffer_cache.DownloadMemory(page, 0x1000);
+    }
+}
+
 void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
     if (addr == 0 || size == 0 || !query_cache.SemiFlushRegion(addr, size)) {
         return;

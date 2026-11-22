@@ -568,7 +568,7 @@
     <string name="renderer_accuracy">GPU Mode</string>
     <string name="renderer_accuracy_description">Controls the GPU emulation mode. Most games render fine with Fast, but Accurate is still required for some. Particles tend to only render correctly with Accurate mode.</string>
     <string name="dma_accuracy">DMA Accuracy</string>
-    <string name="dma_accuracy_description">Controls the DMA precision accuracy. Safe precision can fix issues in some games, but it can also impact performance in some cases. If unsure, leave this on Default.</string>
+    <string name="dma_accuracy_description">Safe DMA reads can fix rendering issues but may slow games down. Unsafe also batches eligible GPU-written command pages in Switch 2 Vulkan emulation. Leave this on Default if unsure.</string>
     <string name="gpu_fence_behavior">GPU Fence Behavior</string>
     <string name="gpu_fence_behavior_description">Controls the GPU fence synchronization behavior. Immediate is the fastest option, but can introduce some issues. Balanced offers better compatibility and may fix issues in some games. Accurate further improves compatibility at the cost of some performance. Strict is the slowest option, but can fix issues that require stricter synchronization. Default follows the GPU Accuracy setting.</string>
     <string name="anisotropic_filtering">Anisotropic filtering</string>
