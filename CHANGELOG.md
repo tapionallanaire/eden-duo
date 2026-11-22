@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Emulated Switch 2 / Vulkan: added opt-in [Fritchii-style command page batching](https://github.com/Frizti/Fritchii/commit/b624390a7b). A single-page command list that already needs a download can fetch up to seven following dirty draw-written list pages from the same buffer during that wait. A later slow read can reuse a page only if its generation still matches; prefetching alone never writes guest memory. Games without these neighboring reads need not benefit.
+  - Android A/B: run `adb shell setprop debug.duet.nx2.cmdbatch 1` to enable, or use `0` for baseline (the default). After each change, close the game, run `adb shell am force-stop com.tapionallanaire.duetplus`, then relaunch Duet Plus and repeat the same scene. Compare list-flush waits and frame times; `EDEN_NX2_CMDPAGE_BATCH`, if set in the process environment, takes precedence.
 - Android: **Exit emulation** now asks the game to close before stopping it. This lets Kingdom Hearts II Final Mix write the latest save even when exiting directly from its save screen.
 - **Settings → Native Play storage** shows total and per-game usage. Purge one game or all prepared games without deleting ROMs or saves; data in use is skipped.
 - A launch waiting for shared saves now continues when the previous game or save operation releases them. You can cancel without stopping the other game.

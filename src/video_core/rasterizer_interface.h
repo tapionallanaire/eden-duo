@@ -143,6 +143,11 @@ public:
     /// Switch 2: the front flushed this command list page with the split drained.
     virtual void NoteGpuWrittenCommandListSynced([[maybe_unused]] DAddr page) {}
 
+    /// Split back: flush one mapped 4 KiB NX2 command page. Vulkan may prefetch neighbors.
+    virtual void FlushGpuWrittenCommandListPage(DAddr page) {
+        FlushRegion(page, 0x1000, VideoCommon::CacheType::BufferCache);
+    }
+
     /// Check if the the specified memory area requires flushing to CPU Memory.
     virtual bool MustFlushRegion(DAddr addr, u64 size,
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;

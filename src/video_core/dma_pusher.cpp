@@ -12,8 +12,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #include "common/cityhash.h"
 #include "common/scope_exit.h"
@@ -1386,8 +1390,26 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         // The download records into the Vulkan scheduler, which the split's back owns: a drained
         // back still submits from its idle hook, so the front must not flush these pages itself.
         VideoCommon::GpuSplit::Get().Run(
-            [memory = &memory_manager, first_page, size = end_page - first_page] {
-                memory->FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
+            [this, first_page, size = end_page - first_page] {
+                static const bool batch = [] {
+                    if (const char* value = std::getenv("EDEN_NX2_CMDPAGE_BATCH")) {
+                        return std::string_view{value} == "1";
+                    }
+#ifdef __ANDROID__
+                    char value[PROP_VALUE_MAX];
+                    return __system_property_get("debug.duet.nx2.cmdbatch", value) == 1 &&
+                           value[0] == '1';
+#else
+                    return false;
+#endif
+                }();
+                if (batch && size == 0x1000 && rasterizer != nullptr) {
+                    if (const auto device = memory_manager.GpuToCpuAddress(first_page)) {
+                        rasterizer->FlushGpuWrittenCommandListPage(*device);
+                        return;
+                    }
+                }
+                memory_manager.FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
             },
             VideoCommon::DrainSite::ListFlush);
     }

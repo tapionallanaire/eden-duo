@@ -39,6 +39,7 @@
 #include "common/spin_recursive_mutex.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/nx2_list_page_batch.h"
 #include "video_core/buffer_cache/nx2_list_ranges.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
@@ -535,6 +536,8 @@ public:
                                 u64* pending_tick = nullptr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
+    /// Split back, cache lock held once. False leaves the ordinary demanded download to the caller.
+    bool Nx2TryDownloadListPage(DAddr page);
     /// CPU and inline writes: they reach guest memory, so a synced page stays synced, but its copy
     /// no longer holds the page unless updated in place.
     void Nx2NoteListHostWrite(DAddr device_addr, u64 size, std::span<const u8> data = {});
@@ -838,6 +841,9 @@ private:
 
     void DownloadBufferMemory(Buffer& buffer_id);
 
+    template <typename Func>
+    void ConsumeDownloadRanges(DAddr addr, u64 size, Func&& consume);
+
     /// [unlock_while_waiting]: the caller holds `mutex` exactly once and keeps no state across
     /// the call, so it is released while the GPU runs the download.
     void DownloadBufferMemory(Buffer& buffer_id, DAddr device_addr, u64 size,
@@ -1109,6 +1115,8 @@ private:
 
     /// A command list page (Nx2CopyListPages): the GPU writes noted to it and the last copy.
     using Nx2Staging = decltype(std::declval<Runtime&>().DownloadStagingBuffer(size_t{}, true));
+    Nx2ListPageBatch nx2_list_batch;
+    std::optional<Nx2Staging> nx2_list_batch_staging; ///< One deferred slot, acquired on first batch
     struct Nx2ListPage {
         u64 writes{};      ///< GPU writes noted to the page
         u64 copy_writes{}; ///< `writes` when the copy was made: the copy is current while equal
