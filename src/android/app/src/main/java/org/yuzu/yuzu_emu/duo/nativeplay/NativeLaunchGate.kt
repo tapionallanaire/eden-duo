@@ -52,8 +52,19 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
     private val finishReturn = Runnable {
         if (phase == "native" && returned) {
             // Keep ExitWatch's detailed reason when available; never close over a known failure.
-            when (PreparedNativeGame.launchState(fragment.requireContext(), token)) {
+            val context = fragment.requireContext()
+            when (PreparedNativeGame.launchState(context, token)) {
                 "stopped", "host_exit" -> fragment.requireActivity().finish()
+                // The run's record still says running but its process is gone: Android closed the game
+                // in the background (low memory). Its prepared pack is intact, so go back to the library
+                // instead of emulating a game that plays natively.
+                "running" -> if (PreparedNativeGame.running(context)) {
+                    nativeFailed(fragment.getString(R.string.native_prepare_interrupted))
+                } else {
+                    android.widget.Toast.makeText(appContext, R.string.native_closed_in_background,
+                        android.widget.Toast.LENGTH_LONG).show()
+                    fragment.requireActivity().finish()
+                }
                 else -> nativeFailed(fragment.getString(R.string.native_prepare_interrupted))
             }
         }
