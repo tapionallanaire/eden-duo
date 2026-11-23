@@ -1,7 +1,7 @@
 # The Peanuts distribution this Duet Plus embeds (checked by src/android/settings.gradle.kts when
 # -PduetPeanutsSourceDir is given). Update both lines together when syncing Peanuts.
-# commit: the distribution source in tapionallanaire/peanuts-native (branch dist/duet-20261122)
+# commit: the local private distribution merged from Peanuts Native upstream 0.1.7
 # dmsh_vk_chain: DMSH_VK_CHAIN of that source (dm/gfx/nvn/dmsh_chain_vk.h); it changes with every
 #   translator or Vulkan chain change, so an older Peanuts source can never pass this check
-commit c678fd265217eefea43e24ed4811e161b617f894
-dmsh_vk_chain b1683fc3bd6d
+commit dbe1207d6f35efc87d1da93da134026ca9d61ece
+dmsh_vk_chain 6874df3070a8

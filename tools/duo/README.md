@@ -90,26 +90,27 @@ native code. Updating this catalog also updates Gradle's embedded profile select
 build with the same reviewed source worktrees.
 
 Use the same private source commits for the catalog, Gradle's embedded hosts and
-the pack-tool stages. Peanuts `dist/duet-20261122` at `c678fd26` (the `ff366f2b` translator distribution, the
-`dist/odin-sky108-20261122` Sky profiles, and prepared games kept across app updates, side panel colours from resources) retains Sky 1st Chapter 1.0.4 and adds
-the exact 1.0.8 build from the Odin installation; each build requires its own
-shader set. The cancelled intermediate 1.0.7 generation can be retired without
-removing published packs, inputs or saves. The catalog contains 72 Switch 1 and
-10 Switch 2 programs (100 registered builds).
+the pack-tool stages. The Peanuts 0.1.7 merge retains Sky 1st Chapter 1.0.4 and the
+Odin 1.0.8 build, and adds upstream's exact 1.0.7 build. Each version checks its
+own shader keys. Yoshi's Crafted World, Digimon Story Time Stranger,
+Star Ocean The Second Story R, Tetris Effect: Connected and New Pokémon Snap are
+new Switch 1 entries. The catalog contains 77 Switch 1 and 10 Switch 2 programs
+(105 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
 
 From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach c678fd265217eefea43e24ed4811e161b617f894 &&
+git -C "$P" switch --detach dbe1207d6f35efc87d1da93da134026ca9d61ece &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
 
-The Peanuts commit is on the owner's private distribution branch `dist/duet-20261122`, the
-Banana commit on `dist/duet-20261121` (`0056ba53` plus the same launch fix and side panel colours). Pass `-PduetPeanutsSourceDir="$P"` and `-PduetBananaSourceDir="$B"`
-using absolute paths. Generate each pack-tool stage from its corresponding
-checkout: a matching catalog alone does not authenticate the staged tools.
+The Peanuts commit merges upstream `719d4f7b` into private distribution `c678fd26`.
+Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
+`-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
+from its corresponding checkout: a matching catalog alone does not authenticate
+the staged tools.
 
 All ten Switch 2 Native Play hosts pack small Vulkan images into the fullest existing block with
 an aligned fit before requesting another 64 MiB. Dedicated images keep the driver's allocation.
@@ -124,12 +125,12 @@ checkout, the pinned commit; pass `-PduetPeanutsSnapshot=true` for a sanitized r
 (another commit, same contents), which is then checked by its chain version only. Update both
 lines of `peanuts.rev` with the README pin above whenever Peanuts is synchronized.
 
-The Peanuts translator fix keeps the handle word of a bindless texture handle that the
-guest spilled to local memory and reloads (Hogwarts Legacy dropped its Niagara particle
-writes: spell effects stuck as a bright disc with exposure flicker). It changes
-`DMSH_CHAIN` to `4c58e2225984` and `DMSH_VK_CHAIN` to `b1683fc3bd6d` (ABI `cb5a89b39291`
-unchanged): packs carry `shaders/v-<DMSH_VK_CHAIN>/`, so every natively prepared game must
-rebuild its shader library once (Prepare again) after this update.
+The combined Peanuts translator retains the Hogwarts Legacy bindless-local
+handle fix and private Vulkan fixes. New packs use `DMSH_CHAIN` `10420969bdb3`
+and `DMSH_VK_CHAIN` `6874df3070a8`. The runtime still reads compatible prepared
+libraries with ABI `cb5a89b39291`; Prepare checks exact-build shader coverage
+before reuse. The rebuilt Hogwarts 1.0.5 reference has 65,045 keys and 83,431
+Vulkan 1.3 validated modules, with the same two reviewed omissions.
 
 For Three Houses 1.2.0, Compile & play captures the nine startup shaders from
 the selected game on the device. The capture process uses a disposable save;
