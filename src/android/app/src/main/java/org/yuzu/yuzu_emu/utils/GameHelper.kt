@@ -365,6 +365,24 @@ object GameHelper {
         }
     }
 
+    /**
+     * Eden Duo: the library's URI for the same document as [uri], or null. A front-end can open a
+     * game through its own folder grant (tree "Roms" where the library has "Roms/switch"): same
+     * document ID, different URI string. Native play keys its prepared pack on the library's
+     * string, and only the library's tree is guaranteed readable by this app.
+     */
+    fun libraryUriFor(uri: Uri): Uri? {
+        if (uri.scheme != "content") return null
+        val id = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
+        return PreferenceManager.getDefaultSharedPreferences(YuzuApplication.appContext)
+            .getStringSet(KEY_GAMES, emptySet()).orEmpty()
+            .mapNotNull { runCatching { Json.decodeFromString<Game>(it).path.toUri() }.getOrNull() }
+            .firstOrNull {
+                it.authority == uri.authority &&
+                    runCatching { DocumentsContract.getDocumentId(it) }.getOrNull() == id
+            }
+    }
+
     fun getGame(
         uri: Uri,
         addedToLibrary: Boolean,
