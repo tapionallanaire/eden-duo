@@ -374,7 +374,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
     private fun resolveIntentGameAsync(uri: Uri) {
         intentGameResolveJob = lifecycleScope.launch {
             val resolvedGame = withContext(Dispatchers.IO) {
-                runCatching { GameHelper.getGame(uri, false) }
+                runCatching { GameHelper.getGame(GameHelper.libraryUriFor(uri) ?: uri, false) }
                     .onFailure {
                         Log.error("[EmulationFragment] Failed to resolve intent game: ${it.message}")
                     }
