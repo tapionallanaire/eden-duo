@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Embedded Peanuts Native 0.1.7 adds Sky 1st Chapter 1.0.7 alongside 1.0.4 and 1.0.8, and adds five Switch 1 Native Play titles. Private code profiles, renderer fixes and compatible prepared shader libraries are retained. The Switch 2 Banana engine is unchanged.
 - Android: a game opened from another app (for example Calamansi) uses the library's entry for the same file. A prepared native game no longer asks for preparation again when another app passes the file through a different folder permission.
 - Emulated Switch 2 / Vulkan: added opt-in [Fritchii-style command page batching](https://github.com/Frizti/Fritchii/commit/b624390a7b). A single-page command list that already needs a download can fetch up to seven following dirty draw-written list pages from the same buffer during that wait. A later slow read can reuse a page only if its generation still matches; prefetching alone never writes guest memory. Games without these neighboring reads need not benefit.
   - On Android, choose **Graphics → Advanced → DMA Accuracy → Unsafe** to opt in. Default leaves batching off. For an isolated A/B without changing DMA accuracy, use `adb shell setprop debug.duet.nx2.cmdbatch 1` or `0`, force-stop Duet Plus, and replay the same scene. Clear the property to return to the menu setting. `EDEN_NX2_CMDPAGE_BATCH` takes precedence over both.

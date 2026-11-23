@@ -131,5 +131,22 @@ class NativeGameCatalogTest {
         assertTrue(catalog.versions("0000000000000000").isEmpty())
     }
 
+    @Test
+    fun skyFirst107MatchesItsOwnMainWithoutReplacingThePrivateBuilds() {
+        val id = "01002C9022770000"
+        val build = NativeGameBuild(
+            id,
+            393216,
+            mapOf(
+                "main" to nsoId("8963a531fa7f27a52323081ace0f2f6e"),
+                "subsdk0" to nsoId("fc537f0b21c880e89d6f247d22a150ca"),
+                "sdk" to nsoId("148394139d9d26ca8afd5c9ba5d30601")
+            )
+        )
+        assertEquals(listOf("1.0.4", "1.0.7", "1.0.8"), catalog.versions(id).map { it.displayVersion })
+        assertEquals("1.0.7", catalog.match(build)?.displayVersion)
+        assertNull(catalog.match(build.copy(version = 458752)))
+    }
+
     private fun nsoId(prefix: String) = prefix.padEnd(64, '0')
 }
