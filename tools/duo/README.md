@@ -101,12 +101,14 @@ From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach dbe1207d6f35efc87d1da93da134026ca9d61ece &&
+git -C "$P" switch --detach 06f0553f03f3fc3f4fab94e72275145c07bbd2a6 &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
 
-The Peanuts commit merges upstream `719d4f7b` into private distribution `c678fd26`.
+The Peanuts commit merges private main into distribution `4b75b7f0` (which carries the
+upstream `719d4f7b` merge `dbe1207d`): the FF Resonance integer storage-image fix and the
+Hogwarts Legacy phone pacing rework. The shader chain is unchanged.
 Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
 `-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
 from its corresponding checkout: a matching catalog alone does not authenticate
