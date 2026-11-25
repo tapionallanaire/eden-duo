@@ -61,6 +61,8 @@ def embedded_game(text, engine):
     if f'new File(storage(c), "native/{engine}")' not in text:
         raise ValueError(f'Not the {engine} embedded host')
     api = Path(__file__).with_name('StorageApi.java.inc').read_text(encoding='utf-8')
+    if 'static <T> T queryLocked(Context c, Callable<T> action)' not in text:
+        api = api.replace('queryLocked(c, ', 'locked(c, ')   # a host without the bounded inspection lock (Banana before it takes it) waits as before
     init = 'EmbeddedRuntime.initialize(c);' if engine == 'banana' else ''
     api = api.replace('// ENGINE_INIT', init).replace('ENGINE_NAME', engine)
     api = api.replace('OTHER_ENGINE', 'peanuts' if engine == 'banana' else 'banana')

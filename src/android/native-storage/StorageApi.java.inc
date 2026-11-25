@@ -28,7 +28,8 @@
             throw new IOException("Invalid native storage request.");
         // ENGINE_INIT
         if (Prefs.open(c, "embedded_prepare").getString("storage", null) == null) return "[]";
-        return locked(c, () -> {
+        // Busy after a while (the host's PrepareControl.QUERY_WAIT_MS), never a storage list that waits without end behind another holder
+        return queryLocked(c, () -> {
             Map<String, java.util.Set<String>> owners = storageOwners(c.getFilesDir().getCanonicalFile(), "ENGINE_NAME");
             java.util.Set<String> sources = new java.util.LinkedHashSet<>();
             for (java.util.Set<String> paths : owners.values()) sources.addAll(paths);
