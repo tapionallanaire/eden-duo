@@ -6,6 +6,13 @@
     <color name="nx_panel_tab">#FF0080</color>
     <color name="nx_panel_on_tab">#FFFFFF</color>
     <color name="nx_panel_focus">#00E6E6</color>
+    <!-- The performance overlay's pill (Peanuts PillBg, nx_pill_*): the rim, glow and separator in the
+         same magenta, the top line in the border gradient's cyan, the fill Duet's black surfaces (the
+         pill sets its own alphas). Its yellow and red for slow frames and heat stay as they are. -->
+    <color name="nx_pill_rim">#FF0080</color>
+    <color name="nx_pill_sheen">#60D1F6</color>
+    <color name="nx_pill_fill_top">#1A1A1A</color>
+    <color name="nx_pill_fill_body">#0D0D0D</color>
     <!-- Banana (Switch 2) host resources are embedded with the banana_ prefix -->
     <color name="banana_nx_panel_tab">#FF0080</color>
     <color name="banana_nx_panel_on_tab">#FFFFFF</color>
