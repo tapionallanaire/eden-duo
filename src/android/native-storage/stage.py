@@ -61,6 +61,8 @@ def embedded_game(text, engine):
     if f'new File(storage(c), "native/{engine}")' not in text:
         raise ValueError(f'Not the {engine} embedded host')
     api = Path(__file__).with_name('StorageApi.java.inc').read_text(encoding='utf-8')
+    if 'static <T> T queryLocked(Context c, Callable<T> action)' not in text:
+        api = api.replace('queryLocked(c, ', 'locked(c, ')   # a host without the bounded inspection lock (Banana before it takes it) waits as before
     init = 'EmbeddedRuntime.initialize(c);' if engine == 'banana' else ''
     api = api.replace('// ENGINE_INIT', init).replace('ENGINE_NAME', engine)
     api = api.replace('OTHER_ENGINE', 'peanuts' if engine == 'banana' else 'banana')
@@ -68,17 +70,18 @@ def embedded_game(text, engine):
 
 
 def game_activity(text):
-    # The embedded player owns a separate task, not a reusable launcher. Keep live games
-    # resumable, but never reuse a dead process's one-shot save handoff from Recents.
+    # A player in Duet's task (Switch 1) leaves Duet's screen under it; one that owns a separate
+    # task (Switch 2) removes that task. Keep live games resumable, but never reuse a dead
+    # process's one-shot save handoff from Recents.
+    end = 'if (isTaskRoot()) finishAndRemoveTask(); else finish();'
     start = '        ExitWatch.game(this, id,'
-    text = once(text, start, '''        if (!hostRunning && (getIntent().getFlags() & android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
-            finishAndRemoveTask();
+    text = once(text, start, f'''        if (!hostRunning && (getIntent().getFlags() & android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {{
+            {end}
             return;
-        }
+        }}
 ''' + start)
-    text = once(text, 'ExitWatch.startFailed(why);\n            finish();',
-                'ExitWatch.startFailed(why);\n            finishAndRemoveTask();')
-    return once(text, 'backToFrontend();\n        finish();', 'backToFrontend();\n        finishAndRemoveTask();')
+    text = once(text, 'ExitWatch.startFailed(why);\n            finish();', f'ExitWatch.startFailed(why);\n            {end}')
+    return once(text, 'backToFrontend();\n        finish();', f'backToFrontend();\n        {end}')
 
 
 def stage(engine, roots, output):

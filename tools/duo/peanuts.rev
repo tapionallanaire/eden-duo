@@ -1,7 +1,7 @@
 # The Peanuts distribution this Duet Plus embeds (checked by src/android/settings.gradle.kts when
 # -PduetPeanutsSourceDir is given). Update both lines together when syncing Peanuts.
-# commit: the private distribution (upstream 0.1.7 merge plus private main, 2026-11-24)
+# commit: the private distribution (upstream 0.1.8 merge plus Batman: Arkham Knight on Android, 2026-11-25; Native play in Duet's task, stats page)
 # dmsh_vk_chain: DMSH_VK_CHAIN of that source (dm/gfx/nvn/dmsh_chain_vk.h); it changes with every
 #   translator or Vulkan chain change, so an older Peanuts source can never pass this check
-commit 45ae2c5bc5628d169d58bd80a6d56183bae47ac0
-dmsh_vk_chain 6874df3070a8
+commit af2fe818be3f6ed2d9434536fbf82e4d6fb20d5d
+dmsh_vk_chain 0826c32ac311

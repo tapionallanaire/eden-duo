@@ -90,25 +90,29 @@ native code. Updating this catalog also updates Gradle's embedded profile select
 build with the same reviewed source worktrees.
 
 Use the same private source commits for the catalog, Gradle's embedded hosts and
-the pack-tool stages. The Peanuts 0.1.7 merge retains Sky 1st Chapter 1.0.4 and the
-Odin 1.0.8 build, and adds upstream's exact 1.0.7 build. Each version checks its
-own shader keys. Yoshi's Crafted World, Digimon Story Time Stranger,
-Star Ocean The Second Story R, Tetris Effect: Connected and New Pokémon Snap are
-new Switch 1 entries. The catalog contains 77 Switch 1 and 10 Switch 2 programs
-(105 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
+the pack-tool stages. The Peanuts 0.1.8 merge (distribution `dist/duet-20261125`) adds
+upstream's 0.1.8 games (among them LEGO City Undercover, SPY×ANYA Operation Memories,
+Captain Toad: Treasure Tracker, Minecraft Dungeons II, Super Mario RPG and Viewfinder) and
+this fork's Batman: Arkham Knight 1.0.5. Sky 1st Chapter keeps its 1.0.4, 1.0.7 and Odin 1.0.8
+builds, each with its own shader keys. The catalog contains 93 Switch 1 and 10 Switch 2 programs
+(121 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
 
 From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach 45ae2c5bc5628d169d58bd80a6d56183bae47ac0 &&
+git -C "$P" switch --detach af2fe818be3f6ed2d9434536fbf82e4d6fb20d5d &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
 
-The Peanuts commit merges private main into distribution `4b75b7f0` (which carries the
-upstream `719d4f7b` merge `dbe1207d`): the FF Resonance integer storage-image fix and the
-Hogwarts Legacy phone pacing rework. The shader chain is unchanged.
+The Peanuts commit merges upstream 0.1.8 (`4ae5c269`) into distribution `45ae2c5b`, restores the
+0.1.6 content an earlier merge had dropped (aspect rows and Display › Fill, the BC alias queue
+fix), and adds Batman: Arkham Knight on Android with its Turnip road fixes. The Vulkan chain moves
+to `0826c32ac311`; libraries prepared by `6874df3070a8` upgrade in place (TES libraries excepted).
+Its embedded player opens in Duet's task (no task of its own), and with a real second screen it
+shows the game's stats page there unless the game's No Companion is Off or App
+(`duet_second_screen`).
 Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
 `-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
 from its corresponding checkout: a matching catalog alone does not authenticate
@@ -129,10 +133,10 @@ lines of `peanuts.rev` with the README pin above whenever Peanuts is synchronize
 
 The combined Peanuts translator retains the Hogwarts Legacy bindless-local
 handle fix and private Vulkan fixes. New packs use `DMSH_CHAIN` `10420969bdb3`
-and `DMSH_VK_CHAIN` `6874df3070a8`. The runtime still reads compatible prepared
-libraries with ABI `cb5a89b39291`; Prepare checks exact-build shader coverage
-before reuse. The rebuilt Hogwarts 1.0.5 reference has 65,045 keys and 83,431
-Vulkan 1.3 validated modules, with the same two reviewed omissions.
+and `DMSH_VK_CHAIN` `0826c32ac311` (ABI `288a138fa7d1`). Prepare checks exact-build shader
+coverage before reuse. The rebuilt Hogwarts 1.0.5 reference has 65,045 keys and 83,431
+Vulkan 1.3 validated modules, with the same two reviewed omissions; its entries match the
+`6874df3070a8` library, so prepared Hogwarts libraries translate only those two.
 
 For Three Houses 1.2.0, Compile & play captures the nine startup shaders from
 the selected game on the device. The capture process uses a disposable save;
