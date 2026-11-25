@@ -101,7 +101,7 @@ From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach cd6d7a56a79f7991f351bae9af3952646b807cfd &&
+git -C "$P" switch --detach 1970621fab5aaa85680fc733fb9ade3541559c79 &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
