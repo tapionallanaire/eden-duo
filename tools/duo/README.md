@@ -101,7 +101,7 @@ From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach 35185c9a7bb55b44129ca4ce54e5286f2b791a4c &&
+git -C "$P" switch --detach d05c3049f2cde51d1700ea934a7d46f31872dd55 &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
@@ -110,6 +110,9 @@ The Peanuts commit merges upstream 0.1.8 (`4ae5c269`) into distribution `45ae2c5
 0.1.6 content an earlier merge had dropped (aspect rows and Display › Fill, the BC alias queue
 fix), and adds Batman: Arkham Knight on Android with its Turnip road fixes. The Vulkan chain moves
 to `0826c32ac311`; libraries prepared by `6874df3070a8` upgrade in place (TES libraries excepted).
+Its embedded player opens in Duet's task (no task of its own), and with a real second screen it
+shows the game's stats page there unless the game's No Companion is Off or App
+(`duet_second_screen`).
 Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
 `-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
 from its corresponding checkout: a matching catalog alone does not authenticate

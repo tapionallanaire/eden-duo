@@ -22,8 +22,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.yuzu.yuzu_emu.NativeLibrary
 import org.yuzu.yuzu_emu.R
+import org.yuzu.yuzu_emu.duo.DuoCapability
 import org.yuzu.yuzu_emu.duo.sync.DuetSaveSync
 import org.yuzu.yuzu_emu.model.Game
+import org.yuzu.yuzu_emu.utils.NoCompanion
 import org.yuzu.yuzu_emu.utils.ShaderRuns
 
 /** One fragment-owned decision and original continuation, including cold external launches. */
@@ -276,6 +278,10 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                 }
                 // Resolve on the UI thread, without a suspension inside the config transaction.
                 val resolved = NativeLaunchDriver.resolve(selected, custom)
+                // The second screen is the game's (its stats page there) unless No Companion leaves it to Android or an app.
+                val secondScreen = DuoCapability.isAvailable(appContext) &&
+                    !NoCompanion.hidesWindow(selected.programId.takeIf { custom })
+                var engine = NativeEngine.PEANUTS
                 val intent = withContext(Dispatchers.IO) {
                     val match = NativeGameSupport.requireSelectedBuild(appContext, selected.path, programId, contentKey)
                     NativeSaveSession.reserveNative(appContext, selected.path, contentKey,
@@ -285,7 +291,8 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                         val installed = PreparedNativeGame.prepareDriver(appContext,
                             NativeLaunchDriver.validate(resolved), match.profile.engine)
                         NativePlayPreferences.rememberProfile(appContext, selected.programIdHex, match.profile)
-                        prepared.putExtra("duet_gpu_driver", installed)
+                        engine = match.profile.engine
+                        prepared.putExtra("duet_gpu_driver", installed).putExtra("duet_second_screen", secondScreen)
                     }
                 }
                 DuetSaveSync.get(appContext).beforeLaunch(fragment.requireActivity(), DuetSaveSync.SWITCH,
@@ -297,8 +304,8 @@ internal class NativeLaunchGate(private val fragment: Fragment, private val emul
                         DuetSaveSync.get(appContext).afterExit(DuetSaveSync.SWITCH)
                         returned = false
                         phase = "native"
-                        // Explicit NEW_TASK breaks result-to task coupling before native crash cleanup.
-                        native.launch(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        // Native play opens in this task, over this screen; Stop returns here. Switch 2 keeps its own task.
+                        native.launch(if (engine == NativeEngine.BANANA) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) else intent)
                     } catch (e: NativeSaveSession.BusyException) { fail(e.message.orEmpty())
                     } catch (e: Exception) { nativeFailed(e.message ?: e.javaClass.simpleName) }
                 }
