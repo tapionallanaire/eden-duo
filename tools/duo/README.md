@@ -95,13 +95,13 @@ upstream's 0.1.8 games (among them LEGO City Undercover, SPY×ANYA Operation Mem
 Captain Toad: Treasure Tracker, Minecraft Dungeons II, Super Mario RPG and Viewfinder) and
 this fork's Batman: Arkham Knight 1.0.5. Sky 1st Chapter keeps its 1.0.4, 1.0.7 and Odin 1.0.8
 builds, each with its own shader keys. The catalog contains 93 Switch 1 and 10 Switch 2 programs
-(121 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
+(122 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
 
 From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach 79c98ad8d47ca895c088598103f7f2f0981d3181 &&
+git -C "$P" switch --detach 4e13144bdad91c746458e6af69ccded2acf0993d &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
@@ -113,6 +113,12 @@ to `0826c32ac311`; libraries prepared by `6874df3070a8` upgrade in place (TES li
 Its embedded player opens in Duet's task (no task of its own), and with a real second screen it
 shows the game's stats page there unless the game's No Companion is Off or App
 (`duet_second_screen`).
+Distribution `dist/duet-20261126` (`4e13144b`) is private main after the 2026-11-26 merges on top of
+`79c98ad8`: Fantasy Life i 2.2.0 (v917504, five cuts carried over, one shader table for 1.5.0 and 2.2.0;
+1.5.0 stays registered), the Xenoblade Chronicles 3 game language from the NACP, Xenoblade Chronicles DE
+packed raw views with its core_preempt lock and 30 fps limit, and the descriptor-pool test port. The Vulkan
+chain is unchanged (`0826c32ac311`): prepared libraries are kept; Fantasy Life i 1.5.0 packs rewrite their
+code only, Batman: Arkham Knight neither code nor shaders.
 Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
 `-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
 from its corresponding checkout: a matching catalog alone does not authenticate

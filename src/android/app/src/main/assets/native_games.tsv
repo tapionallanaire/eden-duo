@@ -71,6 +71,7 @@ peanuts	01007300020FA000	65536	1.0.1	ASTRAL CHAIN	main=4b159f0f7a360669738390ee8
 peanuts	0100739018020000	1114112	1.17	LEGO 2K Drive	main=b75e7d3db78d69c139d53ad109af34e8	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
 peanuts	010075101EF84000	0	1.0.0	Stray	main=0dbe0a904fd985953f07063934ebe6a8	subsdk0=540b08ec046f39a50014ed6cd9117eb9	sdk=38873c89d24e5d11020e8d0aafe51cab
 peanuts	0100755017EE0000	524288	1.5.0	FANTASY LIFE i: The Girl Who Steals Time	main=74bcac96835db9aeeb29bce78be410ea	subsdk0=8dceb03f9f04aac7a5d35a4ad83d4601	sdk=f9ed9d26b4ad414362affee1658db28a
+peanuts	0100755017EE0000	917504	2.2.0	FANTASY LIFE i: The Girl Who Steals Time	main=6e4502b822cb120486285ce14f16e490	subsdk0=8dceb03f9f04aac7a5d35a4ad83d4601	sdk=f9ed9d26b4ad414362affee1658db28a
 peanuts	01007A2027548000	327680	1.0.3	Trails in the Sky 2nd Chapter	main=5ea394e096752ee3d04debfcea6bf911	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
 peanuts	01007B102141A000	131072	1.0.6	The Legend of Heroes: Trails beyond the Horizon	main=11d7f970861dfa66722e6e5c4725f4f7	subsdk0=a870a783a09f57256d3630b73485398e	sdk=c668ae02ea221e429677aa61d3dab7c6
 peanuts	01007EF00011E000	786432	1.6.0	The Legend of Zelda: Breath of the Wild	main=8e9978d50bdd20b4c8395a106c27ffde	subsdk0=93ff8252d975adf07230cb86c83301c5	sdk=fcf93a41b08c5193a1410d262602dc62
