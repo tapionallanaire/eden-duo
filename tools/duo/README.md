@@ -94,14 +94,14 @@ the pack-tool stages. The Peanuts 0.1.8 merge (distribution `dist/duet-20261125`
 upstream's 0.1.8 games (among them LEGO City Undercover, SPY×ANYA Operation Memories,
 Captain Toad: Treasure Tracker, Minecraft Dungeons II, Super Mario RPG and Viewfinder) and
 this fork's Batman: Arkham Knight 1.0.5. Sky 1st Chapter keeps its 1.0.4, 1.0.7 and Odin 1.0.8
-builds, each with its own shader keys. The catalog contains 93 Switch 1 and 10 Switch 2 programs
-(121 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
+builds, each with its own shader keys. The catalog contains 100 Switch 1 and 10 Switch 2 programs
+(134 registered builds). Hogwarts Legacy still requires the supported 1.0.5 update.
 
 From this repository's root, with `P` and `B` set to clean, separately owned
 checkouts of `tapionallanaire/peanuts-native` and `tapionallanaire/banana-native`:
 
 ```sh
-git -C "$P" switch --detach 79c98ad8d47ca895c088598103f7f2f0981d3181 &&
+git -C "$P" switch --detach 66b66852457b91853bd788537ee1339a59364e66 &&
 git -C "$B" switch --detach cff4c2227c44475e5d4a4bf9460bff4f6ec3b108 &&
 python tools/duo/native-support-catalog.py --peanuts "$P" --banana "$B"
 ```
@@ -113,6 +113,17 @@ to `0826c32ac311`; libraries prepared by `6874df3070a8` upgrade in place (TES li
 Its embedded player opens in Duet's task (no task of its own), and with a real second screen it
 shows the game's stats page there unless the game's No Companion is Off or App
 (`duet_second_screen`).
+Distribution `dist/duet-20261127` (`66b66852`) merges upstream Peanuts Native 0.1.9 (`21d82420`) into
+`4e13144b` (private main: Fantasy Life i 2.2.0 next to 1.5.0, the Xenoblade fixes). The catalog gains
+FINAL FANTASY (Pixel Remaster) 1.2.0, Sea of Stars (1.0.45861, 2.0.59001, 3.0.60151), One Piece Pirate
+Warriors 4 (1.0.0, 1.8.7), The Hundred Line 1.2.1, Dragon Quest VII Reimagined (1.0.0, 1.1.0, 1.2.0),
+Battle Brothers 1.14.0, Final Fantasy XII The Zodiac Age 1.1.0 and Fantasy Life i 2.2.0; nothing is
+removed. Upstream dropped its Switch 2 profiles: Duet keeps taking Switch 2 games from Banana. Daybreak II
+left upstream's release list and stays registered through its readiness row. Upstream's game menu now owns
+the left edge, so the in-game panel opens from the right. The translator front half changed: the Vulkan
+chain moves to `3358d7fbd4fe` with no in-place hop, so every prepared library is made again on its next
+Prepare (Hogwarts Legacy translates two shaders through its delta manifest); Fantasy Life i and Sea of
+Stars also rewrite their code.
 Banana is unchanged on `dist/duet-20261121`. Pass `-PduetPeanutsSourceDir="$P"` and
 `-PduetBananaSourceDir="$B"` using absolute paths. Generate each pack-tool stage
 from its corresponding checkout: a matching catalog alone does not authenticate
@@ -132,11 +143,11 @@ checkout, the pinned commit; pass `-PduetPeanutsSnapshot=true` for a sanitized r
 lines of `peanuts.rev` with the README pin above whenever Peanuts is synchronized.
 
 The combined Peanuts translator retains the Hogwarts Legacy bindless-local
-handle fix and private Vulkan fixes. New packs use `DMSH_CHAIN` `10420969bdb3`
-and `DMSH_VK_CHAIN` `0826c32ac311` (ABI `288a138fa7d1`). Prepare checks exact-build shader
+handle fix and private Vulkan fixes. New packs use `DMSH_CHAIN` `84ffd3b6f30c`
+and `DMSH_VK_CHAIN` `3358d7fbd4fe` (ABI `288a138fa7d1`). Prepare checks exact-build shader
 coverage before reuse. The rebuilt Hogwarts 1.0.5 reference has 65,045 keys and 83,431
 Vulkan 1.3 validated modules, with the same two reviewed omissions; its entries match the
-`6874df3070a8` library, so prepared Hogwarts libraries translate only those two.
+`0826c32ac311` library, so prepared Hogwarts libraries translate only those two.
 
 For Three Houses 1.2.0, Compile & play captures the nine startup shaders from
 the selected game on the device. The capture process uses a disposable save;
