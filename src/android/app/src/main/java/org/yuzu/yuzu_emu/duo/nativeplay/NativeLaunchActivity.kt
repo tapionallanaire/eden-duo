@@ -202,8 +202,11 @@ class NativeLaunchActivity : AppCompatActivity() {
     private fun finishChoice(choice: String) {
         if (isFinishing || childStarted) return
         setActionsEnabled(false)
-        NativePlayPreferences.setMode(this, game.programIdHex,
-            if (choice == NATIVE) NativePlayPreferences.Mode.NATIVE else NativePlayPreferences.Mode.EMULATED)
+        // Play emulated is for this launch only: saving it skipped this screen from then on, so a
+        // game never offered native play again. Native settings still sets "always emulated".
+        if (choice == NATIVE) {
+            NativePlayPreferences.setMode(this, game.programIdHex, NativePlayPreferences.Mode.NATIVE)
+        }
         setResult(RESULT_OK, Intent().putExtra(CHOICE, choice)
             .putExtra(NativePreparationActivity.SOURCE_PATH, game.path)
             .putExtra(CONTENT_KEY, contentKey).putExtra(PROGRAM_ID, programId))
