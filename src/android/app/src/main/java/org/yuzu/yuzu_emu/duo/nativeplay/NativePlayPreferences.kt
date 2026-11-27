@@ -8,9 +8,19 @@ import android.content.Context
 internal object NativePlayPreferences {
     enum class Mode { ASK, EMULATED, NATIVE }
 
+    private const val EMULATED_RESET = "emulated_choice_reset"
+
     fun mode(context: Context, titleId: String): Mode = runCatching {
-        Mode.valueOf(context.getSharedPreferences("native_play", Context.MODE_PRIVATE)
-            .getString(titleId.uppercase(), Mode.ASK.name)!!)
+        val prefs = context.getSharedPreferences("native_play", Context.MODE_PRIVATE)
+        // Once: before 1.4.13 one "Play emulated" tap was saved as EMULATED and hid the choice for
+        // good. Those can't be told from a Native settings choice, so every EMULATED goes back to Ask.
+        if (!prefs.getBoolean(EMULATED_RESET, false)) {
+            prefs.edit().apply {
+                prefs.all.filter { it.value == Mode.EMULATED.name }.keys.forEach(::remove)
+                putBoolean(EMULATED_RESET, true)
+            }.commit()
+        }
+        Mode.valueOf(prefs.getString(titleId.uppercase(), Mode.ASK.name)!!)
     }.getOrDefault(Mode.ASK)
 
     fun setMode(context: Context, titleId: String, mode: Mode) {
